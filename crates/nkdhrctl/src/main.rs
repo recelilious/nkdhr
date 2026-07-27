@@ -144,10 +144,18 @@ fn run(command: Command) -> zbus::Result<()> {
             } else {
                 print_optional("sink", Option::<String>::from(status.sink_name));
                 print_optional(
-                    "volume",
-                    Option::<u8>::from(status.volume_percent).map(|percent| format!("{percent}%")),
+                    "sink-volume",
+                    Option::<u8>::from(status.sink_volume_percent)
+                        .map(|percent| format!("{percent}%")),
                 );
-                println!("muted: {}", status.muted);
+                println!("sink-muted: {}", status.sink_muted);
+                print_optional("source", Option::<String>::from(status.source_name));
+                print_optional(
+                    "source-volume",
+                    Option::<u8>::from(status.source_volume_percent)
+                        .map(|percent| format!("{percent}%")),
+                );
+                println!("source-muted: {}", status.source_muted);
             }
         }
     }

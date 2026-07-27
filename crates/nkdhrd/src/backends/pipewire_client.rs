@@ -3,8 +3,8 @@
 //! PipeWire's client API is entirely event-driven and its proxy/listener
 //! types are `Rc`-based, not `Send` — they must all stay confined to one
 //! thread running PipeWire's own main loop. This module spawns that
-//! thread and keeps a small, plain-data cache of the default sink's
-//! name/volume/mute that [`crate::modules::audio::Audio`] reads
+//! thread and keeps a small, plain-data cache of the default sink's and
+//! source's name/volume/mute that [`crate::modules::audio::Audio`] reads
 //! synchronously from any thread.
 //!
 //! Device switching while `nkdhrd` is running (e.g. plugging in a USB
@@ -28,15 +28,18 @@ use pipewire::spa::pod::deserialize::PodDeserializer;
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 
-/// The default sink's last known volume/mute, as read by
+/// The default sink's and source's last known volume/mute, as read by
 /// [`crate::modules::audio::Audio::get_status`]. Every field is `None`
 /// until the worker thread has resolved and read the current default
-/// sink at least once, or if there is no sink at all.
+/// device at least once, or if there is no such device at all.
 #[derive(Default, Clone)]
 pub struct AudioState {
     pub sink_name: Option<String>,
-    pub volume_percent: Option<u8>,
-    pub muted: Option<bool>,
+    pub sink_volume_percent: Option<u8>,
+    pub sink_muted: Option<bool>,
+    pub source_name: Option<String>,
+    pub source_volume_percent: Option<u8>,
+    pub source_muted: Option<bool>,
 }
 
 pub type SharedAudioState = Arc<Mutex<AudioState>>;
@@ -56,10 +59,50 @@ pub fn spawn() -> SharedAudioState {
     state
 }
 
-/// A sink node's cached name and last-read `Props`, keyed by its registry
+/// Which default audio device a tracked node might be — playback (sink)
+/// or capture (source). Drives both the PipeWire-side filtering (media
+/// class) and the "default" metadata key nkdhr watches to learn which
+/// node is currently the default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Sink,
+    Source,
+}
+
+impl DeviceKind {
+    const ALL: [DeviceKind; 2] = [DeviceKind::Sink, DeviceKind::Source];
+
+    fn media_class(self) -> &'static str {
+        match self {
+            DeviceKind::Sink => "Audio/Sink",
+            DeviceKind::Source => "Audio/Source",
+        }
+    }
+
+    fn metadata_key(self) -> &'static str {
+        match self {
+            DeviceKind::Sink => "default.audio.sink",
+            DeviceKind::Source => "default.audio.source",
+        }
+    }
+
+    fn from_media_class(media_class: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.media_class() == media_class)
+    }
+
+    fn from_metadata_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.metadata_key() == key)
+    }
+}
+
+/// A node's cached name and last-read `Props`, keyed by its registry
 /// global id. Kept alongside the live `Node`/`NodeListener` so the
 /// subscription stays alive for as long as the node exists.
-struct BoundSink {
+struct BoundNode {
     name: String,
     volume_percent: Option<u8>,
     muted: Option<bool>,
@@ -67,26 +110,52 @@ struct BoundSink {
     _listener: NodeListener,
 }
 
+/// Everything tracked for one [`DeviceKind`]: which node name is currently
+/// the default (per the "default" metadata object) and every known node
+/// of that kind, keyed by registry global id.
+#[derive(Default)]
+struct KindState {
+    target_name: Option<String>,
+    nodes: HashMap<u32, BoundNode>,
+}
+
+impl KindState {
+    fn resolved(&self) -> Option<&BoundNode> {
+        let target = self.target_name.as_ref()?;
+        self.nodes.values().find(|node| &node.name == target)
+    }
+}
+
 struct Tracker {
     state: SharedAudioState,
     registry: RegistryRc,
-    target_sink_name: Option<String>,
-    sinks: HashMap<u32, BoundSink>,
+    sinks: KindState,
+    sources: KindState,
     _metadata: Option<(Metadata, MetadataListener)>,
 }
 
 impl Tracker {
+    fn kind_state_mut(&mut self, kind: DeviceKind) -> &mut KindState {
+        match kind {
+            DeviceKind::Sink => &mut self.sinks,
+            DeviceKind::Source => &mut self.sources,
+        }
+    }
+
     fn reconcile(&mut self) {
-        let resolved = self
-            .target_sink_name
-            .as_ref()
-            .and_then(|target| self.sinks.values().find(|sink| &sink.name == target));
+        let sink = self.sinks.resolved();
+        let source = self.sources.resolved();
 
         let mut state = self.state.lock().expect("audio state mutex poisoned");
-        if let Some(sink) = resolved {
-            state.sink_name = Some(sink.name.clone());
-            state.volume_percent = sink.volume_percent;
-            state.muted = sink.muted;
+        if let Some(node) = sink {
+            state.sink_name = Some(node.name.clone());
+            state.sink_volume_percent = node.volume_percent;
+            state.sink_muted = node.muted;
+        }
+        if let Some(node) = source {
+            state.source_name = Some(node.name.clone());
+            state.source_volume_percent = node.volume_percent;
+            state.source_muted = node.muted;
         }
     }
 }
@@ -102,8 +171,8 @@ fn run(state: SharedAudioState) -> Result<(), pipewire::Error> {
     let tracker = Rc::new(RefCell::new(Tracker {
         state,
         registry: registry.clone(),
-        target_sink_name: None,
-        sinks: HashMap::new(),
+        sinks: KindState::default(),
+        sources: KindState::default(),
         _metadata: None,
     }));
 
@@ -113,7 +182,9 @@ fn run(state: SharedAudioState) -> Result<(), pipewire::Error> {
         .global(move |obj| handle_global(&tracker_for_global, obj))
         .global_remove(move |id| {
             let mut tracker = tracker.borrow_mut();
-            if tracker.sinks.remove(&id).is_some() {
+            let removed = tracker.sinks.nodes.remove(&id).is_some()
+                || tracker.sources.nodes.remove(&id).is_some();
+            if removed {
                 tracker.reconcile();
             }
         })
@@ -132,13 +203,13 @@ fn handle_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRef>) {
 }
 
 fn handle_node_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRef>) {
-    let is_sink = obj
+    let Some(kind) = obj
         .props
         .and_then(|props| props.get(&pipewire::keys::MEDIA_CLASS))
-        == Some("Audio/Sink");
-    if !is_sink {
+        .and_then(DeviceKind::from_media_class)
+    else {
         return;
-    }
+    };
     let Some(name) = obj
         .props
         .and_then(|props| props.get(&pipewire::keys::NODE_NAME))
@@ -164,9 +235,9 @@ fn handle_node_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRe
             };
             let (volume_percent, muted) = parse_props(param);
             let mut tracker = tracker_for_param.borrow_mut();
-            if let Some(sink) = tracker.sinks.get_mut(&id) {
-                sink.volume_percent = volume_percent.or(sink.volume_percent);
-                sink.muted = muted.or(sink.muted);
+            if let Some(node) = tracker.kind_state_mut(kind).nodes.get_mut(&id) {
+                node.volume_percent = volume_percent.or(node.volume_percent);
+                node.muted = muted.or(node.muted);
             }
             tracker.reconcile();
         })
@@ -176,9 +247,9 @@ fn handle_node_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRe
     node.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
 
     let mut tracker = tracker.borrow_mut();
-    tracker.sinks.insert(
+    tracker.kind_state_mut(kind).nodes.insert(
         id,
-        BoundSink {
+        BoundNode {
             name,
             volume_percent: None,
             muted: None,
@@ -204,12 +275,12 @@ fn handle_metadata_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&Di
     let listener = metadata
         .add_listener_local()
         .property(move |_subject, key, _type, value| {
-            if key != Some("default.audio.sink") {
+            let Some(kind) = key.and_then(DeviceKind::from_metadata_key) else {
                 return 0;
-            }
+            };
             let target = value.and_then(default_node_name_from_json);
             let mut tracker = tracker_for_property.borrow_mut();
-            tracker.target_sink_name = target;
+            tracker.kind_state_mut(kind).target_name = target;
             tracker.reconcile();
             0
         })
@@ -218,9 +289,10 @@ fn handle_metadata_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&Di
     tracker.borrow_mut()._metadata = Some((metadata, listener));
 }
 
-/// PipeWire's "default" metadata encodes `default.audio.sink` as a JSON
-/// object, e.g. `{"name":"alsa_output.pci-0000_00_1f.3.analog-stereo"}`,
-/// rather than as a plain string.
+/// PipeWire's "default" metadata encodes `default.audio.sink`/
+/// `default.audio.source` as a JSON object, e.g.
+/// `{"name":"alsa_output.pci-0000_00_1f.3.analog-stereo"}`, rather than as
+/// a plain string.
 fn default_node_name_from_json(value: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(value).ok()?;
     value.get("name")?.as_str().map(str::to_owned)

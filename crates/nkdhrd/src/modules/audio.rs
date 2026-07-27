@@ -18,8 +18,11 @@ impl Audio {
         let state = self.state.lock().expect("audio state mutex poisoned");
         AudioStatus {
             sink_name: state.sink_name.clone().into(),
-            volume_percent: state.volume_percent.into(),
-            muted: state.muted.unwrap_or(false),
+            sink_volume_percent: state.sink_volume_percent.into(),
+            sink_muted: state.sink_muted.unwrap_or(false),
+            source_name: state.source_name.clone().into(),
+            source_volume_percent: state.source_volume_percent.into(),
+            source_muted: state.source_muted.unwrap_or(false),
         }
     }
 }
