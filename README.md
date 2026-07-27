@@ -22,5 +22,6 @@ Pre-implementation: planning and repository bootstrap.
 
 ## License
 
-To be finalized (a noncommercial license is planned). Until a LICENSE file
-is present, all rights are reserved.
+[PolyForm Noncommercial License 1.0.0](LICENSE.md): use, modification and
+redistribution are free for any noncommercial purpose; commercial use is
+not permitted.

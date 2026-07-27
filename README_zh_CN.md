@@ -18,4 +18,5 @@ nkdhr 是一个自成一体的 Linux 桌面环境，核心是一个自研的 Way
 
 ## 协议
 
-待定（计划采用禁止商用的协议）。在 LICENSE 文件出现之前，保留所有权利。
+[PolyForm Noncommercial License 1.0.0](LICENSE.md)：任何非商业目的的使用、
+修改、再分发完全自由；禁止商业使用。
