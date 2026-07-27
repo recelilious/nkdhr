@@ -1,0 +1,13 @@
+[package]
+name = "nkdhrd"
+description = "Control-plane daemon: aggregates system services and owns the config store, exposed over D-Bus as org.nkdhr.*"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

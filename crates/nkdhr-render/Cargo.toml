@@ -1,0 +1,13 @@
+[package]
+name = "nkdhr-render"
+description = "2D primitive rendering layer over OpenGL ES: rects, borders, shadows, textures, text, clipping, transforms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

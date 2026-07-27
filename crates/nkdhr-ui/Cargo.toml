@@ -1,0 +1,13 @@
+[package]
+name = "nkdhr-ui"
+description = "Widget toolkit built on nkdhr-render; runs as in-compositor scene nodes and as a standalone Wayland client library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
