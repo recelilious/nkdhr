@@ -1,5 +1,8 @@
 # nkdhr
 
+*一个自成一体的 Linux 桌面环境，核心是自研 Wayland 合成器，
+窗口生活在一张可无限平移缩放的画布上。*
+
 > [English version / 英文版本](README.md)
 
 nkdhr 是一个自成一体的 Linux 桌面环境，核心是一个自研的 Wayland 合成器，

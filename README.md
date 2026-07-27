@@ -1,5 +1,8 @@
 # nkdhr
 
+*A self-contained Linux desktop environment built around a custom Wayland
+compositor where windows live on an infinite pannable, zoomable canvas.*
+
 > [中文版本 / Chinese version](README_zh_CN.md)
 
 nkdhr is a self-contained desktop environment for Linux, built around a
