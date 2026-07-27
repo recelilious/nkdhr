@@ -2,36 +2,22 @@
 //! interface identifiers, wire types, and client proxies used by `nkdhrd`,
 //! `nkdhrctl`, and any other process that talks to the daemon.
 
-use serde::{Deserialize, Serialize};
-use zbus::zvariant::Type;
+mod audio;
+mod brightness;
+mod daemon;
+mod network;
+mod power;
+mod session;
 
-/// Well-known bus name `nkdhrd` requests on the session bus.
+pub use audio::{AUDIO_OBJECT_PATH, AudioProxy, AudioProxyBlocking, AudioStatus};
+pub use brightness::{
+    BRIGHTNESS_OBJECT_PATH, BrightnessProxy, BrightnessProxyBlocking, BrightnessStatus,
+};
+pub use daemon::{DAEMON_OBJECT_PATH, DaemonProxy, DaemonProxyBlocking, DaemonStatus};
+pub use network::{NETWORK_OBJECT_PATH, NetworkProxy, NetworkProxyBlocking, NetworkStatus};
+pub use power::{POWER_OBJECT_PATH, PowerProxy, PowerProxyBlocking, PowerStatus};
+pub use session::{SESSION_OBJECT_PATH, SessionProxy, SessionProxyBlocking, SessionStatus};
+
+/// Well-known bus name `nkdhrd` requests on the session bus. Every object in
+/// the tree below is served through this one name.
 pub const BUS_NAME: &str = "org.nkdhr.Daemon1";
-
-/// Object path at which `nkdhrd` serves the [`BUS_NAME`] interface.
-pub const OBJECT_PATH: &str = "/org/nkdhr/Daemon1";
-
-/// Snapshot returned by [`DaemonProxy::get_status`].
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct DaemonStatus {
-    pub version: String,
-    pub uptime_secs: u64,
-    pub modules: Vec<String>,
-}
-
-/// Client-side contract for `org.nkdhr.Daemon1`.
-///
-/// The interface, service and path strings here must match the
-/// `#[interface(...)]` implementation in `nkdhrd` by construction: zbus's
-/// macros take them as literals, so [`BUS_NAME`] and [`OBJECT_PATH`] can't
-/// be referenced from within the attribute itself.
-#[zbus::proxy(
-    interface = "org.nkdhr.Daemon1",
-    default_service = "org.nkdhr.Daemon1",
-    default_path = "/org/nkdhr/Daemon1"
-)]
-pub trait Daemon {
-    async fn ping(&self) -> zbus::Result<String>;
-    async fn get_status(&self) -> zbus::Result<DaemonStatus>;
-    async fn get_version(&self) -> zbus::Result<String>;
-}

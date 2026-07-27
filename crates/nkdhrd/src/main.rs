@@ -1,38 +1,49 @@
-use std::thread;
-use std::time::Instant;
+mod backends;
+mod daemon;
+mod modules;
 
-use nkdhr_ipc::{BUS_NAME, DaemonStatus, OBJECT_PATH};
+use std::thread;
+
+use backends::pipewire_client;
+use daemon::Daemon;
+use modules::audio::Audio;
+use modules::brightness::Brightness;
+use modules::network::Network;
+use modules::power::Power;
+use modules::session::Session;
+use nkdhr_ipc::{
+    AUDIO_OBJECT_PATH, BRIGHTNESS_OBJECT_PATH, BUS_NAME, DAEMON_OBJECT_PATH, NETWORK_OBJECT_PATH,
+    POWER_OBJECT_PATH, SESSION_OBJECT_PATH,
+};
+use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::fdo::RequestNameFlags;
 
-struct Daemon {
-    start: Instant,
-}
-
-#[zbus::interface(name = "org.nkdhr.Daemon1")]
-impl Daemon {
-    fn ping(&self) -> String {
-        "pong".to_owned()
-    }
-
-    fn get_status(&self) -> DaemonStatus {
-        DaemonStatus {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            uptime_secs: self.start.elapsed().as_secs(),
-            modules: Vec::new(),
-        }
-    }
-
-    fn get_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_owned()
-    }
-}
-
 fn run() -> zbus::Result<()> {
-    let daemon = Daemon {
-        start: Instant::now(),
-    };
-    let connection = Builder::session()?.serve_at(OBJECT_PATH, daemon)?.build()?;
+    let system = Connection::system()?;
+    let mut modules = Vec::new();
+
+    let mut builder = Builder::session()?
+        .serve_at(SESSION_OBJECT_PATH, Session::new(system.clone()))?
+        .serve_at(NETWORK_OBJECT_PATH, Network::new(system.clone()))?
+        .serve_at(POWER_OBJECT_PATH, Power::new(system.clone()))?
+        .serve_at(AUDIO_OBJECT_PATH, Audio::new(pipewire_client::spawn()))?;
+    modules.push("Session".to_owned());
+    modules.push("Network".to_owned());
+    modules.push("Power".to_owned());
+    modules.push("Audio".to_owned());
+
+    match Brightness::new() {
+        Ok(brightness) => {
+            builder = builder.serve_at(BRIGHTNESS_OBJECT_PATH, brightness)?;
+            modules.push("Brightness".to_owned());
+        }
+        Err(err) => eprintln!("nkdhrd: brightness module unavailable, skipping: {err}"),
+    }
+
+    let connection = builder
+        .serve_at(DAEMON_OBJECT_PATH, Daemon::new(modules))?
+        .build()?;
 
     // `Builder::name` requests the well-known name without `DoNotQueue`, so a
     // second instance would sit queued indefinitely instead of failing.
