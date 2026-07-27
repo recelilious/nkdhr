@@ -11,3 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+clap = { version = "4.6.4", features = ["derive"] }
+nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
+serde_json = "1.0.151"
+zbus = "5.18.0"

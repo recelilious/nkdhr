@@ -11,3 +11,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
+zbus = "5.18.0"
