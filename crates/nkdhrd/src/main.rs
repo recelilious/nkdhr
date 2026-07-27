@@ -27,13 +27,16 @@ fn run() -> zbus::Result<()> {
         .serve_at(SESSION_OBJECT_PATH, Session::new(system.clone()))?
         .serve_at(NETWORK_OBJECT_PATH, Network::new(system.clone()))?
         .serve_at(POWER_OBJECT_PATH, Power::new(system.clone()))?
-        .serve_at(AUDIO_OBJECT_PATH, Audio::new(pipewire_client::spawn()))?;
+        .serve_at(
+            AUDIO_OBJECT_PATH,
+            Audio::new(system.clone(), pipewire_client::spawn()),
+        )?;
     modules.push("Session".to_owned());
     modules.push("Network".to_owned());
     modules.push("Power".to_owned());
     modules.push("Audio".to_owned());
 
-    match Brightness::new() {
+    match Brightness::new(system.clone()) {
         Ok(brightness) => {
             builder = builder.serve_at(BRIGHTNESS_OBJECT_PATH, brightness)?;
             modules.push("Brightness".to_owned());

@@ -36,4 +36,6 @@ pub struct AudioStatus {
 )]
 pub trait Audio {
     async fn get_status(&self) -> zbus::Result<AudioStatus>;
+    async fn set_volume(&self, percent: u8) -> zbus::Result<()>;
+    async fn set_mute(&self, muted: bool) -> zbus::Result<()>;
 }

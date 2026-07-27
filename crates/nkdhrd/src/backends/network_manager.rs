@@ -15,6 +15,19 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 pub trait NetworkManager {
     #[zbus(property)]
     fn primary_connection(&self) -> zbus::Result<OwnedObjectPath>;
+
+    #[zbus(property)]
+    fn devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+
+    /// `specific_object` is `"/"` (no specific access point) for a normal
+    /// connect-by-SSID. Returns the new connection's settings path and its
+    /// active-connection path.
+    fn add_and_activate_connection(
+        &self,
+        connection: HashMap<String, HashMap<String, OwnedValue>>,
+        device: &OwnedObjectPath,
+        specific_object: &OwnedObjectPath,
+    ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
 #[zbus::proxy(
@@ -42,6 +55,12 @@ pub trait ActiveConnection {
 pub trait Device {
     #[zbus(property)]
     fn interface(&self) -> zbus::Result<String>;
+
+    /// `NM_DEVICE_TYPE_WIFI` is `2`; see `nm-dbus-interface.h`. No typed
+    /// enum for this in nkdhr — the base feature only ever compares
+    /// against that one constant.
+    #[zbus(property)]
+    fn device_type(&self) -> zbus::Result<u32>;
 }
 
 #[zbus::proxy(

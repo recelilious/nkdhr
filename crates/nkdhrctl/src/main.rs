@@ -28,15 +28,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the primary network connection's status.
+    /// Print the primary network connection's status, or connect to one.
     Network {
-        /// Print machine-readable JSON instead of text.
+        #[command(subcommand)]
+        action: Option<NetworkAction>,
+        /// Print machine-readable JSON instead of text. Only applies when
+        /// printing the current status.
         #[arg(long)]
         json: bool,
     },
-    /// Print the current screen brightness.
+    /// Print the current screen brightness, or change it.
     Brightness {
-        /// Print machine-readable JSON instead of text.
+        #[command(subcommand)]
+        action: Option<BrightnessAction>,
+        /// Print machine-readable JSON instead of text. Only applies when
+        /// printing the current brightness.
         #[arg(long)]
         json: bool,
     },
@@ -46,12 +52,63 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the default sink's volume and mute state.
+    /// Print the default sink's volume and mute state, or change them.
     Audio {
-        /// Print machine-readable JSON instead of text.
+        #[command(subcommand)]
+        action: Option<AudioAction>,
+        /// Print machine-readable JSON instead of text. Only applies when
+        /// printing the current status.
         #[arg(long)]
         json: bool,
     },
+    /// Power off, reboot or suspend the system.
+    Power {
+        #[command(subcommand)]
+        action: PowerAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PowerAction {
+    /// Power off the system.
+    Off,
+    /// Reboot the system.
+    Reboot,
+    /// Suspend the system.
+    Suspend,
+}
+
+#[derive(Subcommand)]
+enum BrightnessAction {
+    /// Set the screen brightness.
+    Set {
+        /// 0-100.
+        percent: u8,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkAction {
+    /// Connect to a Wi-Fi network by SSID.
+    Connect {
+        ssid: String,
+        /// WPA/WPA2 personal passphrase. Omit for an open network.
+        #[arg(long)]
+        password: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AudioAction {
+    /// Set the default sink's volume.
+    SetVolume {
+        /// 0-100.
+        percent: u8,
+    },
+    /// Mute the default sink.
+    Mute,
+    /// Unmute the default sink.
+    Unmute,
 }
 
 fn run(command: Command) -> zbus::Result<()> {
@@ -91,30 +148,43 @@ fn run(command: Command) -> zbus::Result<()> {
                 println!("locked: {}", status.locked);
             }
         }
-        Command::Network { json } => {
+        Command::Network { action, json } => {
             let network = NetworkProxyBlocking::new(&connection)?;
-            let status = network.get_status()?;
-            if json {
-                print_json(&status);
-            } else {
-                println!("connected: {}", status.connected);
-                println!("kind: {}", status.kind);
-                print_optional("interface", Option::<String>::from(status.interface));
-                print_optional("ssid", Option::<String>::from(status.ssid));
-                print_optional(
-                    "signal",
-                    Option::<u8>::from(status.signal_percent).map(|percent| format!("{percent}%")),
-                );
-                print_optional("ip4-address", Option::<String>::from(status.ip4_address));
+            match action {
+                None => {
+                    let status = network.get_status()?;
+                    if json {
+                        print_json(&status);
+                    } else {
+                        println!("connected: {}", status.connected);
+                        println!("kind: {}", status.kind);
+                        print_optional("interface", Option::<String>::from(status.interface));
+                        print_optional("ssid", Option::<String>::from(status.ssid));
+                        print_optional(
+                            "signal",
+                            Option::<u8>::from(status.signal_percent)
+                                .map(|percent| format!("{percent}%")),
+                        );
+                        print_optional("ip4-address", Option::<String>::from(status.ip4_address));
+                    }
+                }
+                Some(NetworkAction::Connect { ssid, password }) => {
+                    network.connect(&ssid, password.as_deref().unwrap_or(""))?;
+                }
             }
         }
-        Command::Brightness { json } => {
+        Command::Brightness { action, json } => {
             let brightness = BrightnessProxyBlocking::new(&connection)?;
-            let status = brightness.get_status()?;
-            if json {
-                print_json(&status);
-            } else {
-                println!("brightness: {}%", status.percent);
+            match action {
+                None => {
+                    let status = brightness.get_status()?;
+                    if json {
+                        print_json(&status);
+                    } else {
+                        println!("brightness: {}%", status.percent);
+                    }
+                }
+                Some(BrightnessAction::Set { percent }) => brightness.set(percent)?,
             }
         }
         Command::Battery { json } => {
@@ -136,26 +206,41 @@ fn run(command: Command) -> zbus::Result<()> {
                 );
             }
         }
-        Command::Audio { json } => {
+        Command::Audio { action, json } => {
             let audio = AudioProxyBlocking::new(&connection)?;
-            let status = audio.get_status()?;
-            if json {
-                print_json(&status);
-            } else {
-                print_optional("sink", Option::<String>::from(status.sink_name));
-                print_optional(
-                    "sink-volume",
-                    Option::<u8>::from(status.sink_volume_percent)
-                        .map(|percent| format!("{percent}%")),
-                );
-                println!("sink-muted: {}", status.sink_muted);
-                print_optional("source", Option::<String>::from(status.source_name));
-                print_optional(
-                    "source-volume",
-                    Option::<u8>::from(status.source_volume_percent)
-                        .map(|percent| format!("{percent}%")),
-                );
-                println!("source-muted: {}", status.source_muted);
+            match action {
+                None => {
+                    let status = audio.get_status()?;
+                    if json {
+                        print_json(&status);
+                    } else {
+                        print_optional("sink", Option::<String>::from(status.sink_name));
+                        print_optional(
+                            "sink-volume",
+                            Option::<u8>::from(status.sink_volume_percent)
+                                .map(|percent| format!("{percent}%")),
+                        );
+                        println!("sink-muted: {}", status.sink_muted);
+                        print_optional("source", Option::<String>::from(status.source_name));
+                        print_optional(
+                            "source-volume",
+                            Option::<u8>::from(status.source_volume_percent)
+                                .map(|percent| format!("{percent}%")),
+                        );
+                        println!("source-muted: {}", status.source_muted);
+                    }
+                }
+                Some(AudioAction::SetVolume { percent }) => audio.set_volume(percent)?,
+                Some(AudioAction::Mute) => audio.set_mute(true)?,
+                Some(AudioAction::Unmute) => audio.set_mute(false)?,
+            }
+        }
+        Command::Power { action } => {
+            let power = PowerProxyBlocking::new(&connection)?;
+            match action {
+                PowerAction::Off => power.power_off()?,
+                PowerAction::Reboot => power.reboot()?,
+                PowerAction::Suspend => power.suspend()?,
             }
         }
     }

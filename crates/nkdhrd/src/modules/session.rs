@@ -1,9 +1,7 @@
 use nkdhr_ipc::SessionStatus;
 use zbus::blocking::Connection;
 
-use crate::backends::logind::{
-    ManagerProxyBlocking, PRIMARY_SEAT, SeatProxyBlocking, SessionProxyBlocking,
-};
+use crate::backends::logind::{self, SessionProxyBlocking};
 
 pub struct Session {
     system: Connection,
@@ -23,14 +21,7 @@ impl Session {
     /// login session, so a PID-based lookup on its own process would
     /// always fail.
     fn get_status(&self) -> zbus::fdo::Result<SessionStatus> {
-        let manager = ManagerProxyBlocking::new(&self.system)?;
-        let seat_path = manager.get_seat(PRIMARY_SEAT)?;
-
-        let seat = SeatProxyBlocking::builder(&self.system)
-            .path(seat_path)?
-            .build()?;
-        let (_, session_path) = seat.active_session()?;
-
+        let session_path = logind::active_session_path(&self.system)?;
         let session = SessionProxyBlocking::builder(&self.system)
             .path(session_path)?
             .build()?;

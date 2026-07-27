@@ -1,7 +1,10 @@
 use nkdhr_ipc::PowerStatus;
 use zbus::blocking::Connection;
+use zbus::message::Header;
 use zbus::zvariant::Optional;
 
+use crate::backends::logind::ManagerProxyBlocking;
+use crate::backends::polkit;
 use crate::backends::upower::DisplayDeviceProxyBlocking;
 
 pub struct Power {
@@ -26,6 +29,46 @@ impl Power {
             time_to_empty_secs: seconds(device.time_to_empty()?),
             time_to_full_secs: seconds(device.time_to_full()?),
         })
+    }
+
+    async fn power_off(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        polkit::check_authorization(
+            &self.system,
+            connection,
+            &header,
+            "org.nkdhr.policy.power-off",
+        )
+        .await?;
+        Ok(ManagerProxyBlocking::new(&self.system)?.power_off(false)?)
+    }
+
+    async fn reboot(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        polkit::check_authorization(&self.system, connection, &header, "org.nkdhr.policy.reboot")
+            .await?;
+        Ok(ManagerProxyBlocking::new(&self.system)?.reboot(false)?)
+    }
+
+    async fn suspend(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        polkit::check_authorization(
+            &self.system,
+            connection,
+            &header,
+            "org.nkdhr.policy.suspend",
+        )
+        .await?;
+        Ok(ManagerProxyBlocking::new(&self.system)?.suspend(false)?)
     }
 }
 

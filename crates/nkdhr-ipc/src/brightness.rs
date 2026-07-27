@@ -19,4 +19,5 @@ pub struct BrightnessStatus {
 )]
 pub trait Brightness {
     async fn get_status(&self) -> zbus::Result<BrightnessStatus>;
+    async fn set(&self, percent: u8) -> zbus::Result<()>;
 }

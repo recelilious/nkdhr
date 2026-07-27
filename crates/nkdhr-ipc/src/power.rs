@@ -29,4 +29,7 @@ pub struct PowerStatus {
 )]
 pub trait Power {
     async fn get_status(&self) -> zbus::Result<PowerStatus>;
+    async fn power_off(&self) -> zbus::Result<()>;
+    async fn reboot(&self) -> zbus::Result<()>;
+    async fn suspend(&self) -> zbus::Result<()>;
 }

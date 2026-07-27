@@ -5,7 +5,11 @@
 //! thread running PipeWire's own main loop. This module spawns that
 //! thread and keeps a small, plain-data cache of the default sink's and
 //! source's name/volume/mute that [`crate::modules::audio::Audio`] reads
-//! synchronously from any thread.
+//! synchronously from any thread. Mutating calls (`set_sink_volume`/
+//! `set_sink_muted`) go the other way: they queue a command that the
+//! worker thread's own timer picks up and applies via `Node::set_param`,
+//! since `Node` isn't `Send` and can't be called from outside its thread
+//! directly.
 //!
 //! Device switching while `nkdhrd` is running (e.g. plugging in a USB
 //! headset that becomes the new default) is intentionally best-effort
@@ -15,18 +19,29 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use pipewire::metadata::{Metadata, MetadataListener};
 use pipewire::node::{Node, NodeListener};
 use pipewire::registry::{GlobalObject, RegistryRc};
 use pipewire::spa::param::ParamType;
-use pipewire::spa::pod::Pod;
 use pipewire::spa::pod::deserialize::PodDeserializer;
+use pipewire::spa::pod::serialize::PodSerializer;
+use pipewire::spa::pod::{Object, Pod, Property, PropertyFlags, Value, ValueArray};
+use pipewire::spa::utils::SpaTypes;
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
+
+/// How often the worker thread checks for pending [`AudioCommand`]s.
+/// PipeWire's client API has no cross-thread wakeup primitive simple
+/// enough to justify over this for a volume-change command, which has no
+/// latency requirement stricter than "feels instant to a human".
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The default sink's and source's last known volume/mute, as read by
 /// [`crate::modules::audio::Audio::get_status`]. Every field is `None`
@@ -44,19 +59,45 @@ pub struct AudioState {
 
 pub type SharedAudioState = Arc<Mutex<AudioState>>;
 
-/// Spawns the PipeWire worker thread and returns the shared state handle
-/// it keeps updated for the lifetime of the process.
-pub fn spawn() -> SharedAudioState {
+/// A mutating request for the current default sink. Only the sink
+/// (playback) is mutable for CTRL-3; the source (microphone) is
+/// read-only, matching nkdhrctl's own `set-volume`/`mute` scope.
+enum AudioCommand {
+    SetSinkVolume(u8),
+    SetSinkMuted(bool),
+}
+
+/// Handle returned by [`spawn`]: the live status cache plus a way to
+/// queue mutating requests for the worker thread to apply.
+pub struct PipeWireHandle {
+    pub state: SharedAudioState,
+    commands: Sender<AudioCommand>,
+}
+
+impl PipeWireHandle {
+    pub fn set_sink_volume(&self, percent: u8) {
+        let _ = self.commands.send(AudioCommand::SetSinkVolume(percent));
+    }
+
+    pub fn set_sink_muted(&self, muted: bool) {
+        let _ = self.commands.send(AudioCommand::SetSinkMuted(muted));
+    }
+}
+
+/// Spawns the PipeWire worker thread and returns the handle it keeps
+/// updated, and takes commands from, for the lifetime of the process.
+pub fn spawn() -> PipeWireHandle {
     let state: SharedAudioState = Arc::new(Mutex::new(AudioState::default()));
     let state_for_thread = Arc::clone(&state);
+    let (commands, command_rx) = mpsc::channel();
 
     thread::spawn(move || {
-        if let Err(err) = run(state_for_thread) {
+        if let Err(err) = run(state_for_thread, command_rx) {
             eprintln!("nkdhrd: PipeWire worker exited: {err}");
         }
     });
 
-    state
+    PipeWireHandle { state, commands }
 }
 
 /// Which default audio device a tracked node might be — playback (sink)
@@ -105,8 +146,13 @@ impl DeviceKind {
 struct BoundNode {
     name: String,
     volume_percent: Option<u8>,
+    /// Number of channels last seen in `channelVolumes`, so a volume
+    /// change can be replicated across all of them instead of collapsing
+    /// e.g. a stereo device down to one channel. Defaults to a plain
+    /// stereo assumption until a real `Props` update has been read.
+    channels: usize,
     muted: Option<bool>,
-    _node: Node,
+    node: Node,
     _listener: NodeListener,
 }
 
@@ -123,6 +169,11 @@ impl KindState {
     fn resolved(&self) -> Option<&BoundNode> {
         let target = self.target_name.as_ref()?;
         self.nodes.values().find(|node| &node.name == target)
+    }
+
+    fn resolved_mut(&mut self) -> Option<&mut BoundNode> {
+        let target = self.target_name.clone()?;
+        self.nodes.values_mut().find(|node| node.name == target)
     }
 }
 
@@ -158,9 +209,24 @@ impl Tracker {
             state.source_muted = node.muted;
         }
     }
+
+    fn apply(&mut self, command: AudioCommand) {
+        let Some(sink) = self.sinks.resolved_mut() else {
+            return;
+        };
+
+        let bytes = match command {
+            AudioCommand::SetSinkVolume(percent) => props_pod(Some((percent, sink.channels)), None),
+            AudioCommand::SetSinkMuted(muted) => props_pod(None, Some(muted)),
+        };
+        let Some(pod) = Pod::from_bytes(&bytes) else {
+            return;
+        };
+        sink.node.set_param(ParamType::Props, 0, pod);
+    }
 }
 
-fn run(state: SharedAudioState) -> Result<(), pipewire::Error> {
+fn run(state: SharedAudioState, commands: Receiver<AudioCommand>) -> Result<(), pipewire::Error> {
     pipewire::init();
 
     let main_loop = pipewire::main_loop::MainLoopRc::new(None)?;
@@ -177,11 +243,12 @@ fn run(state: SharedAudioState) -> Result<(), pipewire::Error> {
     }));
 
     let tracker_for_global = Rc::clone(&tracker);
+    let tracker_for_remove = Rc::clone(&tracker);
     let _registry_listener = registry
         .add_listener_local()
         .global(move |obj| handle_global(&tracker_for_global, obj))
         .global_remove(move |id| {
-            let mut tracker = tracker.borrow_mut();
+            let mut tracker = tracker_for_remove.borrow_mut();
             let removed = tracker.sinks.nodes.remove(&id).is_some()
                 || tracker.sources.nodes.remove(&id).is_some();
             if removed {
@@ -189,6 +256,14 @@ fn run(state: SharedAudioState) -> Result<(), pipewire::Error> {
             }
         })
         .register();
+
+    let tracker_for_commands = Rc::clone(&tracker);
+    let timer = main_loop.loop_().add_timer(move |_expirations| {
+        for command in commands.try_iter() {
+            tracker_for_commands.borrow_mut().apply(command);
+        }
+    });
+    timer.update_timer(Some(COMMAND_POLL_INTERVAL), Some(COMMAND_POLL_INTERVAL));
 
     main_loop.run();
     Ok(())
@@ -233,10 +308,11 @@ fn handle_node_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRe
             let Some(param) = param else {
                 return;
             };
-            let (volume_percent, muted) = parse_props(param);
+            let (volume_percent, channels, muted) = parse_props(param);
             let mut tracker = tracker_for_param.borrow_mut();
             if let Some(node) = tracker.kind_state_mut(kind).nodes.get_mut(&id) {
                 node.volume_percent = volume_percent.or(node.volume_percent);
+                node.channels = channels.unwrap_or(node.channels);
                 node.muted = muted.or(node.muted);
             }
             tracker.reconcile();
@@ -252,8 +328,9 @@ fn handle_node_global(tracker: &Rc<RefCell<Tracker>>, obj: &GlobalObject<&DictRe
         BoundNode {
             name,
             volume_percent: None,
+            channels: 2,
             muted: None,
-            _node: node,
+            node,
             _listener: listener,
         },
     );
@@ -298,36 +375,64 @@ fn default_node_name_from_json(value: &str) -> Option<String> {
     value.get("name")?.as_str().map(str::to_owned)
 }
 
-/// Reads `channelVolumes` (averaged, as a 0-100 percentage) and `mute`
-/// out of a `Props` param pod.
-fn parse_props(pod: &Pod) -> (Option<u8>, Option<bool>) {
-    let Ok((_, pipewire::spa::pod::Value::Object(object))) =
-        PodDeserializer::deserialize_any_from(pod.as_bytes())
+/// Reads `channelVolumes` (averaged, as a 0-100 percentage, alongside the
+/// channel count) and `mute` out of a `Props` param pod.
+fn parse_props(pod: &Pod) -> (Option<u8>, Option<usize>, Option<bool>) {
+    let Ok((_, Value::Object(object))) = PodDeserializer::deserialize_any_from(pod.as_bytes())
     else {
-        return (None, None);
+        return (None, None, None);
     };
 
     let mut volume_percent = None;
+    let mut channels = None;
     let mut muted = None;
     for property in object.properties {
         match (property.key, property.value) {
-            (
-                key,
-                pipewire::spa::pod::Value::ValueArray(pipewire::spa::pod::ValueArray::Float(
-                    channels,
-                )),
-            ) if key == pipewire::spa::sys::SPA_PROP_channelVolumes && !channels.is_empty() => {
-                let average = channels.iter().sum::<f32>() / channels.len() as f32;
-                volume_percent = Some((average * 100.0).round().clamp(0.0, 100.0) as u8);
-            }
-            (key, pipewire::spa::pod::Value::Bool(value))
-                if key == pipewire::spa::sys::SPA_PROP_mute =>
+            (key, Value::ValueArray(ValueArray::Float(values)))
+                if key == pipewire::spa::sys::SPA_PROP_channelVolumes && !values.is_empty() =>
             {
+                let average = values.iter().sum::<f32>() / values.len() as f32;
+                volume_percent = Some((average * 100.0).round().clamp(0.0, 100.0) as u8);
+                channels = Some(values.len());
+            }
+            (key, Value::Bool(value)) if key == pipewire::spa::sys::SPA_PROP_mute => {
                 muted = Some(value);
             }
             _ => {}
         }
     }
 
-    (volume_percent, muted)
+    (volume_percent, channels, muted)
+}
+
+/// Builds a `Props` param pod setting `channelVolumes` (replicated across
+/// `channels`) and/or `mute`. At least one of `volume`/`muted` should be
+/// `Some`; an empty pod is valid but pointless.
+fn props_pod(volume: Option<(u8, usize)>, muted: Option<bool>) -> Vec<u8> {
+    let mut properties = Vec::new();
+    if let Some((percent, channels)) = volume {
+        let linear = f32::from(percent.min(100)) / 100.0;
+        properties.push(Property {
+            key: pipewire::spa::sys::SPA_PROP_channelVolumes,
+            flags: PropertyFlags::empty(),
+            value: Value::ValueArray(ValueArray::Float(vec![linear; channels.max(1)])),
+        });
+    }
+    if let Some(muted) = muted {
+        properties.push(Property {
+            key: pipewire::spa::sys::SPA_PROP_mute,
+            flags: PropertyFlags::empty(),
+            value: Value::Bool(muted),
+        });
+    }
+
+    let value = Value::Object(Object {
+        type_: SpaTypes::ObjectParamProps.as_raw(),
+        id: ParamType::Props.as_raw(),
+        properties,
+    });
+
+    let (cursor, _size) = PodSerializer::serialize(Cursor::new(Vec::new()), &value)
+        .expect("a Props object with only channelVolumes/mute always serializes");
+    cursor.into_inner()
 }

@@ -30,4 +30,8 @@ pub struct NetworkStatus {
 )]
 pub trait Network {
     async fn get_status(&self) -> zbus::Result<NetworkStatus>;
+
+    /// `password` is WPA/WPA2 personal (PSK); pass an empty string for an
+    /// open network.
+    async fn connect(&self, ssid: &str, password: &str) -> zbus::Result<()>;
 }

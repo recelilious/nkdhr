@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?> <!--*-nxml-*-->
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+        "https://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<policyconfig>
+
+        <vendor>nkdhr</vendor>
+        <vendor_url>https://github.com/recelilious/nkdhr</vendor_url>
+
+        <!--
+          nkdhrd defines one action per mutating capability it exposes,
+          rather than relying on each backend's (UPower/NetworkManager/
+          logind/PipeWire) own default authorization rules. This gives
+          administrators one place to control the whole nkdhr surface
+          consistently. Defaults mirror logind's own convention for
+          equivalent actions (see org.freedesktop.login1.policy): the
+          seat's active session may act without a password, anyone else
+          needs to authenticate as an administrator.
+        -->
+
+        <action id="org.nkdhr.policy.brightness-set">
+                <description>Change the screen brightness</description>
+                <message>Authentication is required to change the screen brightness.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.audio-set-volume">
+                <description>Change the audio volume</description>
+                <message>Authentication is required to change the audio volume.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.audio-set-mute">
+                <description>Mute or unmute audio</description>
+                <message>Authentication is required to mute or unmute audio.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.network-connect">
+                <description>Connect to a Wi-Fi network</description>
+                <message>Authentication is required to connect to a Wi-Fi network.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.power-off">
+                <description>Power off the system</description>
+                <message>Authentication is required to power off the system.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.reboot">
+                <description>Reboot the system</description>
+                <message>Authentication is required to reboot the system.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+        <action id="org.nkdhr.policy.suspend">
+                <description>Suspend the system</description>
+                <message>Authentication is required to suspend the system.</message>
+                <defaults>
+                        <allow_any>auth_admin_keep</allow_any>
+                        <allow_inactive>auth_admin_keep</allow_inactive>
+                        <allow_active>yes</allow_active>
+                </defaults>
+        </action>
+
+</policyconfig>
