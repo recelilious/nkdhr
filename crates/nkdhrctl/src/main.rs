@@ -66,6 +66,18 @@ enum Command {
         #[command(subcommand)]
         action: PowerAction,
     },
+    /// Stream one JSON line per real change to a module's status. Never
+    /// polls: this blocks on nkdhrd's own change signal for the module.
+    Watch { module: WatchModule },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum WatchModule {
+    Battery,
+    Network,
+    Audio,
+    Brightness,
+    Session,
 }
 
 #[derive(Subcommand)]
@@ -243,8 +255,48 @@ fn run(command: Command) -> zbus::Result<()> {
                 PowerAction::Suspend => power.suspend()?,
             }
         }
+        Command::Watch { module } => watch(&connection, module)?,
     }
 
+    Ok(())
+}
+
+/// Loops over the matching module's `Changed` signal, printing one JSON
+/// line per event as it arrives. Never polls: each iteration blocks on the
+/// D-Bus connection until `nkdhrd` emits the next signal.
+fn watch(connection: &Connection, module: WatchModule) -> zbus::Result<()> {
+    match module {
+        WatchModule::Battery => {
+            let power = PowerProxyBlocking::new(connection)?;
+            for signal in power.receive_changed()? {
+                print_json(signal.args()?.status());
+            }
+        }
+        WatchModule::Network => {
+            let network = NetworkProxyBlocking::new(connection)?;
+            for signal in network.receive_changed()? {
+                print_json(signal.args()?.status());
+            }
+        }
+        WatchModule::Audio => {
+            let audio = AudioProxyBlocking::new(connection)?;
+            for signal in audio.receive_changed()? {
+                print_json(signal.args()?.status());
+            }
+        }
+        WatchModule::Brightness => {
+            let brightness = BrightnessProxyBlocking::new(connection)?;
+            for signal in brightness.receive_changed()? {
+                print_json(signal.args()?.status());
+            }
+        }
+        WatchModule::Session => {
+            let session = SessionProxyBlocking::new(connection)?;
+            for signal in session.receive_changed()? {
+                print_json(signal.args()?.status());
+            }
+        }
+    }
     Ok(())
 }
 

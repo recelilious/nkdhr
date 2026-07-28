@@ -11,7 +11,7 @@ pub const NETWORK_OBJECT_PATH: &str = "/org/nkdhr/Network1";
 /// [`Optional`] rather than `Option` because classic D-Bus (unlike
 /// GVariant) has no "maybe" type; `Optional` encodes absence as the
 /// field's default value (`""` or `0`) instead.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct NetworkStatus {
     pub connected: bool,
     pub kind: String,
@@ -34,4 +34,10 @@ pub trait Network {
     /// `password` is WPA/WPA2 personal (PSK); pass an empty string for an
     /// open network.
     async fn connect(&self, ssid: &str, password: &str) -> zbus::Result<()>;
+
+    /// Fired whenever NetworkManager reports a real change to the primary
+    /// active connection — never on a timer. `nkdhrctl watch network` is a
+    /// thin loop over this signal.
+    #[zbus(signal)]
+    fn changed(&self, status: NetworkStatus) -> zbus::Result<()>;
 }

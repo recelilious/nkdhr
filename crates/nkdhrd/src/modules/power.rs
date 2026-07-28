@@ -1,11 +1,19 @@
-use nkdhr_ipc::PowerStatus;
+use std::thread;
+
+use nkdhr_ipc::{POWER_OBJECT_PATH, PowerStatus};
 use zbus::blocking::Connection;
 use zbus::message::Header;
 use zbus::zvariant::Optional;
 
 use crate::backends::logind::ManagerProxyBlocking;
-use crate::backends::polkit;
 use crate::backends::upower::DisplayDeviceProxyBlocking;
+use crate::backends::{dbus_properties, polkit};
+
+/// UPower's own well-known name and the single, stable object path of its
+/// `DisplayDevice` aggregate — the same object [`read_status`] reads and
+/// [`spawn_watcher`] watches for `PropertiesChanged`.
+const UPOWER_SERVICE: &str = "org.freedesktop.UPower";
+const DISPLAY_DEVICE_PATH: &str = "/org/freedesktop/UPower/devices/DisplayDevice";
 
 pub struct Power {
     system: Connection,
@@ -20,15 +28,7 @@ impl Power {
 #[zbus::interface(name = "org.nkdhr.Power1")]
 impl Power {
     fn get_status(&self) -> zbus::fdo::Result<PowerStatus> {
-        let device = DisplayDeviceProxyBlocking::new(&self.system)?;
-
-        Ok(PowerStatus {
-            is_present: device.is_present()?,
-            percentage: device.percentage()?,
-            state: friendly_state(device.state()?),
-            time_to_empty_secs: seconds(device.time_to_empty()?),
-            time_to_full_secs: seconds(device.time_to_full()?),
-        })
+        read_status(&self.system)
     }
 
     async fn power_off(
@@ -70,6 +70,55 @@ impl Power {
         .await?;
         Ok(ManagerProxyBlocking::new(&self.system)?.suspend(false)?)
     }
+
+    /// Fired whenever [`spawn_watcher`] observes a real change to the
+    /// status [`get_status`](Self::get_status) would now return.
+    #[zbus(signal)]
+    async fn changed(
+        signal_emitter: &zbus::object_server::SignalEmitter<'_>,
+        status: PowerStatus,
+    ) -> zbus::Result<()>;
+}
+
+fn read_status(system: &Connection) -> zbus::fdo::Result<PowerStatus> {
+    let device = DisplayDeviceProxyBlocking::new(system)?;
+
+    Ok(PowerStatus {
+        is_present: device.is_present()?,
+        percentage: device.percentage()?,
+        state: friendly_state(device.state()?),
+        time_to_empty_secs: seconds(device.time_to_empty()?),
+        time_to_full_secs: seconds(device.time_to_full()?),
+    })
+}
+
+/// Spawns the background thread that emits `Power1.Changed` whenever
+/// UPower reports a real change to the `DisplayDevice` aggregate. Never
+/// polls: the thread blocks on UPower's own `PropertiesChanged` signal
+/// between events.
+pub fn spawn_watcher(system: Connection, session: Connection) {
+    thread::spawn(move || {
+        if let Err(err) = watch(&system, &session) {
+            eprintln!("nkdhrd: power watcher exited: {err}");
+        }
+    });
+}
+
+fn watch(system: &Connection, session: &Connection) -> zbus::Result<()> {
+    let events = dbus_properties::watch(system, UPOWER_SERVICE, DISPLAY_DEVICE_PATH)?;
+    let iface = session
+        .object_server()
+        .interface::<_, Power>(POWER_OBJECT_PATH)?;
+
+    let mut last = None;
+    for _event in events {
+        let status = read_status(system)?;
+        if last.as_ref() != Some(&status) {
+            zbus::block_on(Power::changed(iface.signal_emitter(), status.clone()))?;
+            last = Some(status);
+        }
+    }
+    Ok(())
 }
 
 fn friendly_state(state: u32) -> String {

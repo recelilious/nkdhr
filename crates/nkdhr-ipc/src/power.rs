@@ -11,7 +11,7 @@ pub const POWER_OBJECT_PATH: &str = "/org/nkdhr/Power1";
 /// UPower reports `0` for "not applicable" (e.g. `time_to_full_secs` while
 /// discharging) rather than omitting the value; `Optional` turns that back
 /// into an absence a client can tell apart from a real zero.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct PowerStatus {
     pub is_present: bool,
     pub percentage: f64,
@@ -32,4 +32,10 @@ pub trait Power {
     async fn power_off(&self) -> zbus::Result<()>;
     async fn reboot(&self) -> zbus::Result<()>;
     async fn suspend(&self) -> zbus::Result<()>;
+
+    /// Fired whenever UPower reports a real change to the battery/AC
+    /// aggregate — never on a timer. `nkdhrctl watch battery` is a thin
+    /// loop over this signal.
+    #[zbus(signal)]
+    fn changed(&self, status: PowerStatus) -> zbus::Result<()>;
 }

@@ -67,11 +67,21 @@ enum AudioCommand {
     SetSinkMuted(bool),
 }
 
+/// A callback invoked by the worker thread's own `reconcile()` step,
+/// whenever the tracked sink/source state may have changed — the
+/// event-driven hook [`crate::modules::audio::Audio`]'s CTRL-4 watcher
+/// attaches to, so that emitting `Audio1.Changed` needs no separate
+/// polling thread of its own.
+type ChangeCallback = Box<dyn Fn() + Send>;
+type SharedChangeCallback = Arc<Mutex<Option<ChangeCallback>>>;
+
 /// Handle returned by [`spawn`]: the live status cache plus a way to
 /// queue mutating requests for the worker thread to apply.
+#[derive(Clone)]
 pub struct PipeWireHandle {
     pub state: SharedAudioState,
     commands: Sender<AudioCommand>,
+    on_change: SharedChangeCallback,
 }
 
 impl PipeWireHandle {
@@ -82,6 +92,16 @@ impl PipeWireHandle {
     pub fn set_sink_muted(&self, muted: bool) {
         let _ = self.commands.send(AudioCommand::SetSinkMuted(muted));
     }
+
+    /// Registers the callback [`Tracker::reconcile`] invokes after every
+    /// update to the shared state. Only one callback is kept; nkdhrd only
+    /// ever has one `Audio` module, so a list is unneeded complexity.
+    pub fn on_change(&self, callback: impl Fn() + Send + 'static) {
+        *self
+            .on_change
+            .lock()
+            .expect("audio on_change mutex poisoned") = Some(Box::new(callback));
+    }
 }
 
 /// Spawns the PipeWire worker thread and returns the handle it keeps
@@ -89,15 +109,21 @@ impl PipeWireHandle {
 pub fn spawn() -> PipeWireHandle {
     let state: SharedAudioState = Arc::new(Mutex::new(AudioState::default()));
     let state_for_thread = Arc::clone(&state);
+    let on_change: SharedChangeCallback = Arc::new(Mutex::new(None));
+    let on_change_for_thread = Arc::clone(&on_change);
     let (commands, command_rx) = mpsc::channel();
 
     thread::spawn(move || {
-        if let Err(err) = run(state_for_thread, command_rx) {
+        if let Err(err) = run(state_for_thread, on_change_for_thread, command_rx) {
             eprintln!("nkdhrd: PipeWire worker exited: {err}");
         }
     });
 
-    PipeWireHandle { state, commands }
+    PipeWireHandle {
+        state,
+        commands,
+        on_change,
+    }
 }
 
 /// Which default audio device a tracked node might be — playback (sink)
@@ -179,6 +205,7 @@ impl KindState {
 
 struct Tracker {
     state: SharedAudioState,
+    on_change: SharedChangeCallback,
     registry: RegistryRc,
     sinks: KindState,
     sources: KindState,
@@ -197,16 +224,26 @@ impl Tracker {
         let sink = self.sinks.resolved();
         let source = self.sources.resolved();
 
-        let mut state = self.state.lock().expect("audio state mutex poisoned");
-        if let Some(node) = sink {
-            state.sink_name = Some(node.name.clone());
-            state.sink_volume_percent = node.volume_percent;
-            state.sink_muted = node.muted;
+        {
+            let mut state = self.state.lock().expect("audio state mutex poisoned");
+            if let Some(node) = sink {
+                state.sink_name = Some(node.name.clone());
+                state.sink_volume_percent = node.volume_percent;
+                state.sink_muted = node.muted;
+            }
+            if let Some(node) = source {
+                state.source_name = Some(node.name.clone());
+                state.source_volume_percent = node.volume_percent;
+                state.source_muted = node.muted;
+            }
         }
-        if let Some(node) = source {
-            state.source_name = Some(node.name.clone());
-            state.source_volume_percent = node.volume_percent;
-            state.source_muted = node.muted;
+
+        if let Some(callback) = &*self
+            .on_change
+            .lock()
+            .expect("audio on_change mutex poisoned")
+        {
+            callback();
         }
     }
 
@@ -226,7 +263,11 @@ impl Tracker {
     }
 }
 
-fn run(state: SharedAudioState, commands: Receiver<AudioCommand>) -> Result<(), pipewire::Error> {
+fn run(
+    state: SharedAudioState,
+    on_change: SharedChangeCallback,
+    commands: Receiver<AudioCommand>,
+) -> Result<(), pipewire::Error> {
     pipewire::init();
 
     let main_loop = pipewire::main_loop::MainLoopRc::new(None)?;
@@ -236,6 +277,7 @@ fn run(state: SharedAudioState, commands: Receiver<AudioCommand>) -> Result<(), 
 
     let tracker = Rc::new(RefCell::new(Tracker {
         state,
+        on_change,
         registry: registry.clone(),
         sinks: KindState::default(),
         sources: KindState::default(),

@@ -1,7 +1,9 @@
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::{fs, io};
 
-use nkdhr_ipc::BrightnessStatus;
+use inotify::{Inotify, WatchMask};
+use nkdhr_ipc::{BRIGHTNESS_OBJECT_PATH, BrightnessStatus};
 use zbus::blocking::Connection;
 use zbus::message::Header;
 
@@ -44,19 +46,20 @@ impl Brightness {
                 ))
             })
     }
+
+    /// The backlight device directory this instance reads from, for
+    /// [`spawn_watcher`] to watch without re-running backlight-device
+    /// discovery a second time (and risking picking a different device on
+    /// hardware with more than one).
+    pub fn device_path(&self) -> &Path {
+        &self.device
+    }
 }
 
 #[zbus::interface(name = "org.nkdhr.Brightness1")]
 impl Brightness {
     fn get_status(&self) -> zbus::fdo::Result<BrightnessStatus> {
-        let brightness = read_u32(&self.device.join("brightness"))?;
-        let max = read_u32(&self.device.join("max_brightness"))?;
-        let percent = (brightness * 100 + max / 2)
-            .checked_div(max)
-            .unwrap_or(0)
-            .min(100) as u8;
-
-        Ok(BrightnessStatus { percent })
+        read_status(&self.device)
     }
 
     /// Sets brightness via `logind`'s `Session.SetBrightness` on the
@@ -87,6 +90,14 @@ impl Brightness {
             .build()?;
         Ok(session.set_brightness("backlight", self.device_name()?, value)?)
     }
+
+    /// Fired whenever [`spawn_watcher`] observes a real change to the
+    /// status [`get_status`](Self::get_status) would now return.
+    #[zbus(signal)]
+    async fn changed(
+        signal_emitter: &zbus::object_server::SignalEmitter<'_>,
+        status: BrightnessStatus,
+    ) -> zbus::Result<()>;
 }
 
 fn read_u32(path: &Path) -> zbus::fdo::Result<u32> {
@@ -95,4 +106,58 @@ fn read_u32(path: &Path) -> zbus::fdo::Result<u32> {
         .trim()
         .parse()
         .map_err(|err| zbus::fdo::Error::Failed(format!("parsing {}: {err}", path.display())))
+}
+
+fn read_status(device: &Path) -> zbus::fdo::Result<BrightnessStatus> {
+    let brightness = read_u32(&device.join("brightness"))?;
+    let max = read_u32(&device.join("max_brightness"))?;
+    let percent = (brightness * 100 + max / 2)
+        .checked_div(max)
+        .unwrap_or(0)
+        .min(100) as u8;
+
+    Ok(BrightnessStatus { percent })
+}
+
+/// Spawns the background thread that emits `Brightness1.Changed` whenever
+/// the backlight device's `brightness` file reports a real change — never
+/// on a timer. Sysfs has no D-Bus signal of its own, so this watches the
+/// file directly via `inotify` rather than polling: the kernel backlight
+/// driver writes this file (via `sysfs_notify`) on every change, whether
+/// triggered by `nkdhrd` itself (through `logind`'s `SetBrightness`), a
+/// hotkey, or another process, so this catches every source, not just
+/// nkdhr's own.
+pub fn spawn_watcher(device: PathBuf, session: Connection) {
+    thread::spawn(move || {
+        if let Err(err) = watch(&device, &session) {
+            eprintln!("nkdhrd: brightness watcher exited: {err}");
+        }
+    });
+}
+
+fn watch(device: &Path, session: &Connection) -> io::Result<()> {
+    let mut inotify = Inotify::init()?;
+    inotify
+        .watches()
+        .add(device.join("brightness"), WatchMask::MODIFY)?;
+
+    let iface = session
+        .object_server()
+        .interface::<_, Brightness>(BRIGHTNESS_OBJECT_PATH)
+        .map_err(io::Error::other)?;
+
+    let mut last = None;
+    let mut buffer = [0; 1024];
+    loop {
+        // Blocks on the inotify file descriptor until the kernel reports at
+        // least one event; never polls.
+        for _event in inotify.read_events_blocking(&mut buffer)? {
+            let status = read_status(device).map_err(io::Error::other)?;
+            if last.as_ref() != Some(&status) {
+                zbus::block_on(Brightness::changed(iface.signal_emitter(), status.clone()))
+                    .map_err(io::Error::other)?;
+                last = Some(status);
+            }
+        }
+    }
 }

@@ -5,7 +5,7 @@ use zbus::zvariant::Type;
 pub const BRIGHTNESS_OBJECT_PATH: &str = "/org/nkdhr/Brightness1";
 
 /// Snapshot returned by [`BrightnessProxy::get_status`].
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct BrightnessStatus {
     pub percent: u8,
 }
@@ -20,4 +20,10 @@ pub struct BrightnessStatus {
 pub trait Brightness {
     async fn get_status(&self) -> zbus::Result<BrightnessStatus>;
     async fn set(&self, percent: u8) -> zbus::Result<()>;
+
+    /// Fired whenever the backlight device reports a real change — never on
+    /// a timer. `nkdhrctl watch brightness` is a thin loop over this
+    /// signal.
+    #[zbus(signal)]
+    fn changed(&self, status: BrightnessStatus) -> zbus::Result<()>;
 }

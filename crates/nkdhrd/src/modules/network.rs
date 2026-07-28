@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::thread;
 
-use nkdhr_ipc::NetworkStatus;
+use nkdhr_ipc::{NETWORK_OBJECT_PATH, NetworkStatus};
 use zbus::blocking::Connection;
 use zbus::message::Header;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -9,7 +10,7 @@ use crate::backends::network_manager::{
     AccessPointProxyBlocking, ActiveConnectionProxyBlocking, DeviceProxyBlocking,
     IP4ConfigProxyBlocking, NetworkManagerProxyBlocking, WirelessProxyBlocking,
 };
-use crate::backends::polkit;
+use crate::backends::{dbus_properties, polkit};
 
 /// `NM_DEVICE_TYPE_WIFI`; see `NetworkManager.h`. No typed enum for this
 /// in nkdhr — the base feature only ever compares against this one
@@ -20,6 +21,15 @@ const NM_DEVICE_TYPE_WIFI: u32 = 2;
 /// object-path-valued properties.
 const NO_OBJECT: &str = "/";
 
+/// NetworkManager's own well-known name and root object path — the same
+/// object [`spawn_watcher`] watches for `PropertiesChanged`. Watching only
+/// this coarse, always-present root object (rather than the primary active
+/// connection's own sub-objects, which come and go as connections change)
+/// keeps the watcher's subscription stable across every connect/disconnect;
+/// see `INTERNALS.md` for the resulting scope trade-off.
+const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
+const NM_PATH: &str = "/org/freedesktop/NetworkManager";
+
 pub struct Network {
     system: Connection,
 }
@@ -28,68 +38,12 @@ impl Network {
     pub fn new(system: Connection) -> Self {
         Self { system }
     }
-
-    fn disconnected() -> NetworkStatus {
-        NetworkStatus {
-            connected: false,
-            kind: "none".to_owned(),
-            interface: None.into(),
-            ssid: None.into(),
-            signal_percent: None.into(),
-            ip4_address: None.into(),
-        }
-    }
 }
 
 #[zbus::interface(name = "org.nkdhr.Network1")]
 impl Network {
     fn get_status(&self) -> zbus::fdo::Result<NetworkStatus> {
-        let nm = NetworkManagerProxyBlocking::new(&self.system)?;
-        let primary = nm.primary_connection()?;
-        if primary.as_str() == NO_OBJECT {
-            return Ok(Self::disconnected());
-        }
-
-        let active = ActiveConnectionProxyBlocking::builder(&self.system)
-            .path(primary)?
-            .build()?;
-        let kind = active.r#type()?;
-        let device_path = active.devices()?.into_iter().next();
-
-        let interface = device_path
-            .clone()
-            .map(|path| -> zbus::Result<String> {
-                let device = DeviceProxyBlocking::builder(&self.system)
-                    .path(path)?
-                    .build()?;
-                device.interface()
-            })
-            .transpose()?;
-
-        let (ssid, signal_percent) = if kind == "802-11-wireless" {
-            wifi_details(&self.system, device_path)?
-        } else {
-            (None, None)
-        };
-
-        let ip4_config = active.ip4_config()?;
-        let ip4_address = if ip4_config.as_str() == NO_OBJECT {
-            None
-        } else {
-            let ip4 = IP4ConfigProxyBlocking::builder(&self.system)
-                .path(ip4_config)?
-                .build()?;
-            first_address(&ip4.address_data()?)
-        };
-
-        Ok(NetworkStatus {
-            connected: true,
-            kind: friendly_kind(&kind),
-            interface: interface.into(),
-            ssid: ssid.into(),
-            signal_percent: signal_percent.into(),
-            ip4_address: ip4_address.into(),
-        })
+        read_status(&self.system)
     }
 
     /// Connects to a Wi-Fi network by SSID, creating a new NetworkManager
@@ -122,6 +76,105 @@ impl Network {
         nm.add_and_activate_connection(settings, &device_path, &no_object)?;
         Ok(())
     }
+
+    /// Fired whenever [`spawn_watcher`] observes a real change to the
+    /// status [`get_status`](Self::get_status) would now return.
+    #[zbus(signal)]
+    async fn changed(
+        signal_emitter: &zbus::object_server::SignalEmitter<'_>,
+        status: NetworkStatus,
+    ) -> zbus::Result<()>;
+}
+
+fn disconnected() -> NetworkStatus {
+    NetworkStatus {
+        connected: false,
+        kind: "none".to_owned(),
+        interface: None.into(),
+        ssid: None.into(),
+        signal_percent: None.into(),
+        ip4_address: None.into(),
+    }
+}
+
+fn read_status(system: &Connection) -> zbus::fdo::Result<NetworkStatus> {
+    let nm = NetworkManagerProxyBlocking::new(system)?;
+    let primary = nm.primary_connection()?;
+    if primary.as_str() == NO_OBJECT {
+        return Ok(disconnected());
+    }
+
+    let active = ActiveConnectionProxyBlocking::builder(system)
+        .path(primary)?
+        .build()?;
+    let kind = active.r#type()?;
+    let device_path = active.devices()?.into_iter().next();
+
+    let interface = device_path
+        .clone()
+        .map(|path| -> zbus::Result<String> {
+            let device = DeviceProxyBlocking::builder(system).path(path)?.build()?;
+            device.interface()
+        })
+        .transpose()?;
+
+    let (ssid, signal_percent) = if kind == "802-11-wireless" {
+        wifi_details(system, device_path)?
+    } else {
+        (None, None)
+    };
+
+    let ip4_config = active.ip4_config()?;
+    let ip4_address = if ip4_config.as_str() == NO_OBJECT {
+        None
+    } else {
+        let ip4 = IP4ConfigProxyBlocking::builder(system)
+            .path(ip4_config)?
+            .build()?;
+        first_address(&ip4.address_data()?)
+    };
+
+    Ok(NetworkStatus {
+        connected: true,
+        kind: friendly_kind(&kind),
+        interface: interface.into(),
+        ssid: ssid.into(),
+        signal_percent: signal_percent.into(),
+        ip4_address: ip4_address.into(),
+    })
+}
+
+/// Spawns the background thread that emits `Network1.Changed` whenever
+/// NetworkManager reports a real change to its root object — never on a
+/// timer. Watching only the root object (rather than the primary active
+/// connection's own sub-objects) is a deliberate scope decision: it misses
+/// changes confined entirely to a sub-object (e.g. Wi-Fi signal strength
+/// drifting with no accompanying state transition), but reliably catches
+/// every connect/disconnect, which is what CTRL-4's verification checklist
+/// requires.
+pub fn spawn_watcher(system: Connection, session: Connection) {
+    thread::spawn(move || {
+        if let Err(err) = watch(&system, &session) {
+            eprintln!("nkdhrd: network watcher exited: {err}");
+        }
+    });
+}
+
+fn watch(system: &Connection, session: &Connection) -> zbus::Result<()> {
+    let events = dbus_properties::watch(system, NM_SERVICE, NM_PATH)?;
+    let iface = session
+        .object_server()
+        .interface::<_, Network>(NETWORK_OBJECT_PATH)?;
+
+    let mut last = None;
+    for _event in events {
+        let status = read_status(system)?;
+        if last.as_ref() != Some(&status) {
+            zbus::block_on(Network::changed(iface.signal_emitter(), status.clone()))?;
+            last = Some(status);
+        }
+    }
+    Ok(())
 }
 
 fn wifi_device_path(

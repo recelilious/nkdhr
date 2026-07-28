@@ -17,7 +17,7 @@ pub const AUDIO_OBJECT_PATH: &str = "/org/nkdhr/Audio1";
 /// indistinguishable from a real "not muted" — encoding `Optional<bool>`
 /// panics by design. `false` doubles as nkdhr's "not known to be muted"
 /// sentinel here.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct AudioStatus {
     pub sink_name: Optional<String>,
     pub sink_volume_percent: Optional<u8>,
@@ -38,4 +38,10 @@ pub trait Audio {
     async fn get_status(&self) -> zbus::Result<AudioStatus>;
     async fn set_volume(&self, percent: u8) -> zbus::Result<()>;
     async fn set_mute(&self, muted: bool) -> zbus::Result<()>;
+
+    /// Fired whenever PipeWire reports a real change to the default sink or
+    /// source — never on a timer. `nkdhrctl watch audio` is a thin loop
+    /// over this signal.
+    #[zbus(signal)]
+    fn changed(&self, status: AudioStatus) -> zbus::Result<()>;
 }
