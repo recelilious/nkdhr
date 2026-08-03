@@ -11,4 +11,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-smithay = { version = "0.7.0", default-features = false, features = ["backend_winit"] }
+smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "wayland_frontend"] }
