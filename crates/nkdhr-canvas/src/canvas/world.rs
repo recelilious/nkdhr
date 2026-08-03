@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 
 /// Type-level marker for nkdhr's own canvas world coordinate space
@@ -52,8 +52,7 @@ impl ManagedWindow {
 /// Every window mapped on the canvas, in stacking order (last = topmost,
 /// both for rendering and for hit-testing). COMP-3 gave this a fixed
 /// implicit viewport; COMP-4's [`Viewport`] makes panning/zooming over it
-/// real. Still exactly one canvas — COMP-5's output groups are what make
-/// that plural.
+/// real. COMP-5's `App::canvases` owns one instance per first-class canvas.
 #[derive(Default)]
 pub struct Canvas {
     windows: Vec<ManagedWindow>,
@@ -147,9 +146,8 @@ impl Canvas {
 }
 
 /// A camera onto the canvas: a world-space point at the center of the
-/// view, plus a zoom factor. One per output-group member once COMP-5
-/// exists (ROADMAP §2.3); COMP-4 has exactly one, matching the nested
-/// window.
+/// view, plus a zoom factor. COMP-5 owns one per output group, shared by
+/// every physical output in that group's rigid arrangement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub center: Point<f64, World>,
@@ -162,27 +160,29 @@ impl Viewport {
         zoom: 1.0,
     };
 
-    /// World-space point under the center of `window_size` -> its on-screen
-    /// physical-pixel offset. The inverse of [`Viewport::to_world`].
-    pub fn to_screen(
+    /// World point to logical coordinates in an output group's rigid
+    /// virtual display area. Each physical output subtracts its own group
+    /// offset and applies its scale after this shared transform.
+    pub fn to_group_logical(
         self,
         point: Point<f64, World>,
-        window_size: Size<i32, Physical>,
-    ) -> Point<i32, Physical> {
-        let x = (point.x - self.center.x) * self.zoom + f64::from(window_size.w) / 2.0;
-        let y = (point.y - self.center.y) * self.zoom + f64::from(window_size.h) / 2.0;
-        (x.round() as i32, y.round() as i32).into()
+        group_size: Size<i32, Logical>,
+    ) -> Point<f64, Logical> {
+        let x = (point.x - self.center.x) * self.zoom + f64::from(group_size.w) / 2.0;
+        let y = (point.y - self.center.y) * self.zoom + f64::from(group_size.h) / 2.0;
+        (x, y).into()
     }
 
-    /// An on-screen `Logical` point (e.g. the pointer) -> the world-space
-    /// point it's currently over. The inverse of [`Viewport::to_screen`].
-    pub fn to_world(
+    /// A point relative to an output group's rigid logical rectangle into
+    /// the world viewed by that group. The inverse of
+    /// [`Viewport::to_group_logical`].
+    pub fn group_logical_to_world(
         self,
         point: Point<f64, Logical>,
-        window_size: Size<i32, Physical>,
+        group_size: Size<i32, Logical>,
     ) -> Point<f64, World> {
-        let x = (point.x - f64::from(window_size.w) / 2.0) / self.zoom + self.center.x;
-        let y = (point.y - f64::from(window_size.h) / 2.0) / self.zoom + self.center.y;
+        let x = (point.x - f64::from(group_size.w) / 2.0) / self.zoom + self.center.x;
+        let y = (point.y - f64::from(group_size.h) / 2.0) / self.zoom + self.center.y;
         (x, y).into()
     }
 
@@ -194,11 +194,11 @@ impl Viewport {
     }
 
     /// The viewport that fits `rect` (typically [`Canvas::bounding_rect`])
-    /// inside `window_size` with margin to spare, for overview mode.
+    /// inside the group's logical size with margin to spare, for overview.
     /// Never zooms *in* past 1:1 — overview only ever zooms out or stays
     /// put, per the sharpness policy (ROADMAP §2.4: 1:1 in work state,
     /// scaling blur only accepted in the transient overview state).
-    pub fn fit(rect: Rectangle<f64, World>, window_size: Size<i32, Physical>) -> Viewport {
+    pub fn fit_group(rect: Rectangle<f64, World>, group_size: Size<i32, Logical>) -> Viewport {
         const MARGIN: f64 = 1.25;
         let center = (
             rect.loc.x + rect.size.w / 2.0,
@@ -207,8 +207,8 @@ impl Viewport {
             .into();
         let content_w = rect.size.w.max(1.0) * MARGIN;
         let content_h = rect.size.h.max(1.0) * MARGIN;
-        let zoom = (f64::from(window_size.w) / content_w)
-            .min(f64::from(window_size.h) / content_h)
+        let zoom = (f64::from(group_size.w) / content_w)
+            .min(f64::from(group_size.h) / content_h)
             .min(1.0);
         Viewport { center, zoom }
     }

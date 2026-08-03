@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::os::unix::io::OwnedFd;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -8,6 +9,7 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Client;
+use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_seat, wl_surface::WlSurface};
 use smithay::utils::Serial;
@@ -28,9 +30,39 @@ use smithay::{
     delegate_shm, delegate_xdg_shell,
 };
 
+use crate::canvas::marks::CanvasMarks;
+use crate::canvas::output_group::OutputLayout;
+use crate::canvas::world::{Animation, Canvas, Drag, Viewport};
 use crate::keybindings::Keybindings;
-use crate::marks::Marks;
-use crate::world::{Animation, Canvas, Drag, Viewport};
+
+const DEFAULT_GROUP: &str = "default";
+const DEFAULT_CANVAS: &str = "default";
+
+/// Camera and transient interaction state shared by every physical output
+/// in one rigid output group.
+pub struct GroupView {
+    pub canvas: String,
+    pub viewport: Viewport,
+    pub in_overview: bool,
+    pub pre_overview_viewport: Viewport,
+    pub animation: Option<Animation>,
+    /// Last keyboard-focused surface in this group, restored when pointer
+    /// activity makes the group active again.
+    pub keyboard_focus: Option<WlSurface>,
+}
+
+impl GroupView {
+    fn new(canvas: String) -> Self {
+        Self {
+            canvas,
+            viewport: Viewport::WORK,
+            in_overview: false,
+            pre_overview_viewport: Viewport::WORK,
+            animation: None,
+            keyboard_focus: None,
+        }
+    }
+}
 
 /// Everything the compositor's protocol handlers need. Owns every piece of
 /// `wayland_frontend` state COMP-2 registers a global for; the renderer
@@ -47,38 +79,122 @@ pub struct App {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub seat: Seat<Self>,
-    /// COMP-3's world-coordinate window model: every mapped toplevel's
-    /// position, in stacking order.
-    pub canvas: Canvas,
+    /// First-class canvas worlds, keyed by the stable names used in the
+    /// output-group configuration. Disconnected canvases stay here so a
+    /// hotplug cannot discard their windows.
+    pub canvases: BTreeMap<String, Canvas>,
+    /// One camera per output group. Every physical output in a group reads
+    /// the same entry; separate groups can move independently.
+    pub group_views: BTreeMap<String, GroupView>,
+    /// Keyboard actions and newly mapped windows target the most recently
+    /// entered/clicked output group.
+    pub active_group: String,
     /// The in-progress `super+drag` move/resize interaction, if any —
-    /// `main.rs`'s `handle_input` is the only thing that reads or writes
-    /// this.
+    /// `input.rs` is the only thing that reads or writes this.
     pub drag: Option<Drag>,
     /// Hot-reloadable copy of the `canvas` CTRL-5 namespace's keybindings
     /// (see `crate::keybindings`), shared with the background thread that
     /// watches `Config1.Changed` for it.
     pub keybindings: Arc<Mutex<Keybindings>>,
-    /// COMP-4's camera onto the canvas — always what's actually rendered,
-    /// including mid-animation values (`main.rs`'s render loop advances
-    /// `animation` into this every frame).
-    pub viewport: Viewport,
-    /// Whether the canvas is currently in the zoomed-out overview state
-    /// (or animating into/out of it) rather than the normal 1:1 work
-    /// state — ROADMAP.md's sharpness policy (§2.4) ties directly to this:
-    /// scaling blur is only ever accepted while this is `true`.
-    pub in_overview: bool,
-    /// The work-state viewport to return to when overview is dismissed
-    /// without picking a window (Escape, or clicking empty space) —
-    /// captured the moment overview is entered.
-    pub pre_overview_viewport: Viewport,
-    /// The in-progress eased transition between two viewports, if any
-    /// (overview enter/exit, jumping to a mark). `None` means `viewport`
-    /// is already exactly where it should be.
-    pub animation: Option<Animation>,
-    /// COMP-4's position marks (ROADMAP.md §2.3), loaded once at startup
-    /// (`crate::marks::load`) and written back (`crate::marks::save`)
-    /// whenever one is set.
-    pub marks: Marks,
+    /// COMP-4 position marks, now namespaced by first-class canvas.
+    pub marks: CanvasMarks,
+}
+
+impl App {
+    pub fn new(
+        display_handle: &DisplayHandle,
+        dmabuf_state: DmabufState,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut seat_state = SeatState::new();
+        let mut seat = seat_state.new_wl_seat(display_handle, "nkdhr-canvas");
+        seat.add_keyboard(Default::default(), 200, 200)?;
+        seat.add_pointer();
+
+        let marks = crate::canvas::marks::load();
+        let mark_count = marks.values().map(|marks| marks.len()).sum::<usize>();
+        println!("nkdhr-canvas: loaded {mark_count} saved mark(s)");
+
+        let canvases = BTreeMap::from([(DEFAULT_CANVAS.to_owned(), Canvas::new())]);
+        let group_views = BTreeMap::from([(
+            DEFAULT_GROUP.to_owned(),
+            GroupView::new(DEFAULT_CANVAS.to_owned()),
+        )]);
+
+        Ok(Self {
+            start_time: Instant::now(),
+            compositor_state: CompositorState::new::<Self>(display_handle),
+            xdg_shell_state: XdgShellState::new::<Self>(display_handle),
+            shm_state: ShmState::new::<Self>(display_handle, Vec::new()),
+            dmabuf_state,
+            seat_state,
+            data_device_state: DataDeviceState::new::<Self>(display_handle),
+            seat,
+            canvases,
+            group_views,
+            active_group: DEFAULT_GROUP.to_owned(),
+            drag: None,
+            keybindings: crate::keybindings::watch(),
+            marks,
+        })
+    }
+
+    /// Reconcile hotplug/config output identities without deleting stale
+    /// worlds or views. Reconnecting a group resumes exactly where it was.
+    pub fn reconcile_output_layout(&mut self, layout: &OutputLayout) {
+        for group in &layout.groups {
+            self.canvases.entry(group.canvas.clone()).or_default();
+            self.group_views
+                .entry(group.name.clone())
+                .and_modify(|view| view.canvas.clone_from(&group.canvas))
+                .or_insert_with(|| GroupView::new(group.canvas.clone()));
+        }
+        if !layout
+            .groups
+            .iter()
+            .any(|group| group.name == self.active_group)
+            && let Some(group) = layout.groups.first()
+        {
+            let group = group.name.clone();
+            self.activate_group(&group);
+        }
+    }
+
+    pub fn activate_group(&mut self, group: &str) {
+        if self.group_views.contains_key(group) && self.active_group != group {
+            let focus = self.group_views[group].keyboard_focus.clone();
+            self.active_group = group.to_owned();
+            self.drag = None;
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(self, focus, smithay::utils::SERIAL_COUNTER.next_serial());
+            }
+        }
+    }
+
+    pub fn active_view(&self) -> &GroupView {
+        self.group_views
+            .get(&self.active_group)
+            .expect("the active output group must have view state")
+    }
+
+    pub fn active_view_mut(&mut self) -> &mut GroupView {
+        self.group_views
+            .get_mut(&self.active_group)
+            .expect("the active output group must have view state")
+    }
+
+    pub fn active_canvas(&self) -> &Canvas {
+        let canvas = &self.active_view().canvas;
+        self.canvases
+            .get(canvas)
+            .expect("an output group must reference a live canvas")
+    }
+
+    pub fn active_canvas_mut(&mut self) -> &mut Canvas {
+        let canvas = self.active_view().canvas.clone();
+        self.canvases
+            .get_mut(&canvas)
+            .expect("an output group must reference a live canvas")
+    }
 }
 
 /// Per-client state `wayland_server` asks every client to carry. Only the
@@ -162,8 +278,12 @@ impl XdgShellHandler for App {
         });
         surface.send_configure();
 
-        let position = self.canvas.map(surface.clone());
-        println!("nkdhr-canvas: mapped window at world {position:?}");
+        let group = self.active_group.clone();
+        let canvas_name = self.active_view().canvas.clone();
+        let position = self.active_canvas_mut().map(surface.clone());
+        println!(
+            "nkdhr-canvas: mapped window on canvas {canvas_name:?} via group {group:?} at world {position:?}"
+        );
 
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -186,7 +306,14 @@ impl XdgShellHandler for App {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        self.canvas.unmap(surface.wl_surface());
+        for canvas in self.canvases.values_mut() {
+            canvas.unmap(surface.wl_surface());
+        }
+        for view in self.group_views.values_mut() {
+            if view.keyboard_focus.as_ref() == Some(surface.wl_surface()) {
+                view.keyboard_focus = None;
+            }
+        }
     }
 }
 
@@ -199,7 +326,9 @@ impl SeatHandler for App {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.active_view_mut().keyboard_focus = focused.cloned();
+    }
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 }
 
