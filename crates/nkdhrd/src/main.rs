@@ -28,7 +28,7 @@ use zbus::fdo::RequestNameFlags;
 /// entry — see `backends::config_store`'s module doc for why it started
 /// empty — grown by later phases (UI-4's `theme`, ...) adding their own.
 static NAMESPACES: &[NamespaceSchema] =
-    &[NamespaceSchema::of::<namespaces::canvas::CanvasKeybindings>()];
+    &[NamespaceSchema::of::<namespaces::canvas::CanvasSettings>()];
 
 /// `$XDG_CONFIG_HOME/nkdhr`, falling back to `$HOME/.config/nkdhr` per the
 /// XDG base directory spec.

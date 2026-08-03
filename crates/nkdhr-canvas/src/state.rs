@@ -29,7 +29,8 @@ use smithay::{
 };
 
 use crate::keybindings::Keybindings;
-use crate::world::{Canvas, Drag};
+use crate::marks::Marks;
+use crate::world::{Animation, Canvas, Drag, Viewport};
 
 /// Everything the compositor's protocol handlers need. Owns every piece of
 /// `wayland_frontend` state COMP-2 registers a global for; the renderer
@@ -53,10 +54,31 @@ pub struct App {
     /// `main.rs`'s `handle_input` is the only thing that reads or writes
     /// this.
     pub drag: Option<Drag>,
-    /// Hot-reloadable copy of the `canvas` CTRL-5 namespace (see
-    /// `crate::keybindings`), shared with the background thread that
+    /// Hot-reloadable copy of the `canvas` CTRL-5 namespace's keybindings
+    /// (see `crate::keybindings`), shared with the background thread that
     /// watches `Config1.Changed` for it.
     pub keybindings: Arc<Mutex<Keybindings>>,
+    /// COMP-4's camera onto the canvas — always what's actually rendered,
+    /// including mid-animation values (`main.rs`'s render loop advances
+    /// `animation` into this every frame).
+    pub viewport: Viewport,
+    /// Whether the canvas is currently in the zoomed-out overview state
+    /// (or animating into/out of it) rather than the normal 1:1 work
+    /// state — ROADMAP.md's sharpness policy (§2.4) ties directly to this:
+    /// scaling blur is only ever accepted while this is `true`.
+    pub in_overview: bool,
+    /// The work-state viewport to return to when overview is dismissed
+    /// without picking a window (Escape, or clicking empty space) —
+    /// captured the moment overview is entered.
+    pub pre_overview_viewport: Viewport,
+    /// The in-progress eased transition between two viewports, if any
+    /// (overview enter/exit, jumping to a mark). `None` means `viewport`
+    /// is already exactly where it should be.
+    pub animation: Option<Animation>,
+    /// COMP-4's position marks (ROADMAP.md §2.3), loaded once at startup
+    /// (`crate::marks::load`) and written back (`crate::marks::save`)
+    /// whenever one is set.
+    pub marks: Marks,
 }
 
 /// Per-client state `wayland_server` asks every client to carry. Only the

@@ -1,13 +1,15 @@
+use std::time::{Duration, Instant};
+
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Size};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 
 /// Type-level marker for nkdhr's own canvas world coordinate space
 /// (ROADMAP.md §2.3) — distinct from Smithay's own `Logical`/`Physical`,
 /// since a canvas is unbounded and output-independent, unlike either of
 /// those. `f64` throughout: the canvas is conceptually infinite, and
-/// COMP-4's zoom will make non-integer positions and sizes routine.
+/// COMP-4's zoom makes non-integer positions and sizes routine.
 #[derive(Debug)]
 pub struct World;
 
@@ -34,12 +36,24 @@ impl ManagedWindow {
     pub fn rect(&self) -> Rectangle<f64, World> {
         Rectangle::new(self.position, self.size())
     }
+
+    /// The window's world-space center — where overview mode's
+    /// click-to-zoom animates the viewport to.
+    pub fn center(&self) -> Point<f64, World> {
+        let rect = self.rect();
+        (
+            rect.loc.x + rect.size.w / 2.0,
+            rect.loc.y + rect.size.h / 2.0,
+        )
+            .into()
+    }
 }
 
 /// Every window mapped on the canvas, in stacking order (last = topmost,
-/// both for rendering and for hit-testing) — COMP-3 has exactly one
-/// canvas and one implicit viewport; COMP-4 is what makes either of those
-/// plural or introduces real pan/zoom.
+/// both for rendering and for hit-testing). COMP-3 gave this a fixed
+/// implicit viewport; COMP-4's [`Viewport`] makes panning/zooming over it
+/// real. Still exactly one canvas — COMP-5's output groups are what make
+/// that plural.
 #[derive(Default)]
 pub struct Canvas {
     windows: Vec<ManagedWindow>,
@@ -119,30 +133,144 @@ impl Canvas {
             .map_or(0, |index| (index + 1) % self.windows.len());
         self.windows.get(start)
     }
+
+    /// The smallest world-space rect containing every mapped window, for
+    /// overview mode to fit its zoomed-out view to. `None` with nothing
+    /// mapped — the caller decides what "overview of an empty canvas"
+    /// means (COMP-4: just don't zoom at all).
+    pub fn bounding_rect(&self) -> Option<Rectangle<f64, World>> {
+        self.windows
+            .iter()
+            .map(ManagedWindow::rect)
+            .reduce(|a, b| a.merge(b))
+    }
 }
 
-/// COMP-3 has no real viewport yet (no pan, no zoom — that's COMP-4): the
-/// nested window looks directly at world-space origin at 1:1 scale, so
-/// converting a pointer's on-screen `Logical` position into a `World`
-/// position is a straight coordinate-copy today. Kept as a named
-/// conversion rather than inlined `.into()` at each call site so COMP-4
-/// only has to change *this* function (to subtract a real viewport origin
-/// and divide by zoom) — every caller stays the same.
-pub fn logical_to_world(point: Point<f64, Logical>) -> Point<f64, World> {
-    (point.x, point.y).into()
+/// A camera onto the canvas: a world-space point at the center of the
+/// view, plus a zoom factor. One per output-group member once COMP-5
+/// exists (ROADMAP §2.3); COMP-4 has exactly one, matching the nested
+/// window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub center: Point<f64, World>,
+    pub zoom: f64,
 }
 
-/// The world-space equivalent of a `Logical` pointer-motion delta — same
-/// "nothing to convert yet, COMP-4 changes only this" reasoning as
-/// [`logical_to_world`].
-pub fn logical_delta_to_world(delta: Point<f64, Logical>) -> Point<f64, World> {
-    (delta.x, delta.y).into()
+impl Viewport {
+    pub const WORK: Viewport = Viewport {
+        center: Point::new(0.0, 0.0),
+        zoom: 1.0,
+    };
+
+    /// World-space point under the center of `window_size` -> its on-screen
+    /// physical-pixel offset. The inverse of [`Viewport::to_world`].
+    pub fn to_screen(
+        self,
+        point: Point<f64, World>,
+        window_size: Size<i32, Physical>,
+    ) -> Point<i32, Physical> {
+        let x = (point.x - self.center.x) * self.zoom + f64::from(window_size.w) / 2.0;
+        let y = (point.y - self.center.y) * self.zoom + f64::from(window_size.h) / 2.0;
+        (x.round() as i32, y.round() as i32).into()
+    }
+
+    /// An on-screen `Logical` point (e.g. the pointer) -> the world-space
+    /// point it's currently over. The inverse of [`Viewport::to_screen`].
+    pub fn to_world(
+        self,
+        point: Point<f64, Logical>,
+        window_size: Size<i32, Physical>,
+    ) -> Point<f64, World> {
+        let x = (point.x - f64::from(window_size.w) / 2.0) / self.zoom + self.center.x;
+        let y = (point.y - f64::from(window_size.h) / 2.0) / self.zoom + self.center.y;
+        (x, y).into()
+    }
+
+    /// A `Logical` pointer-motion delta (e.g. from a drag) -> the
+    /// world-space distance it represents at this viewport's current zoom
+    /// — screen pixels shrink to fewer world units as zoom increases.
+    pub fn to_world_delta(self, delta: Point<f64, Logical>) -> Point<f64, World> {
+        (delta.x / self.zoom, delta.y / self.zoom).into()
+    }
+
+    /// The viewport that fits `rect` (typically [`Canvas::bounding_rect`])
+    /// inside `window_size` with margin to spare, for overview mode.
+    /// Never zooms *in* past 1:1 — overview only ever zooms out or stays
+    /// put, per the sharpness policy (ROADMAP §2.4: 1:1 in work state,
+    /// scaling blur only accepted in the transient overview state).
+    pub fn fit(rect: Rectangle<f64, World>, window_size: Size<i32, Physical>) -> Viewport {
+        const MARGIN: f64 = 1.25;
+        let center = (
+            rect.loc.x + rect.size.w / 2.0,
+            rect.loc.y + rect.size.h / 2.0,
+        )
+            .into();
+        let content_w = rect.size.w.max(1.0) * MARGIN;
+        let content_h = rect.size.h.max(1.0) * MARGIN;
+        let zoom = (f64::from(window_size.w) / content_w)
+            .min(f64::from(window_size.h) / content_h)
+            .min(1.0);
+        Viewport { center, zoom }
+    }
 }
 
-/// An in-progress compositor-driven window interaction, started by a
-/// modifier-held pointer drag (`super+drag` to move, `super+right-drag`
-/// to resize — see `docs-staging/canvas/USAGE.md`). Not a Smithay
-/// `PointerGrab`: those exist for protocol-visible grabs (popup dismissal,
+/// An in-progress eased transition between two [`Viewport`]s — COMP-4's
+/// "animated transitions" (overview enter/exit, jumping to a mark), driven
+/// by the render loop's own frame timing rather than a separate animation
+/// engine (there isn't one yet; that's a Phase 3 UI concern once there are
+/// more things than viewport moves to animate).
+pub struct Animation {
+    from: Viewport,
+    to: Viewport,
+    start: Instant,
+    duration: Duration,
+}
+
+impl Animation {
+    pub fn new(from: Viewport, to: Viewport, duration: Duration) -> Self {
+        Self {
+            from,
+            to,
+            start: Instant::now(),
+            duration,
+        }
+    }
+
+    /// Where this animation is headed — what the caller should snap the
+    /// viewport to once [`Animation::advance`] returns `None`.
+    pub fn target(&self) -> Viewport {
+        self.to
+    }
+
+    /// The viewport at `now`, eased — or `None` once the animation has run
+    /// its full duration, at which point the caller should snap to `to`
+    /// directly (not keep calling this) and drop the `Animation`.
+    pub fn advance(&self, now: Instant) -> Option<Viewport> {
+        let elapsed = now.saturating_duration_since(self.start).as_secs_f64();
+        let t = elapsed / self.duration.as_secs_f64();
+        if t >= 1.0 {
+            return None;
+        }
+        // Ease-out cubic: fast start, gentle settle — a normal choice for
+        // "camera" moves, not something the project has a stronger opinion
+        // on yet (that's a Phase 3 theming/motion concern).
+        let eased = 1.0 - (1.0 - t).powi(3);
+        Some(Viewport {
+            center: (
+                self.from.center.x + (self.to.center.x - self.from.center.x) * eased,
+                self.from.center.y + (self.to.center.y - self.from.center.y) * eased,
+            )
+                .into(),
+            zoom: self.from.zoom + (self.to.zoom - self.from.zoom) * eased,
+        })
+    }
+}
+
+/// An in-progress compositor-driven interaction, started by a
+/// modifier-held pointer drag (`super+drag` to move a window,
+/// `super+right-drag` to resize one, a plain drag on empty canvas to pan
+/// — see `docs-staging/canvas/USAGE.md`). Not a Smithay `PointerGrab`:
+/// those exist for protocol-visible grabs (popup dismissal,
 /// client-requested interactive move/resize), but a WM-level modifier
 /// gesture is purely the compositor's own business, observed and handled
 /// entirely within `main.rs`'s own input dispatch before events are ever
@@ -159,5 +287,10 @@ pub enum Drag {
         surface: WlSurface,
         size_start: Size<i32, Logical>,
         pointer_start: Point<f64, Logical>,
+    },
+    Pan {
+        viewport_start: Point<f64, World>,
+        pointer_start: Point<f64, Logical>,
+        zoom: f64,
     },
 }

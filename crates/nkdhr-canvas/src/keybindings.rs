@@ -15,6 +15,7 @@ use zbus::zvariant::Value;
 pub struct Keybindings {
     pub close_window: Keysym,
     pub cycle_focus: Keysym,
+    pub overview: Keysym,
 }
 
 impl Default for Keybindings {
@@ -22,6 +23,7 @@ impl Default for Keybindings {
         Self {
             close_window: xkb::keysym_from_name("q", xkb::KEYSYM_NO_FLAGS),
             cycle_focus: xkb::keysym_from_name("Tab", xkb::KEYSYM_NO_FLAGS),
+            overview: xkb::keysym_from_name("o", xkb::KEYSYM_NO_FLAGS),
         }
     }
 }
@@ -76,6 +78,7 @@ fn fetch(connection: &Connection) -> Keybindings {
     Keybindings {
         close_window: fetch_key(&config, "canvas.close_window", defaults.close_window),
         cycle_focus: fetch_key(&config, "canvas.cycle_focus", defaults.cycle_focus),
+        overview: fetch_key(&config, "canvas.overview", defaults.overview),
     }
 }
 
