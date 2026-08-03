@@ -4,6 +4,7 @@
 
 mod audio;
 mod brightness;
+mod config;
 mod daemon;
 mod network;
 mod power;
@@ -13,6 +14,7 @@ pub use audio::{AUDIO_OBJECT_PATH, AudioProxy, AudioProxyBlocking, AudioStatus};
 pub use brightness::{
     BRIGHTNESS_OBJECT_PATH, BrightnessProxy, BrightnessProxyBlocking, BrightnessStatus,
 };
+pub use config::{CONFIG_OBJECT_PATH, ConfigProxy, ConfigProxyBlocking};
 pub use daemon::{DAEMON_OBJECT_PATH, DaemonProxy, DaemonProxyBlocking, DaemonStatus};
 pub use network::{NETWORK_OBJECT_PATH, NetworkProxy, NetworkProxyBlocking, NetworkStatus};
 pub use power::{POWER_OBJECT_PATH, PowerProxy, PowerProxyBlocking, PowerStatus};

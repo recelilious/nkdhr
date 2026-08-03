@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use nkdhr_ipc::{
-    AudioProxyBlocking, BrightnessProxyBlocking, DaemonProxyBlocking, NetworkProxyBlocking,
-    PowerProxyBlocking, SessionProxyBlocking,
+    AudioProxyBlocking, BrightnessProxyBlocking, ConfigProxyBlocking, DaemonProxyBlocking,
+    NetworkProxyBlocking, PowerProxyBlocking, SessionProxyBlocking,
 };
 use zbus::blocking::Connection;
+use zbus::zvariant::{OwnedValue, Value};
 
 #[derive(Parser)]
 #[command(name = "nkdhrctl", about = "Command-line front end to nkdhrd")]
@@ -66,6 +67,12 @@ enum Command {
         #[command(subcommand)]
         action: PowerAction,
     },
+    /// Read or write nkdhr's own settings (CTRL-5), stored as
+    /// schema-validated TOML under ~/.config/nkdhr/.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Stream one JSON line per real change to a module's status. Never
     /// polls: this blocks on nkdhrd's own change signal for the module.
     Watch { module: WatchModule },
@@ -107,6 +114,27 @@ enum NetworkAction {
         /// WPA/WPA2 personal passphrase. Omit for an open network.
         #[arg(long)]
         password: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print one config value by its dotted key (e.g. `theme.accent-color`).
+    Get {
+        key: String,
+        /// Print machine-readable JSON instead of a bare value.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one config value by its dotted key. `value` is parsed as an
+    /// integer, a float, `true`/`false`, or else kept as a string.
+    Set { key: String, value: String },
+    /// Stream one JSON line per config change under `prefix` (a namespace
+    /// name, a deeper dotted path, or omitted for every change). Never
+    /// polls: this blocks on nkdhrd's own change signal.
+    Watch {
+        #[arg(default_value = "")]
+        prefix: String,
     },
 }
 
@@ -255,6 +283,21 @@ fn run(command: Command) -> zbus::Result<()> {
                 PowerAction::Suspend => power.suspend()?,
             }
         }
+        Command::Config { action } => {
+            let config = ConfigProxyBlocking::new(&connection)?;
+            match action {
+                ConfigAction::Get { key, json } => {
+                    let value = config.get(&key)?;
+                    if json {
+                        println!("{}", owned_value_to_json(&value));
+                    } else {
+                        println!("{}", format_owned_value(&value));
+                    }
+                }
+                ConfigAction::Set { key, value } => config.set(&key, parse_value(&value))?,
+                ConfigAction::Watch { prefix } => watch_config(&connection, &prefix)?,
+            }
+        }
         Command::Watch { module } => watch(&connection, module)?,
     }
 
@@ -298,6 +341,71 @@ fn watch(connection: &Connection, module: WatchModule) -> zbus::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Loops over `Config1.Changed`, printing one JSON line per event whose key
+/// is `prefix` itself or nested under it (`""` matches every key). Never
+/// polls: each iteration blocks on the D-Bus connection until `nkdhrd`
+/// emits the next signal.
+fn watch_config(connection: &Connection, prefix: &str) -> zbus::Result<()> {
+    let config = ConfigProxyBlocking::new(connection)?;
+    for signal in config.receive_changed()? {
+        let args = signal.args()?;
+        let key = args.key();
+        if prefix.is_empty() || key == prefix || key.starts_with(&format!("{prefix}.")) {
+            println!(
+                "{{\"key\":{},\"value\":{}}}",
+                serde_json::to_string(key).expect("string always serializes"),
+                owned_value_to_json(args.value())
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Parses a `nkdhrctl config set` value argument: an integer, else a float,
+/// else `true`/`false`, else kept as a plain string. Matches the scalar
+/// types `nkdhrd`'s config store accepts (`ConfigError`'s "unsupported
+/// value" case covers anything else, e.g. arrays, which this CLI has no
+/// syntax for yet).
+fn parse_value(text: &str) -> Value<'static> {
+    if let Ok(i) = text.parse::<i64>() {
+        Value::from(i)
+    } else if let Ok(f) = text.parse::<f64>() {
+        Value::from(f)
+    } else if let Ok(b) = text.parse::<bool>() {
+        Value::from(b)
+    } else {
+        Value::from(text.to_owned())
+    }
+}
+
+/// The inverse of [`parse_value`], for values coming back from `nkdhrd`,
+/// formatted for plain-text display.
+fn format_owned_value(value: &OwnedValue) -> String {
+    match Value::from(value.clone()) {
+        Value::Bool(b) => b.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::F64(f) => f.to_string(),
+        Value::Str(s) => s.to_string(),
+        other => format!("(unsupported value type: {})", other.value_signature()),
+    }
+}
+
+/// Like [`format_owned_value`], but as a JSON literal for `--json` output
+/// and `config watch`.
+fn owned_value_to_json(value: &OwnedValue) -> String {
+    match Value::from(value.clone()) {
+        Value::Bool(b) => b.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::F64(f) => f.to_string(),
+        Value::Str(s) => serde_json::to_string(s.as_str()).expect("string always serializes"),
+        other => serde_json::to_string(&format!(
+            "(unsupported value type: {})",
+            other.value_signature()
+        ))
+        .expect("string always serializes"),
+    }
 }
 
 fn print_json<T: serde::Serialize>(value: &T) {

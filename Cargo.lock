@@ -727,7 +727,9 @@ dependencies = [
  "inotify",
  "nkdhr-ipc",
  "pipewire",
+ "serde",
  "serde_json",
+ "toml",
  "zbus",
 ]
 

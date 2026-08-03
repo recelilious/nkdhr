@@ -3,28 +3,49 @@ mod daemon;
 mod modules;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 
+use backends::config_store::{ConfigStore, NamespaceSchema};
 use backends::pipewire_client;
 use daemon::Daemon;
 use modules::audio::Audio;
 use modules::brightness::Brightness;
+use modules::config::Config;
 use modules::network::Network;
 use modules::power::Power;
 use modules::session::Session;
 use nkdhr_ipc::{
-    AUDIO_OBJECT_PATH, BRIGHTNESS_OBJECT_PATH, BUS_NAME, DAEMON_OBJECT_PATH, NETWORK_OBJECT_PATH,
-    POWER_OBJECT_PATH, SESSION_OBJECT_PATH,
+    AUDIO_OBJECT_PATH, BRIGHTNESS_OBJECT_PATH, BUS_NAME, CONFIG_OBJECT_PATH, DAEMON_OBJECT_PATH,
+    NETWORK_OBJECT_PATH, POWER_OBJECT_PATH, SESSION_OBJECT_PATH,
 };
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::fdo::RequestNameFlags;
+
+/// CTRL-5's namespace registry. Empty for now — see
+/// `backends::config_store`'s module doc for why — and grown by later
+/// phases (UI-4's `theme`, COMP-3's `canvas`, ...) each adding their own
+/// entry here as they land.
+static NAMESPACES: &[NamespaceSchema] = &[];
+
+/// `$XDG_CONFIG_HOME/nkdhr`, falling back to `$HOME/.config/nkdhr` per the
+/// XDG base directory spec.
+fn config_dir() -> zbus::Result<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(xdg).join("nkdhr"));
+    }
+    let home = std::env::var("HOME")
+        .map_err(|_| zbus::Error::Failure("neither XDG_CONFIG_HOME nor HOME is set".to_owned()))?;
+    Ok(PathBuf::from(home).join(".config").join("nkdhr"))
+}
 
 fn run() -> zbus::Result<()> {
     let system = Connection::system()?;
     let mut modules = Vec::new();
 
     let pipewire = pipewire_client::spawn();
+    let config_store = Arc::new(ConfigStore::open(config_dir()?, NAMESPACES)?);
 
     let mut builder = Builder::session()?
         .serve_at(SESSION_OBJECT_PATH, Session::new(system.clone()))?
@@ -33,11 +54,13 @@ fn run() -> zbus::Result<()> {
         .serve_at(
             AUDIO_OBJECT_PATH,
             Audio::new(system.clone(), pipewire.clone()),
-        )?;
+        )?
+        .serve_at(CONFIG_OBJECT_PATH, Config::new(config_store.clone()))?;
     modules.push("Session".to_owned());
     modules.push("Network".to_owned());
     modules.push("Power".to_owned());
     modules.push("Audio".to_owned());
+    modules.push("Config".to_owned());
 
     let mut brightness_device: Option<PathBuf> = None;
     match Brightness::new(system.clone()) {
@@ -68,6 +91,7 @@ fn run() -> zbus::Result<()> {
     if let Some(device) = brightness_device {
         modules::brightness::spawn_watcher(device, connection.clone());
     }
+    modules::config::spawn_watcher(config_store, connection.clone());
     modules::audio::attach_watcher(pipewire, connection);
 
     loop {
