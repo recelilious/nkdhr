@@ -3,15 +3,12 @@
 //! dotted key, and change detection for both `nkdhrd`'s own writes and
 //! external edits to the files.
 //!
-//! CTRL-5 ships this engine with **zero namespaces registered** — see
+//! CTRL-5 shipped with zero namespaces registered — see
 //! `docs-staging/control-plane/INTERNALS.md`'s "Config store" section for
-//! why: none of CTRL-1 … CTRL-4's modules have a setting that actually
-//! needs persisting yet, and the ones sketched in USAGE.md (`theme`,
-//! `canvas`) belong to phases (UI-4, COMP-3) that haven't designed their
-//! real schemas. A later phase registers its own namespace by implementing
-//! [`Namespace`] on a `serde`-derived struct and adding a
-//! [`NamespaceSchema::of`] entry to the list it passes to
-//! [`ConfigStore::open`] in `nkdhrd/src/main.rs`.
+//! why. COMP-3's `canvas` (`nkdhrd/src/namespaces/canvas.rs`) is the first
+//! real one. Register a new namespace by implementing [`Namespace`] on a
+//! `serde`-derived struct in `nkdhrd/src/namespaces/` and adding a
+//! [`NamespaceSchema::of`] entry to the list in `nkdhrd/src/main.rs`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -29,12 +26,6 @@ use zbus::zvariant::Value;
 /// default)]` so an unrecognized key is rejected rather than silently
 /// ignored and an absent one falls back to its default, then register it
 /// via [`NamespaceSchema::of`].
-///
-/// `#[allow(dead_code)]` on this trait, [`NamespaceSchema::of`] and
-/// [`parse_and_validate`]: with `NAMESPACES` empty (see this module's doc
-/// comment), nothing in `nkdhrd` outside of tests calls them yet — that's
-/// expected, not a sign any of this is actually unused.
-#[allow(dead_code)]
 pub trait Namespace: Default + Serialize + DeserializeOwned {
     /// The namespace name: the file's stem (`theme` for `theme.toml`) and
     /// the first dotted-key segment (`theme.accent-color`).
@@ -60,8 +51,7 @@ pub struct NamespaceSchema {
 }
 
 impl NamespaceSchema {
-    #[allow(dead_code)]
-    pub fn of<T: Namespace>() -> Self {
+    pub const fn of<T: Namespace>() -> Self {
         Self {
             name: T::NAME,
             parse: parse_and_validate::<T>,
@@ -75,7 +65,6 @@ impl NamespaceSchema {
 /// a caller stores afterwards is always the *materialized* form — every
 /// field present, nothing extra — never a sparse diff of whatever partial
 /// table triggered this call.
-#[allow(dead_code)]
 fn parse_and_validate<T: Namespace>(value: &Json) -> Result<Json, String> {
     let parsed: T = serde_json::from_value(value.clone()).map_err(|err| err.to_string())?;
     parsed.validate()?;

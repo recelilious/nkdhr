@@ -1,4 +1,5 @@
 use std::os::unix::io::OwnedFd;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -27,6 +28,9 @@ use smithay::{
     delegate_shm, delegate_xdg_shell,
 };
 
+use crate::keybindings::Keybindings;
+use crate::world::{Canvas, Drag};
+
 /// Everything the compositor's protocol handlers need. Owns every piece of
 /// `wayland_frontend` state COMP-2 registers a global for; the renderer
 /// itself stays in `main.rs`'s `WinitGraphicsBackend`, not here — nothing
@@ -42,6 +46,17 @@ pub struct App {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub seat: Seat<Self>,
+    /// COMP-3's world-coordinate window model: every mapped toplevel's
+    /// position, in stacking order.
+    pub canvas: Canvas,
+    /// The in-progress `super+drag` move/resize interaction, if any —
+    /// `main.rs`'s `handle_input` is the only thing that reads or writes
+    /// this.
+    pub drag: Option<Drag>,
+    /// Hot-reloadable copy of the `canvas` CTRL-5 namespace (see
+    /// `crate::keybindings`), shared with the background thread that
+    /// watches `Config1.Changed` for it.
+    pub keybindings: Arc<Mutex<Keybindings>>,
 }
 
 /// Per-client state `wayland_server` asks every client to carry. Only the
@@ -112,18 +127,21 @@ impl XdgShellHandler for App {
         &mut self.xdg_shell_state
     }
 
-    /// COMP-2 has no window placement or click-to-focus yet (that's
-    /// COMP-3's canvas model) — the simplest honest behavior for "a seat
-    /// with keyboard focus" is giving the newest mapped toplevel focus,
-    /// which is what makes `foot`/GTK/SDL accept typing in the COMP-2
-    /// verification scenario (one client open at a time). This is
-    /// explicitly a placeholder policy COMP-3 replaces with real
-    /// click-based focus, not a design decision to keep.
+    /// Places the new window on the canvas (COMP-3's world-coordinate
+    /// model, `crate::world::Canvas::map`) and gives it keyboard focus —
+    /// a newly launched app grabbing focus is standard desktop behavior,
+    /// not a COMP-2-era placeholder; it coexists with (doesn't replace)
+    /// the click-to-focus and `cycle_focus` keybinding `main.rs`'s
+    /// `handle_input` implements for switching between windows already
+    /// mapped.
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+
+        let position = self.canvas.map(surface.clone());
+        println!("nkdhr-canvas: mapped window at world {position:?}");
 
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -143,6 +161,10 @@ impl XdgShellHandler for App {
         _positioner: PositionerState,
         _token: u32,
     ) {
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.canvas.unmap(surface.wl_surface());
     }
 }
 

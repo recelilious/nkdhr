@@ -1,10 +1,13 @@
+mod keybindings;
 mod state;
+mod world;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Event, InputEvent, KeyboardKeyEvent, PointerButtonEvent,
+    AbsolutePositionEvent, ButtonState, Event, InputEvent, KeyState, KeyboardKeyEvent,
+    PointerButtonEvent,
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
@@ -13,7 +16,9 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Color32F, Frame, ImportDma, Renderer};
-use smithay::backend::winit::{self as smithay_winit, WinitEvent, WinitInput};
+use smithay::backend::winit::{
+    self as smithay_winit, WinitEvent, WinitInput, WinitKeyboardInputEvent, WinitMouseInputEvent,
+};
 use smithay::input::SeatState;
 use smithay::input::keyboard::{FilterResult, KeyboardHandle};
 use smithay::input::pointer::{ButtonEvent, MotionEvent, PointerHandle};
@@ -23,7 +28,7 @@ use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
-use smithay::utils::{Physical, Rectangle, SERIAL_COUNTER, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Size, Transform};
 use smithay::wayland::compositor::{
     CompositorState, SurfaceAttributes, TraversalAction, with_surface_tree_downward,
 };
@@ -31,8 +36,16 @@ use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
+use world::{Canvas, Drag, logical_delta_to_world, logical_to_world};
 
 use state::{App, ClientState};
+
+/// Linux input-event-codes (`linux/input-event-codes.h`) for the two
+/// pointer buttons `super`-modified drags use. Smithay doesn't name these
+/// itself — see `PointerButtonEvent::button_code`'s own winit-backend
+/// implementation, which maps to exactly these values.
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 /// Flat mid-tone blue-grey; there is no theming system yet (that's UI-4,
 /// Phase 3) — this exists only to make "the canvas is actually rendering"
@@ -97,6 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seat_state,
         data_device_state: DataDeviceState::new::<App>(&dh),
         seat,
+        canvas: Canvas::new(),
+        drag: None,
+        keybindings: keybindings::watch(),
     };
 
     let listener = ListeningSocket::bind_auto("wayland", 0..32)?;
@@ -132,14 +148,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let (renderer, mut framebuffer) = backend.bind()?;
             let elements = app
-                .xdg_shell_state
-                .toplevel_surfaces()
+                .canvas
+                .windows()
                 .iter()
-                .flat_map(|surface| {
+                .flat_map(|window| {
+                    // COMP-3 has no viewport yet (fixed at world origin,
+                    // 1:1 — COMP-4 introduces pan/zoom), so a window's
+                    // world position *is* its on-screen offset today.
+                    let offset: Point<i32, Physical> = (
+                        window.position.x.round() as i32,
+                        window.position.y.round() as i32,
+                    )
+                        .into();
                     render_elements_from_surface_tree(
                         renderer,
-                        surface.wl_surface(),
-                        (0, 0),
+                        window.surface.wl_surface(),
+                        offset,
                         1.0,
                         1.0,
                         Kind::Unspecified,
@@ -159,8 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend.submit(Some(&[damage]))?;
 
         let frame_time = app.start_time.elapsed().as_millis() as u32;
-        for surface in app.xdg_shell_state.toplevel_surfaces() {
-            send_frame_callbacks(surface.wl_surface(), frame_time);
+        for window in app.canvas.windows() {
+            send_frame_callbacks(window.surface.wl_surface(), frame_time);
         }
 
         if let Some(stream) = listener.accept()? {
@@ -183,29 +207,25 @@ fn handle_input(
     event: InputEvent<WinitInput>,
 ) {
     match event {
-        InputEvent::Keyboard { event } => {
-            let serial = SERIAL_COUNTER.next_serial();
-            keyboard.input::<(), _>(
-                app,
-                event.key_code(),
-                event.state(),
-                serial,
-                event.time_msec(),
-                |_, _, _| FilterResult::Forward,
-            );
-        }
+        InputEvent::Keyboard { event } => handle_keyboard(app, keyboard, event),
         InputEvent::PointerMotionAbsolute { event } => {
-            let location = (
+            let pointer_pos: Point<f64, Logical> = (
                 event.x_transformed(window_size.w),
                 event.y_transformed(window_size.h),
             )
                 .into();
+
+            if let Some(drag) = app.drag.clone() {
+                apply_drag(app, &drag, pointer_pos);
+                return;
+            }
+
             let focus = focused_surface(app).map(|surface| (surface, (0.0, 0.0).into()));
             pointer.motion(
                 app,
                 focus,
                 &MotionEvent {
-                    location,
+                    location: pointer_pos,
                     serial: SERIAL_COUNTER.next_serial(),
                     time: event.time_msec(),
                 },
@@ -213,26 +233,176 @@ fn handle_input(
             pointer.frame(app);
         }
         InputEvent::PointerButton { event } => {
-            pointer.button(
-                app,
-                &ButtonEvent {
-                    serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
-                    button: event.button_code(),
-                    state: event.state(),
-                },
-            );
-            pointer.frame(app);
+            handle_pointer_button(app, keyboard, pointer, &event);
         }
         InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. } => {}
         other => println!("nkdhr-canvas: input {other:?}"),
     }
 }
 
-/// COMP-2 has no click-to-focus or window placement yet (COMP-3), so
-/// pointer events target whichever surface currently has keyboard focus —
-/// consistent with [`state::App::new_toplevel`]'s "newest window wins"
-/// placeholder policy.
+/// Intercepts the `close_window`/`cycle_focus` keybindings (CTRL-5's
+/// `canvas` namespace, hot-reloadable — see `crate::keybindings`) before
+/// forwarding anything else to the focused client as normal.
+fn handle_keyboard(app: &mut App, keyboard: &KeyboardHandle<App>, event: WinitKeyboardInputEvent) {
+    let serial = SERIAL_COUNTER.next_serial();
+    let key_state = event.state();
+    let bindings = *app.keybindings.lock().unwrap();
+    keyboard.input::<(), _>(
+        app,
+        event.key_code(),
+        key_state,
+        serial,
+        event.time_msec(),
+        move |app, modifiers, keysym| {
+            let sym = keysym.modified_sym();
+            if modifiers.logo && sym == bindings.close_window {
+                if key_state == KeyState::Pressed {
+                    close_focused_window(app);
+                }
+                return FilterResult::Intercept(());
+            }
+            if modifiers.alt && sym == bindings.cycle_focus {
+                if key_state == KeyState::Pressed {
+                    cycle_focus(app);
+                }
+                return FilterResult::Intercept(());
+            }
+            FilterResult::Forward
+        },
+    );
+}
+
+fn close_focused_window(app: &mut App) {
+    let Some(focused) = focused_surface(app) else {
+        return;
+    };
+    if let Some(window) = app
+        .canvas
+        .windows()
+        .iter()
+        .find(|window| *window.surface.wl_surface() == focused)
+    {
+        window.surface.send_close();
+    }
+}
+
+fn cycle_focus(app: &mut App) {
+    let current = focused_surface(app);
+    let Some(next) = app.canvas.next_after(current.as_ref()) else {
+        return;
+    };
+    let next_surface = next.surface.wl_surface().clone();
+    app.canvas.raise(&next_surface);
+    if let Some(keyboard) = app.seat.get_keyboard() {
+        let serial = SERIAL_COUNTER.next_serial();
+        keyboard.set_focus(app, Some(next_surface), serial);
+    }
+}
+
+fn handle_pointer_button(
+    app: &mut App,
+    keyboard: &KeyboardHandle<App>,
+    pointer: &PointerHandle<App>,
+    event: &WinitMouseInputEvent,
+) {
+    let button_state = event.state();
+    let button_code = event.button_code();
+
+    if button_state == ButtonState::Released {
+        if app.drag.take().is_some() {
+            return;
+        }
+    } else {
+        let modifiers = keyboard.modifier_state();
+        let pointer_pos = pointer.current_location();
+        let world_pos = logical_to_world(pointer_pos);
+
+        if modifiers.logo && button_code == BTN_LEFT {
+            if let Some(window) = app.canvas.window_at(world_pos) {
+                app.drag = Some(Drag::Move {
+                    surface: window.surface.wl_surface().clone(),
+                    window_start: window.position,
+                    pointer_start: pointer_pos,
+                });
+            }
+            return;
+        }
+        if modifiers.logo && button_code == BTN_RIGHT {
+            if let Some(window) = app.canvas.window_at(world_pos) {
+                let size = window.size();
+                app.drag = Some(Drag::Resize {
+                    surface: window.surface.wl_surface().clone(),
+                    size_start: (size.w.max(1.0) as i32, size.h.max(1.0) as i32).into(),
+                    pointer_start: pointer_pos,
+                });
+            }
+            return;
+        }
+        if button_code == BTN_LEFT
+            && let Some(window) = app.canvas.window_at(world_pos)
+        {
+            let surface = window.surface.wl_surface().clone();
+            app.canvas.raise(&surface);
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(app, Some(surface), serial);
+        }
+    }
+
+    pointer.button(
+        app,
+        &ButtonEvent {
+            serial: SERIAL_COUNTER.next_serial(),
+            time: event.time_msec(),
+            button: button_code,
+            state: button_state,
+        },
+    );
+    pointer.frame(app);
+}
+
+/// Applies one motion update to an in-progress `super+drag` move or
+/// resize — moving updates the window's world position directly; resizing
+/// re-requests an `xdg_toplevel` configure at the new size and lets the
+/// client's own next commit (picked up automatically by the render loop's
+/// `ManagedWindow::size`) supply the actual new buffer.
+fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
+    match drag {
+        Drag::Move {
+            surface,
+            window_start,
+            pointer_start,
+        } => {
+            let delta = pointer_pos - *pointer_start;
+            let new_position = *window_start + logical_delta_to_world(delta);
+            app.canvas.set_position(surface, new_position);
+        }
+        Drag::Resize {
+            surface,
+            size_start,
+            pointer_start,
+        } => {
+            let delta = pointer_pos - *pointer_start;
+            let new_size = Size::from((
+                (f64::from(size_start.w) + delta.x).max(1.0) as i32,
+                (f64::from(size_start.h) + delta.y).max(1.0) as i32,
+            ));
+            if let Some(toplevel) = app
+                .canvas
+                .windows()
+                .iter()
+                .find(|window| window.surface.wl_surface() == surface)
+                .map(|window| window.surface.clone())
+            {
+                toplevel.with_pending_state(|state| state.size = Some(new_size));
+                toplevel.send_configure();
+            }
+        }
+    }
+}
+
+/// The currently keyboard-focused surface, if any — where plain (no
+/// modifier) pointer motion routes to when no `super+drag` interaction is
+/// in progress.
 fn focused_surface(app: &App) -> Option<WlSurface> {
     app.seat.get_keyboard()?.current_focus()
 }

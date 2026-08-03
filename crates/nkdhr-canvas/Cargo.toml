@@ -11,4 +11,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
 smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "wayland_frontend"] }
+zbus = "5.18.0"

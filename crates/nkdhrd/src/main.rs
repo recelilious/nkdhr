@@ -1,6 +1,7 @@
 mod backends;
 mod daemon;
 mod modules;
+mod namespaces;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,11 +24,11 @@ use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::fdo::RequestNameFlags;
 
-/// CTRL-5's namespace registry. Empty for now — see
-/// `backends::config_store`'s module doc for why — and grown by later
-/// phases (UI-4's `theme`, COMP-3's `canvas`, ...) each adding their own
-/// entry here as they land.
-static NAMESPACES: &[NamespaceSchema] = &[];
+/// CTRL-5's namespace registry. `canvas` (COMP-3) is the first real
+/// entry — see `backends::config_store`'s module doc for why it started
+/// empty — grown by later phases (UI-4's `theme`, ...) adding their own.
+static NAMESPACES: &[NamespaceSchema] =
+    &[NamespaceSchema::of::<namespaces::canvas::CanvasKeybindings>()];
 
 /// `$XDG_CONFIG_HOME/nkdhr`, falling back to `$HOME/.config/nkdhr` per the
 /// XDG base directory spec.
