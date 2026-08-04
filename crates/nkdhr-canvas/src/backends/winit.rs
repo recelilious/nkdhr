@@ -1,29 +1,32 @@
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::element::surface::{
-    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
-};
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::draw_render_elements;
-use smithay::backend::renderer::{Color32F, Frame, ImportDma, Renderer};
+use smithay::backend::renderer::{Color32F, ExportMem, Frame, ImportDma, Renderer, TextureMapping};
 use smithay::backend::winit::{self as smithay_winit, WinitEvent};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::reexports::calloop::EventLoop as CalloopEventLoop;
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
 use smithay::utils::{Rectangle, Transform};
 use smithay::wayland::dmabuf::DmabufState;
+use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
 
 use crate::backends::{Backend, BackendResult};
 use crate::canvas::output_group::{ConnectedOutput, OutputConfig, OutputLayout};
 use crate::input;
+use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
+const LOCK_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
 const NESTED_OUTPUT_NAME: &str = "nkdhr-canvas-nested-0";
 
 pub struct WinitBackend;
@@ -40,6 +43,7 @@ fn run() -> BackendResult {
             .with_title("nkdhr-canvas")
             .with_inner_size(LogicalSize::new(1280.0, 800.0)),
     )?;
+    backend.window().set_cursor_visible(false);
 
     let mut display: Display<App> = Display::new()?;
     let mut display_handle = display.handle();
@@ -77,6 +81,37 @@ fn run() -> BackendResult {
     dmabuf_state.create_global::<App>(&display_handle, dmabuf_formats);
     let mut app = App::new(&display_handle, dmabuf_state)?;
     app.reconcile_output_layout(&output_layout);
+    let mut xwayland_event_loop: CalloopEventLoop<App> = CalloopEventLoop::try_new()?;
+    let xwayland_handle = xwayland_event_loop.handle();
+    match XWayland::spawn(
+        &display_handle,
+        None,
+        crate::protocols::xwayland_environment(),
+        true,
+        Stdio::null(),
+        Stdio::inherit(),
+        |_| {},
+    ) {
+        Ok((xwayland, client)) => {
+            let wm_handle = xwayland_handle.clone();
+            xwayland_handle.insert_source(xwayland, move |event, _, app| match event {
+                XWaylandEvent::Ready {
+                    x11_socket,
+                    display_number,
+                } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                    Ok(xwm) => app.install_xwm(xwm, display_number, wm_handle.clone()),
+                    Err(error) => eprintln!("nkdhr-canvas: failed to start XWM: {error}"),
+                },
+                XWaylandEvent::Error => {
+                    eprintln!("nkdhr-canvas: XWayland exited during startup")
+                }
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("nkdhr-canvas: Xwayland is not installed; X11 compatibility disabled");
+        }
+        Err(error) => return Err(error.into()),
+    }
     let resolved = output_layout
         .output(NESTED_OUTPUT_NAME)
         .expect("the connected nested output must resolve");
@@ -153,6 +188,11 @@ fn run() -> BackendResult {
         render::advance_animations(&mut app);
 
         let damage = Rectangle::from_size(size);
+        let screencopies = app.take_pending_screencopies(NESTED_OUTPUT_NAME);
+        let include_cursor = screencopies
+            .first()
+            .is_none_or(|request| request.overlay_cursor());
+        let restore_surface_after_screencopy = !screencopies.is_empty();
         {
             let (renderer, mut framebuffer) = backend.bind()?;
             let resolved = output_layout
@@ -169,48 +209,139 @@ fn run() -> BackendResult {
                 .canvases
                 .get(&view.canvas)
                 .expect("resolved output group must have a canvas");
-            let elements = canvas
-                .windows()
-                .iter()
-                .flat_map(|window| {
-                    let group_point = view
-                        .viewport
-                        .to_group_logical(window.position, group.logical_size);
-                    let local = group_point - resolved.group_location.to_f64();
-                    let offset = local.to_physical(resolved.scale).to_i32_round();
-                    render_elements_from_surface_tree(
+            for window in canvas.windows() {
+                let window_rect =
+                    render::window_group_rect(window, view.viewport, group.logical_size);
+                let output_rect = Rectangle::new(resolved.group_location, resolved.logical_size);
+                let overlap = window_rect.intersection(output_rect).map(|intersection| {
+                    Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
+                });
+                render::update_window_output(window, &output, overlap, resolved.scale);
+            }
+            let locked = app.session_locked();
+            let lock_surface = app.lock_surface_for_output(NESTED_OUTPUT_NAME);
+            let mut elements = if include_cursor {
+                render::cursor_render_elements(
+                    renderer,
+                    &app,
+                    resolved.global_location,
+                    resolved.scale,
+                )
+            } else {
+                Vec::new()
+            };
+            if !locked {
+                elements.extend(render::dnd_icon_render_elements(
+                    renderer,
+                    &app,
+                    resolved.global_location,
+                    resolved.scale,
+                ));
+            }
+            if locked {
+                elements.extend(lock_surface.iter().flat_map(
+                    |surface| -> Vec<render::CanvasRenderElement<GlesRenderer>> {
+                        render_elements_from_surface_tree(
+                            renderer,
+                            surface,
+                            (0, 0),
+                            resolved.scale,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                    },
+                ));
+            } else {
+                elements.extend(canvas.windows().iter().rev().flat_map(|window| {
+                    render::window_render_elements(
                         renderer,
-                        window.surface.wl_surface(),
-                        offset,
-                        view.viewport.zoom * resolved.scale,
-                        1.0,
-                        Kind::Unspecified,
+                        window,
+                        view.viewport,
+                        group.logical_size,
+                        resolved.group_location,
+                        resolved.scale,
                     )
-                })
-                .collect::<Vec<WaylandSurfaceRenderElement<GlesRenderer>>>();
+                }));
+            }
 
             let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
-            frame.clear(CANVAS_BACKGROUND, &[damage])?;
+            frame.clear(
+                if locked {
+                    LOCK_BACKGROUND
+                } else {
+                    CANVAS_BACKGROUND
+                },
+                &[damage],
+            )?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
             let _ = frame.finish()?;
+
+            for request in screencopies {
+                match renderer.copy_framebuffer(&framebuffer, request.region, SCREENCOPY_FORMAT) {
+                    Ok(mapping) => {
+                        let flipped = mapping.flipped();
+                        match renderer.map_texture(&mapping) {
+                            Ok(pixels) => {
+                                if let Err(error) =
+                                    request.complete(pixels, flipped, app.start_time.elapsed())
+                                {
+                                    eprintln!("nkdhr-canvas: nested screencopy failed: {error}");
+                                }
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                let _ = request.fail(message.clone());
+                                eprintln!(
+                                    "nkdhr-canvas: nested screencopy mapping failed: {message}"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ = request.fail(message.clone());
+                        eprintln!("nkdhr-canvas: nested screencopy readback failed: {message}");
+                    }
+                }
+            }
+            if restore_surface_after_screencopy {
+                // `GlesRenderer::map_texture` intentionally makes the EGL
+                // context current without a surface. Winit must have its
+                // window surface rebound before `swap_buffers`, otherwise
+                // Wayland EGL reports BadSurface and its attempted recovery
+                // cannot allocate a second surface for the same native
+                // window. A no-op render bind preserves the composed pixels.
+                let frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
+                let _ = frame.finish()?;
+            }
         }
         backend.submit(Some(&[damage]))?;
 
         let frame_time = app.start_time.elapsed().as_millis() as u32;
-        let group = output_layout
-            .group_for_output(NESTED_OUTPUT_NAME)
-            .expect("the connected nested output must belong to a group");
-        let view = app
-            .group_views
-            .get(&group.name)
-            .expect("resolved output group must have view state");
-        let canvas = app
-            .canvases
-            .get(&view.canvas)
-            .expect("resolved output group must have a canvas");
-        for window in canvas.windows() {
-            render::send_frame_callbacks(window.surface.wl_surface(), frame_time);
+        if app.session_locked() {
+            if let Some(surface) = app.lock_surface_for_output(NESTED_OUTPUT_NAME) {
+                render::send_frame_callbacks(&surface, frame_time);
+            }
+            app.note_protected_frame(NESTED_OUTPUT_NAME);
+        } else {
+            let group = output_layout
+                .group_for_output(NESTED_OUTPUT_NAME)
+                .expect("the connected nested output must belong to a group");
+            let view = app
+                .group_views
+                .get(&group.name)
+                .expect("resolved output group must have view state");
+            let canvas = app
+                .canvases
+                .get(&view.canvas)
+                .expect("resolved output group must have a canvas");
+            for window in canvas.windows() {
+                if let Some(surface) = window.wl_surface() {
+                    render::send_frame_callbacks(&surface, frame_time);
+                }
+            }
         }
+        render::send_pointer_frame_callbacks(&app, frame_time);
 
         frame_count += 1;
         let fps_elapsed = fps_window_start.elapsed();
@@ -233,6 +364,7 @@ fn run() -> BackendResult {
             clients.push(client);
         }
 
+        xwayland_event_loop.dispatch(Duration::ZERO, &mut app)?;
         display.dispatch_clients(&mut app)?;
         display.flush_clients()?;
     }

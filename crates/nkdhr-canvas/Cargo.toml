@@ -26,7 +26,7 @@ tty = [
 
 [dependencies]
 nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
-smithay = { version = "0.7.0", default-features = false, features = ["wayland_frontend"] }
+smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "xwayland"] }
 smithay-drm-extras = { version = "0.1.0", default-features = false, optional = true }
 thiserror = { version = "2.0.17", optional = true }
 zbus = "5.18.0"

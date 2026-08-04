@@ -1,9 +1,14 @@
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::backend::renderer::Color32F;
+use smithay::backend::renderer::element::solid::SolidColorBuffer;
+use smithay::desktop::{Window, WindowSurfaceType};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Size};
-use smithay::wayland::shell::xdg::ToplevelSurface;
+use smithay::wayland::seat::WaylandFocus;
+use smithay::xwayland::X11Surface;
 
 /// Type-level marker for nkdhr's own canvas world coordinate space
 /// (ROADMAP.md §2.3) — distinct from Smithay's own `Logical`/`Physical`,
@@ -14,27 +19,98 @@ use smithay::wayland::shell::xdg::ToplevelSurface;
 pub struct World;
 
 pub struct ManagedWindow {
-    pub surface: ToplevelSurface,
+    pub window: Window,
     pub position: Point<f64, World>,
+    decoration: SolidColorBuffer,
 }
 
+const DECORATION_BORDER: f64 = 2.0;
+const DECORATION_TITLEBAR: f64 = 28.0;
+const DECORATION_COLOR: Color32F = Color32F::new(0.20, 0.22, 0.29, 1.0);
+
 impl ManagedWindow {
-    /// The window's current on-screen size. Reads the *committed* buffer
-    /// size via Smithay's renderer-surface-state tracking (populated by
-    /// `on_commit_buffer_handler`) rather than whatever size was last
-    /// requested — a client may commit a different size than asked for,
-    /// and hit-testing against a stale requested size would be wrong.
-    /// `(0, 0)` before the client's first commit.
+    pub fn wl_surface(&self) -> Option<WlSurface> {
+        self.window.wl_surface().map(|surface| surface.into_owned())
+    }
+
+    pub fn matches_surface(&self, surface: &WlSurface) -> bool {
+        let found = Cell::new(false);
+        self.window.with_surfaces(|candidate, _| {
+            if candidate == surface {
+                found.set(true);
+            }
+        });
+        found.get()
+    }
+
+    pub fn matches_x11(&self, surface: &X11Surface) -> bool {
+        self.window.x11_surface() == Some(surface)
+    }
+
+    /// The window's current committed bounding size. Smithay's unified
+    /// desktop window updates this for both xdg-shell and X11 surfaces.
     pub fn size(&self) -> Size<f64, World> {
-        let logical =
-            with_renderer_surface_state(self.surface.wl_surface(), |state| state.surface_size())
-                .flatten()
-                .unwrap_or_default();
+        let logical = self.window.bbox().size;
         (f64::from(logical.w), f64::from(logical.h)).into()
     }
 
+    pub fn close(&self) {
+        if let Some(toplevel) = self.window.toplevel() {
+            toplevel.send_close();
+        } else if let Some(surface) = self.window.x11_surface() {
+            let _ = surface.close();
+        }
+    }
+
+    pub fn request_size(&self, size: Size<i32, Logical>) {
+        if let Some(toplevel) = self.window.toplevel() {
+            toplevel.with_pending_state(|state| state.size = Some(size));
+            toplevel.send_configure();
+        } else if let Some(surface) = self.window.x11_surface() {
+            let mut geometry = surface.geometry();
+            geometry.size = size;
+            let _ = surface.configure(geometry);
+        }
+    }
+
     pub fn rect(&self) -> Rectangle<f64, World> {
+        self.decoration_rect()
+            .unwrap_or_else(|| self.content_rect())
+    }
+
+    pub fn content_rect(&self) -> Rectangle<f64, World> {
         Rectangle::new(self.position, self.size())
+    }
+
+    /// The visual frame promised by server-side decoration negotiation.
+    /// The client surface remains rooted at `position`; the titlebar and
+    /// border extend outward so client content is never covered.
+    pub fn decoration(&self) -> Option<(Rectangle<f64, World>, SolidColorBuffer)> {
+        self.decoration_rect()
+            .map(|rect| (rect, self.decoration.clone()))
+    }
+
+    fn decoration_rect(&self) -> Option<Rectangle<f64, World>> {
+        let server_side = self.window.toplevel().is_some_and(|toplevel| {
+            toplevel.current_state().decoration_mode == Some(Mode::ServerSide)
+        }) || self
+            .window
+            .x11_surface()
+            .is_some_and(|surface| !surface.is_override_redirect() && !surface.is_decorated());
+        server_side.then(|| {
+            Rectangle::new(
+                (
+                    self.position.x - DECORATION_BORDER,
+                    self.position.y - DECORATION_TITLEBAR - DECORATION_BORDER,
+                )
+                    .into(),
+                (
+                    self.size().w + DECORATION_BORDER * 2.0,
+                    self.size().h + DECORATION_TITLEBAR + DECORATION_BORDER * 2.0,
+                )
+                    .into(),
+            )
+        })
     }
 
     /// The window's world-space center — where overview mode's
@@ -68,16 +144,24 @@ impl Canvas {
     /// go, not that a sensible starting point doesn't exist. Each new
     /// window offsets from the last so opening several in a row produces
     /// visibly distinct, not perfectly overlapping, windows.
-    pub fn map(&mut self, surface: ToplevelSurface) -> Point<f64, World> {
+    pub fn map(&mut self, window: Window) -> Point<f64, World> {
         let n = self.windows.len() as f64;
         let position = (100.0 + 40.0 * (n % 10.0), 100.0 + 40.0 * (n % 10.0)).into();
-        self.windows.push(ManagedWindow { surface, position });
+        self.windows.push(ManagedWindow {
+            window,
+            position,
+            decoration: SolidColorBuffer::new((0, 0), DECORATION_COLOR),
+        });
         position
     }
 
     pub fn unmap(&mut self, surface: &WlSurface) {
         self.windows
-            .retain(|window| window.surface.wl_surface() != surface);
+            .retain(|window| !window.matches_surface(surface));
+    }
+
+    pub fn unmap_x11(&mut self, surface: &X11Surface) {
+        self.windows.retain(|window| !window.matches_x11(surface));
     }
 
     pub fn windows(&self) -> &[ManagedWindow] {
@@ -93,11 +177,36 @@ impl Canvas {
             .find(|window| window.rect().contains(point))
     }
 
+    /// Returns the exact toplevel, subsurface, or popup under a world-space
+    /// point together with that surface's offset from the window root.
+    pub fn surface_at(
+        &self,
+        point: Point<f64, World>,
+    ) -> Option<(&ManagedWindow, WlSurface, Point<i32, Logical>)> {
+        self.windows.iter().rev().find_map(|window| {
+            let local = (point.x - window.position.x, point.y - window.position.y);
+            window
+                .window
+                .surface_under(local, WindowSurfaceType::ALL)
+                .map(|(surface, offset)| (window, surface, offset))
+        })
+    }
+
     pub fn set_position(&mut self, surface: &WlSurface, position: Point<f64, World>) {
         if let Some(window) = self
             .windows
             .iter_mut()
-            .find(|window| window.surface.wl_surface() == surface)
+            .find(|window| window.matches_surface(surface))
+        {
+            window.position = position;
+        }
+    }
+
+    pub fn set_x11_position(&mut self, surface: &X11Surface, position: Point<f64, World>) {
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.matches_x11(surface))
         {
             window.position = position;
         }
@@ -109,7 +218,7 @@ impl Canvas {
         if let Some(index) = self
             .windows
             .iter()
-            .position(|window| window.surface.wl_surface() == surface)
+            .position(|window| window.matches_surface(surface))
         {
             let window = self.windows.remove(index);
             self.windows.push(window);
@@ -127,7 +236,7 @@ impl Canvas {
             .and_then(|surface| {
                 self.windows
                     .iter()
-                    .position(|window| window.surface.wl_surface() == surface)
+                    .position(|window| window.matches_surface(surface))
             })
             .map_or(0, |index| (index + 1) % self.windows.len());
         self.windows.get(start)
@@ -286,11 +395,43 @@ pub enum Drag {
     Resize {
         surface: WlSurface,
         size_start: Size<i32, Logical>,
+        window_start: Point<f64, World>,
         pointer_start: Point<f64, Logical>,
+        edge: ResizeEdge,
     },
     Pan {
         viewport_start: Point<f64, World>,
         pointer_start: Point<f64, Logical>,
         zoom: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ResizeEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeEdge {
+    pub(crate) fn left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub(crate) fn right(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+
+    pub(crate) fn top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+
+    pub(crate) fn bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
 }

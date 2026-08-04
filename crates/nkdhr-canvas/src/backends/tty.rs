@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use smithay::backend::allocator::dmabuf::AsDmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Fourcc, Modifier};
-use smithay::backend::drm::compositor::FrameFlags;
+use smithay::backend::drm::compositor::{FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType};
@@ -16,13 +18,11 @@ use smithay::backend::egl::{self, context::ContextPriority};
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::element::surface::{
-    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
-};
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiRenderer};
-use smithay::backend::renderer::{Color32F, ImportDma, ImportMemWl};
+use smithay::backend::renderer::{Color32F, ExportMem, ImportDma, ImportMemWl, TextureMapping};
 use smithay::backend::session::libseat::{self, LibSeatSession};
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu as find_primary_gpu};
@@ -36,18 +36,24 @@ use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
-use smithay::utils::DeviceFd;
+use smithay::utils::{DeviceFd, Logical, Rectangle};
 use smithay::wayland::dmabuf::DmabufState;
+use smithay::wayland::selection::SelectionTarget;
 use smithay::wayland::socket::ListeningSocketSource;
+use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
+use smithay::xwayland::xwm::{Reorder, ResizeEdge, X11Wm, XwmHandler, XwmId};
+use smithay::xwayland::{X11Surface, XWayland, XWaylandEvent};
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 use crate::backends::{Backend, BackendResult};
 use crate::canvas::output_group::{ConnectedOutput, OutputConfig, OutputLayout};
 use crate::input;
+use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
+const LOCK_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
 const SUPPORTED_FORMATS: &[Fourcc] = &[
     Fourcc::Abgr2101010,
     Fourcc::Argb2101010,
@@ -99,6 +105,7 @@ struct SurfaceData {
     mode: WlMode,
     render_node: Option<DrmNode>,
     drm_output: ManagedDrmOutput,
+    protected_frame_queued: bool,
 }
 
 impl Drop for SurfaceData {
@@ -177,6 +184,8 @@ fn run() -> BackendResult {
         output_layout: OutputLayout::default(),
         running: true,
     };
+
+    state.start_xwayland()?;
 
     register_wayland_sources(&event_loop, display, &state.display_handle)?;
 
@@ -430,6 +439,43 @@ enum DeviceAddError {
 }
 
 impl TtyState {
+    fn start_xwayland(&mut self) -> BackendResult {
+        let (xwayland, client) = match XWayland::spawn(
+            &self.display_handle,
+            None,
+            crate::protocols::xwayland_environment(),
+            true,
+            Stdio::null(),
+            Stdio::inherit(),
+            |_| {},
+        ) {
+            Ok(instance) => instance,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("nkdhr-canvas: Xwayland is not installed; X11 compatibility disabled");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let wm_handle = self.loop_handle.clone();
+        self.loop_handle
+            .insert_source(xwayland, move |event, _, state| match event {
+                XWaylandEvent::Ready {
+                    x11_socket,
+                    display_number,
+                } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                    Ok(xwm) => state
+                        .app
+                        .install_xwm(xwm, display_number, wm_handle.clone()),
+                    Err(error) => eprintln!("nkdhr-canvas: failed to start XWM: {error}"),
+                },
+                XWaylandEvent::Error => {
+                    eprintln!("nkdhr-canvas: XWayland exited during startup")
+                }
+            })?;
+        Ok(())
+    }
+
     fn should_manage_device(&self, node: DrmNode) -> bool {
         self.scanout_filter.is_none_or(|filter| node == filter)
     }
@@ -615,7 +661,7 @@ impl TtyState {
         };
         let drm_output = match device
             .output_manager
-            .initialize_output::<_, WaylandSurfaceRenderElement<TtyRenderer<'_>>>(
+            .initialize_output::<_, render::CanvasRenderElement<TtyRenderer<'_>>>(
                 crtc,
                 drm_mode,
                 &[connector.handle()],
@@ -639,6 +685,7 @@ impl TtyState {
                 mode,
                 render_node: device.render_node,
                 drm_output,
+                protected_frame_queued: false,
             },
         );
         println!("nkdhr-canvas: connected output {output_name} at {mode:?}");
@@ -735,6 +782,10 @@ impl TtyState {
             return;
         };
         let output_name = surface.output.name();
+        let screencopies = self.app.take_pending_screencopies(&output_name);
+        let include_cursor = screencopies
+            .first()
+            .is_none_or(|request| request.overlay_cursor());
         let Some(resolved_output) = self.output_layout.output(&output_name) else {
             return;
         };
@@ -758,43 +809,174 @@ impl TtyState {
         let Some(canvas) = self.app.canvases.get(&view.canvas) else {
             return;
         };
-        let elements = canvas
-            .windows()
-            .iter()
-            .flat_map(|window| {
-                let group_point = view
-                    .viewport
-                    .to_group_logical(window.position, group.logical_size);
-                let local = group_point - resolved_output.group_location.to_f64();
-                let offset = local.to_physical(resolved_output.scale).to_i32_round();
-                render_elements_from_surface_tree(
+        for window in canvas.windows() {
+            let window_rect = render::window_group_rect(window, view.viewport, group.logical_size);
+            let output_rect =
+                Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
+            let overlap = window_rect.intersection(output_rect).map(|intersection| {
+                Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
+            });
+            let preferred_scale = group
+                .outputs
+                .iter()
+                .filter(|candidate| {
+                    Rectangle::new(candidate.group_location, candidate.logical_size)
+                        .overlaps(window_rect)
+                })
+                .map(|candidate| candidate.scale)
+                .fold(resolved_output.scale, f64::max);
+            render::update_window_output(window, &surface.output, overlap, preferred_scale);
+        }
+        let locked = self.app.session_locked();
+        let lock_surface = self.app.lock_surface_for_output(&output_name);
+        let mut elements = if include_cursor {
+            render::cursor_render_elements(
+                &mut renderer,
+                &self.app,
+                resolved_output.global_location,
+                resolved_output.scale,
+            )
+        } else {
+            Vec::new()
+        };
+        if !locked {
+            elements.extend(render::dnd_icon_render_elements(
+                &mut renderer,
+                &self.app,
+                resolved_output.global_location,
+                resolved_output.scale,
+            ));
+        }
+        if locked {
+            elements.extend(lock_surface.iter().flat_map(
+                |lock_surface| -> Vec<render::CanvasRenderElement<TtyRenderer<'_>>> {
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        lock_surface,
+                        (0, 0),
+                        resolved_output.scale,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                },
+            ));
+        } else {
+            elements.extend(canvas.windows().iter().rev().flat_map(|window| {
+                render::window_render_elements(
                     &mut renderer,
-                    window.surface.wl_surface(),
-                    offset,
-                    view.viewport.zoom * resolved_output.scale,
-                    1.0,
-                    Kind::Unspecified,
+                    window,
+                    view.viewport,
+                    group.logical_size,
+                    resolved_output.group_location,
+                    resolved_output.scale,
                 )
-            })
-            .collect::<Vec<WaylandSurfaceRenderElement<TtyRenderer<'_>>>>();
+            }));
+        }
 
         match surface.drm_output.render_frame(
             &mut renderer,
             &elements,
-            CANVAS_BACKGROUND,
+            if locked {
+                LOCK_BACKGROUND
+            } else {
+                CANVAS_BACKGROUND
+            },
             FrameFlags::empty(),
         ) {
             Ok(frame) => {
-                if !frame.is_empty
-                    && let Err(error) = surface.drm_output.queue_frame(())
-                {
-                    eprintln!("nkdhr-canvas: failed to queue {output_name}: {error}");
-                    return;
+                if !screencopies.is_empty() {
+                    match &frame.primary_element {
+                        PrimaryPlaneElement::Swapchain(primary) => {
+                            match primary.buffer().export() {
+                                Ok(dmabuf) => match renderer.import_dmabuf(&dmabuf, None) {
+                                    Ok(texture) => {
+                                        for request in screencopies {
+                                            match renderer.copy_texture(
+                                                &texture,
+                                                request.region,
+                                                SCREENCOPY_FORMAT,
+                                            ) {
+                                                Ok(mapping) => {
+                                                    let flipped = mapping.flipped();
+                                                    match renderer.map_texture(&mapping) {
+                                                        Ok(pixels) => {
+                                                            if let Err(error) = request.complete(
+                                                                pixels,
+                                                                flipped,
+                                                                self.app.start_time.elapsed(),
+                                                            ) {
+                                                                eprintln!(
+                                                                    "nkdhr-canvas: {output_name} screencopy failed: {error}"
+                                                                );
+                                                            }
+                                                        }
+                                                        Err(error) => {
+                                                            let message = error.to_string();
+                                                            let _ = request.fail(message.clone());
+                                                            eprintln!(
+                                                                "nkdhr-canvas: {output_name} screencopy mapping failed: {message}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    let message = error.to_string();
+                                                    let _ = request.fail(message.clone());
+                                                    eprintln!(
+                                                        "nkdhr-canvas: {output_name} screencopy readback failed: {message}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        for request in screencopies {
+                                            let _ = request.fail(message.clone());
+                                        }
+                                        eprintln!(
+                                            "nkdhr-canvas: could not import {output_name} for screencopy: {message}"
+                                        );
+                                    }
+                                },
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    for request in screencopies {
+                                        let _ = request.fail(message.clone());
+                                    }
+                                    eprintln!(
+                                        "nkdhr-canvas: could not export {output_name} for screencopy: {message}"
+                                    );
+                                }
+                            }
+                        }
+                        PrimaryPlaneElement::Element(_) => {
+                            for request in screencopies {
+                                let _ = request.fail(
+                                    "direct scanout is unavailable during screencopy".to_owned(),
+                                );
+                            }
+                        }
+                    }
+                }
+                if !frame.is_empty {
+                    if let Err(error) = surface.drm_output.queue_frame(()) {
+                        eprintln!("nkdhr-canvas: failed to queue {output_name}: {error}");
+                        return;
+                    }
+                    surface.protected_frame_queued = locked;
                 }
                 let frame_time = self.app.start_time.elapsed().as_millis() as u32;
-                for window in canvas.windows() {
-                    render::send_frame_callbacks(window.surface.wl_surface(), frame_time);
+                if let Some(lock_surface) = lock_surface {
+                    render::send_frame_callbacks(&lock_surface, frame_time);
+                } else if !locked {
+                    for window in canvas.windows() {
+                        if let Some(window_surface) = window.wl_surface() {
+                            render::send_frame_callbacks(&window_surface, frame_time);
+                        }
+                    }
                 }
+                render::send_pointer_frame_callbacks(&self.app, frame_time);
             }
             Err(error) => {
                 eprintln!("nkdhr-canvas: failed to render {output_name}: {error}");
@@ -803,18 +985,130 @@ impl TtyState {
     }
 
     fn frame_finish(&mut self, node: DrmNode, crtc: crtc::Handle) {
-        let Some(surface) = self
-            .devices
-            .get_mut(&node)
-            .and_then(|device| device.surfaces.get_mut(&crtc))
-        else {
-            return;
+        let presented = {
+            let Some(surface) = self
+                .devices
+                .get_mut(&node)
+                .and_then(|device| device.surfaces.get_mut(&crtc))
+            else {
+                return;
+            };
+            let output_name = surface.output.name();
+            if let Err(error) = surface.drm_output.frame_submitted() {
+                eprintln!("nkdhr-canvas: failed to finish frame on {output_name}: {error}");
+                None
+            } else if std::mem::take(&mut surface.protected_frame_queued) {
+                Some(output_name)
+            } else {
+                None
+            }
         };
-        if let Err(error) = surface.drm_output.frame_submitted() {
-            eprintln!(
-                "nkdhr-canvas: failed to finish frame on {}: {error}",
-                surface.output.name()
-            );
+        if let Some(output_name) = presented {
+            self.app.note_protected_frame(&output_name);
         }
+    }
+}
+
+impl XWaylandShellHandler for TtyState {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        XWaylandShellHandler::xwayland_shell_state(&mut self.app)
+    }
+
+    fn surface_associated(
+        &mut self,
+        xwm: XwmId,
+        wl_surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        surface: X11Surface,
+    ) {
+        XWaylandShellHandler::surface_associated(&mut self.app, xwm, wl_surface, surface);
+    }
+}
+
+impl XwmHandler for TtyState {
+    fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm {
+        XwmHandler::xwm_state(&mut self.app, xwm)
+    }
+
+    fn new_window(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::new_window(&mut self.app, xwm, window);
+    }
+
+    fn new_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::new_override_redirect_window(&mut self.app, xwm, window);
+    }
+
+    fn map_window_request(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::map_window_request(&mut self.app, xwm, window);
+    }
+
+    fn mapped_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::mapped_override_redirect_window(&mut self.app, xwm, window);
+    }
+
+    fn unmapped_window(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::unmapped_window(&mut self.app, xwm, window);
+    }
+
+    fn destroyed_window(&mut self, xwm: XwmId, window: X11Surface) {
+        XwmHandler::destroyed_window(&mut self.app, xwm, window);
+    }
+
+    fn configure_request(
+        &mut self,
+        xwm: XwmId,
+        window: X11Surface,
+        x: Option<i32>,
+        y: Option<i32>,
+        width: Option<u32>,
+        height: Option<u32>,
+        reorder: Option<Reorder>,
+    ) {
+        XwmHandler::configure_request(&mut self.app, xwm, window, x, y, width, height, reorder);
+    }
+
+    fn configure_notify(
+        &mut self,
+        xwm: XwmId,
+        window: X11Surface,
+        geometry: Rectangle<i32, Logical>,
+        above: Option<u32>,
+    ) {
+        XwmHandler::configure_notify(&mut self.app, xwm, window, geometry, above);
+    }
+
+    fn resize_request(
+        &mut self,
+        xwm: XwmId,
+        window: X11Surface,
+        button: u32,
+        resize_edge: ResizeEdge,
+    ) {
+        XwmHandler::resize_request(&mut self.app, xwm, window, button, resize_edge);
+    }
+
+    fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32) {
+        XwmHandler::move_request(&mut self.app, xwm, window, button);
+    }
+
+    fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
+        XwmHandler::allow_selection_access(&mut self.app, xwm, selection)
+    }
+
+    fn send_selection(
+        &mut self,
+        xwm: XwmId,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+    ) {
+        XwmHandler::send_selection(&mut self.app, xwm, selection, mime_type, fd);
+    }
+
+    fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        XwmHandler::new_selection(&mut self.app, xwm, selection, mime_types);
+    }
+
+    fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
+        XwmHandler::cleared_selection(&mut self.app, xwm, selection);
     }
 }

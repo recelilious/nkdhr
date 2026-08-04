@@ -1,7 +1,9 @@
 mod backends;
 mod canvas;
+mod cursor;
 mod input;
 mod keybindings;
+mod protocols;
 mod render;
 mod state;
 
