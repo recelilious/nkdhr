@@ -51,6 +51,7 @@ use crate::input;
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
+use crate::widget_host::PinnedLayer;
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
 const LOCK_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
@@ -861,6 +862,15 @@ impl TtyState {
                 },
             ));
         } else {
+            elements.extend(render::pinned_render_elements(
+                &mut renderer,
+                canvas,
+                PinnedLayer::AboveWindows,
+                view.viewport,
+                group.logical_size,
+                resolved_output.group_location,
+                resolved_output.scale,
+            ));
             elements.extend(canvas.windows().iter().rev().flat_map(|window| {
                 render::window_render_elements(
                     &mut renderer,
@@ -871,6 +881,15 @@ impl TtyState {
                     resolved_output.scale,
                 )
             }));
+            elements.extend(render::pinned_render_elements(
+                &mut renderer,
+                canvas,
+                PinnedLayer::BehindWindows,
+                view.viewport,
+                group.logical_size,
+                resolved_output.group_location,
+                resolved_output.scale,
+            ));
         }
 
         match surface.drm_output.render_frame(

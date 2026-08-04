@@ -1,7 +1,7 @@
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
-use smithay::utils::{IsAlive, Logical, Point, Transform};
+use smithay::utils::{IsAlive, Logical, Point, Size, Transform};
 use smithay::wayland::compositor::with_states;
 
 const FALLBACK_SIZE: i32 = 24;
@@ -45,6 +45,10 @@ impl CursorState {
 
     pub fn fallback(&self) -> &MemoryRenderBuffer {
         &self.fallback
+    }
+
+    pub fn fallback_size(&self) -> Size<i32, Logical> {
+        (FALLBACK_SIZE, FALLBACK_SIZE).into()
     }
 
     pub fn hotspot(&self) -> Point<i32, Logical> {

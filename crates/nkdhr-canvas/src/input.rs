@@ -17,6 +17,7 @@ use crate::canvas::marks;
 use crate::canvas::output_group::OutputLayout;
 use crate::canvas::world::{Animation, Drag, ManagedWindow, ResizeEdge, Viewport};
 use crate::state::{App, KeyboardFocusTarget};
+use crate::widget_host::{InputHandled, PinnedLayer, PinnedPointerEvent};
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -93,7 +94,11 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
                 handle_pointer_button::<B>(app, &keyboard, &pointer, &group, &event);
             }
         }
-        InputEvent::PointerAxis { event } => handle_pointer_axis::<B>(app, &event),
+        InputEvent::PointerAxis { event } => {
+            if let Some(group) = active_group(app, layout) {
+                handle_pointer_axis::<B>(app, &pointer, &group, &event);
+            }
+        }
         _ => {}
     }
 }
@@ -268,6 +273,24 @@ fn handle_pointer_motion(
         return;
     }
 
+    if !has_active_pointer_constraint(pointer)
+        && dispatch_pinned_pointer(app, group, pointer_pos, |position| {
+            PinnedPointerEvent::Motion { position, time }
+        }) == InputHandled::Captured
+    {
+        pointer.motion(
+            app,
+            None,
+            &MotionEvent {
+                location: pointer_pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(app);
+        return;
+    }
+
     let current_surface = pointer.current_focus();
     let mut focus = pointer_focus_at(app, group, pointer_pos);
     let mut location = pointer_pos;
@@ -401,6 +424,31 @@ fn pointer_focus_at(
     let surface_offset = surface_offset.to_f64().upscale(viewport.zoom);
     let offset = group.origin.to_f64() + root_offset + surface_offset;
     Some((surface, offset))
+}
+
+/// Give the front pinned layer first refusal, then the back layer only when
+/// no window frame occludes that world-space point.
+fn dispatch_pinned_pointer(
+    app: &mut App,
+    group: &InputGroup,
+    pointer_pos: Point<f64, Logical>,
+    event: impl Fn(Point<f64, crate::widget_host::PinnedLocal>) -> PinnedPointerEvent,
+) -> InputHandled {
+    let viewport = app.active_view().viewport;
+    let world_pos = viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+
+    if app
+        .active_canvas_mut()
+        .dispatch_pinned_pointer(world_pos, PinnedLayer::AboveWindows, &event)
+        == InputHandled::Captured
+    {
+        return InputHandled::Captured;
+    }
+    if app.active_canvas().window_at(world_pos).is_some() {
+        return InputHandled::Ignored;
+    }
+    app.active_canvas_mut()
+        .dispatch_pinned_pointer(world_pos, PinnedLayer::BehindWindows, event)
 }
 
 fn pointer_focus_for_surface(
@@ -600,13 +648,38 @@ fn handle_pointer_button<B: InputBackend>(
         return;
     }
 
-    if button_state == ButtonState::Released {
-        if app.drag.take().is_some() {
-            return;
+    if button_state == ButtonState::Released && app.drag.take().is_some() {
+        return;
+    }
+
+    let pointer_pos = pointer.current_location();
+    if !has_active_pointer_constraint(pointer)
+        && dispatch_pinned_pointer(app, group, pointer_pos, |position| {
+            PinnedPointerEvent::Button {
+                position,
+                button: button_code,
+                state: button_state,
+                time: event.time_msec(),
+            }
+        }) == InputHandled::Captured
+    {
+        if pointer.current_focus().is_some() {
+            pointer.motion(
+                app,
+                None,
+                &MotionEvent {
+                    location: pointer_pos,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+            pointer.frame(app);
         }
-    } else {
+        return;
+    }
+
+    if button_state == ButtonState::Pressed {
         let modifiers = keyboard.modifier_state();
-        let pointer_pos = pointer.current_location();
         let viewport = app.active_view().viewport;
         let world_pos =
             viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
@@ -677,7 +750,12 @@ fn handle_pointer_button<B: InputBackend>(
     pointer.frame(app);
 }
 
-fn handle_pointer_axis<B: InputBackend>(app: &mut App, event: &B::PointerAxisEvent) {
+fn handle_pointer_axis<B: InputBackend>(
+    app: &mut App,
+    pointer: &PointerHandle<App>,
+    group: &InputGroup,
+    event: &B::PointerAxisEvent,
+) {
     if app.active_view().in_overview || app.drag.is_some() {
         return;
     }
@@ -690,6 +768,18 @@ fn handle_pointer_axis<B: InputBackend>(app: &mut App, event: &B::PointerAxisEve
         .or_else(|| event.amount_v120(Axis::Vertical).map(|v120| v120 / 6.0))
         .unwrap_or(0.0);
     if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    if !has_active_pointer_constraint(pointer)
+        && dispatch_pinned_pointer(app, group, pointer.current_location(), |position| {
+            PinnedPointerEvent::Axis {
+                position,
+                horizontal: dx,
+                vertical: dy,
+                time: event.time_msec(),
+            }
+        }) == InputHandled::Captured
+    {
         return;
     }
     let view = app.active_view_mut();

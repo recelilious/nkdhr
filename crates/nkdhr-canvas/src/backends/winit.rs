@@ -10,7 +10,7 @@ use smithay::backend::renderer::{Color32F, ExportMem, Frame, ImportDma, Renderer
 use smithay::backend::winit::{self as smithay_winit, WinitEvent};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::reexports::calloop::EventLoop as CalloopEventLoop;
-use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
+use smithay::reexports::wayland_server::{Display, ListeningSocket};
 use smithay::reexports::winit::dpi::LogicalSize;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::reexports::winit::window::Window as WinitWindow;
@@ -24,6 +24,7 @@ use crate::input;
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
+use crate::widget_host::PinnedLayer;
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
 const LOCK_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
@@ -128,8 +129,6 @@ fn run() -> BackendResult {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     println!("nkdhr-canvas: listening on WAYLAND_DISPLAY={socket_name}");
-    let mut clients: Vec<Client> = Vec::new();
-
     let mut frame_count: u32 = 0;
     let mut fps_window_start = Instant::now();
 
@@ -252,6 +251,15 @@ fn run() -> BackendResult {
                     },
                 ));
             } else {
+                elements.extend(render::pinned_render_elements(
+                    renderer,
+                    canvas,
+                    PinnedLayer::AboveWindows,
+                    view.viewport,
+                    group.logical_size,
+                    resolved.group_location,
+                    resolved.scale,
+                ));
                 elements.extend(canvas.windows().iter().rev().flat_map(|window| {
                     render::window_render_elements(
                         renderer,
@@ -262,6 +270,15 @@ fn run() -> BackendResult {
                         resolved.scale,
                     )
                 }));
+                elements.extend(render::pinned_render_elements(
+                    renderer,
+                    canvas,
+                    PinnedLayer::BehindWindows,
+                    view.viewport,
+                    group.logical_size,
+                    resolved.group_location,
+                    resolved.scale,
+                ));
             }
 
             let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
@@ -360,8 +377,7 @@ fn run() -> BackendResult {
         }
 
         if let Some(stream) = listener.accept()? {
-            let client = display_handle.insert_client(stream, Arc::new(ClientState::default()))?;
-            clients.push(client);
+            display_handle.insert_client(stream, Arc::new(ClientState::default()))?;
         }
 
         xwayland_event_loop.dispatch(Duration::ZERO, &mut app)?;

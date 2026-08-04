@@ -6,9 +6,11 @@ use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::desktop::{Window, WindowSurfaceType};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{IsAlive, Logical, Point, Rectangle, Size};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::xwayland::X11Surface;
+
+use crate::widget_host::{InputHandled, PinnedLayer, PinnedNode, PinnedPointerEvent};
 
 /// Type-level marker for nkdhr's own canvas world coordinate space
 /// (ROADMAP.md §2.3) — distinct from Smithay's own `Logical`/`Physical`,
@@ -132,6 +134,7 @@ impl ManagedWindow {
 #[derive(Default)]
 pub struct Canvas {
     windows: Vec<ManagedWindow>,
+    pinned_nodes: Vec<Box<dyn PinnedNode>>,
 }
 
 impl Canvas {
@@ -166,6 +169,51 @@ impl Canvas {
 
     pub fn windows(&self) -> &[ManagedWindow] {
         &self.windows
+    }
+
+    /// Remove surfaces whose client disappeared without completing its
+    /// protocol-level destruction sequence. Returns the number reclaimed.
+    pub fn remove_dead_windows(&mut self) -> usize {
+        let before = self.windows.len();
+        self.windows.retain(|window| window.window.alive());
+        before - self.windows.len()
+    }
+
+    pub fn add_pinned(&mut self, node: Box<dyn PinnedNode>) {
+        let id = node.id().to_owned();
+        assert!(
+            self.pinned_nodes
+                .iter()
+                .all(|candidate| candidate.id() != id),
+            "pinned node IDs must be unique within a canvas: {id:?}"
+        );
+        self.pinned_nodes.push(node);
+    }
+
+    pub fn pinned_nodes(&self) -> impl DoubleEndedIterator<Item = &dyn PinnedNode> {
+        self.pinned_nodes.iter().map(Box::as_ref)
+    }
+
+    /// Dispatch to the topmost node in `layer` at `point`. Ignored events
+    /// continue through lower nodes in that layer before falling through to
+    /// the normal window/canvas input path.
+    pub fn dispatch_pinned_pointer(
+        &mut self,
+        point: Point<f64, World>,
+        layer: PinnedLayer,
+        event: impl Fn(Point<f64, crate::widget_host::PinnedLocal>) -> PinnedPointerEvent,
+    ) -> InputHandled {
+        for node in self.pinned_nodes.iter_mut().rev() {
+            let rect = node.world_rect();
+            if node.layer() != layer || !rect.contains(point) {
+                continue;
+            }
+            let local = (point.x - rect.loc.x, point.y - rect.loc.y).into();
+            if node.pointer_event(event(local)) == InputHandled::Captured {
+                return InputHandled::Captured;
+            }
+        }
+        InputHandled::Ignored
     }
 
     /// The topmost window whose rect contains `point`, for click-to-focus
@@ -250,6 +298,7 @@ impl Canvas {
         self.windows
             .iter()
             .map(ManagedWindow::rect)
+            .chain(self.pinned_nodes.iter().map(|node| node.world_rect()))
             .reduce(|a, b| a.merge(b))
     }
 }
@@ -433,5 +482,152 @@ impl ResizeEdge {
 
     pub(crate) fn bottom(self) -> bool {
         matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use smithay::backend::allocator::Fourcc;
+    use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+    use smithay::utils::{Logical, Transform};
+
+    use super::*;
+    use crate::widget_host::{PinnedLocal, PinnedRenderData};
+
+    struct TestNode {
+        id: &'static str,
+        rect: Rectangle<f64, World>,
+        layer: PinnedLayer,
+        result: InputHandled,
+        buffer: MemoryRenderBuffer,
+        events: Arc<Mutex<Vec<Point<f64, PinnedLocal>>>>,
+    }
+
+    impl TestNode {
+        fn new(
+            id: &'static str,
+            rect: Rectangle<f64, World>,
+            layer: PinnedLayer,
+            result: InputHandled,
+            events: Arc<Mutex<Vec<Point<f64, PinnedLocal>>>>,
+        ) -> Self {
+            Self {
+                id,
+                rect,
+                layer,
+                result,
+                buffer: MemoryRenderBuffer::from_slice(
+                    &[255, 255, 255, 255],
+                    Fourcc::Abgr8888,
+                    (1, 1),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+                events,
+            }
+        }
+    }
+
+    impl PinnedNode for TestNode {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn world_rect(&self) -> Rectangle<f64, World> {
+            self.rect
+        }
+
+        fn layer(&self) -> PinnedLayer {
+            self.layer
+        }
+
+        fn render_data(&self) -> PinnedRenderData<'_> {
+            PinnedRenderData::Memory {
+                buffer: &self.buffer,
+                source_size: Size::<i32, Logical>::from((1, 1)),
+            }
+        }
+
+        fn pointer_event(&mut self, event: PinnedPointerEvent) -> InputHandled {
+            let position = match event {
+                PinnedPointerEvent::Motion { position, .. }
+                | PinnedPointerEvent::Button { position, .. }
+                | PinnedPointerEvent::Axis { position, .. } => position,
+            };
+            self.events.lock().unwrap().push(position);
+            self.result
+        }
+    }
+
+    #[test]
+    fn pinned_hit_testing_is_reverse_registration_order_and_node_local() {
+        let lower_events = Arc::new(Mutex::new(Vec::new()));
+        let upper_events = Arc::new(Mutex::new(Vec::new()));
+        let mut canvas = Canvas::new();
+        canvas.add_pinned(Box::new(TestNode::new(
+            "lower",
+            Rectangle::new((10.0, 20.0).into(), (100.0, 100.0).into()),
+            PinnedLayer::AboveWindows,
+            InputHandled::Captured,
+            lower_events.clone(),
+        )));
+        canvas.add_pinned(Box::new(TestNode::new(
+            "upper",
+            Rectangle::new((20.0, 30.0).into(), (100.0, 100.0).into()),
+            PinnedLayer::AboveWindows,
+            InputHandled::Captured,
+            upper_events.clone(),
+        )));
+
+        let handled = canvas.dispatch_pinned_pointer(
+            (25.0, 35.0).into(),
+            PinnedLayer::AboveWindows,
+            |position| PinnedPointerEvent::Motion { position, time: 1 },
+        );
+
+        assert_eq!(handled, InputHandled::Captured);
+        assert!(lower_events.lock().unwrap().is_empty());
+        assert_eq!(
+            upper_events.lock().unwrap().as_slice(),
+            &[(5.0, 5.0).into()]
+        );
+    }
+
+    #[test]
+    fn ignored_pinned_input_falls_through_and_bounds_include_nodes() {
+        let upper_events = Arc::new(Mutex::new(Vec::new()));
+        let lower_events = Arc::new(Mutex::new(Vec::new()));
+        let mut canvas = Canvas::new();
+        canvas.add_pinned(Box::new(TestNode::new(
+            "lower",
+            Rectangle::new((-50.0, -40.0).into(), (20.0, 10.0).into()),
+            PinnedLayer::BehindWindows,
+            InputHandled::Captured,
+            lower_events.clone(),
+        )));
+        canvas.add_pinned(Box::new(TestNode::new(
+            "upper",
+            Rectangle::new((-50.0, -40.0).into(), (20.0, 10.0).into()),
+            PinnedLayer::BehindWindows,
+            InputHandled::Ignored,
+            upper_events.clone(),
+        )));
+
+        let handled = canvas.dispatch_pinned_pointer(
+            (-45.0, -35.0).into(),
+            PinnedLayer::BehindWindows,
+            |position| PinnedPointerEvent::Motion { position, time: 1 },
+        );
+
+        assert_eq!(handled, InputHandled::Captured);
+        assert_eq!(upper_events.lock().unwrap().len(), 1);
+        assert_eq!(lower_events.lock().unwrap().len(), 1);
+        assert_eq!(
+            canvas.bounding_rect(),
+            Some(Rectangle::new((-50.0, -40.0).into(), (20.0, 10.0).into()))
+        );
     }
 }

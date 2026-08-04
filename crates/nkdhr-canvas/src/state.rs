@@ -241,7 +241,15 @@ impl App {
         let mark_count = marks.values().map(|marks| marks.len()).sum::<usize>();
         println!("nkdhr-canvas: loaded {mark_count} saved mark(s)");
 
-        let canvases = BTreeMap::from([(DEFAULT_CANVAS.to_owned(), Canvas::new())]);
+        let mut default_canvas = Canvas::new();
+        if let Some(node) = crate::widget_host::demo_node_from_env() {
+            println!(
+                "nkdhr-canvas: enabling opt-in COMP-7 pinned image fixture {:?}",
+                node.id()
+            );
+            default_canvas.add_pinned(node);
+        }
+        let canvases = BTreeMap::from([(DEFAULT_CANVAS.to_owned(), default_canvas)]);
         let group_views = BTreeMap::from([(
             DEFAULT_GROUP.to_owned(),
             GroupView::new(DEFAULT_CANVAS.to_owned()),
@@ -371,6 +379,43 @@ impl App {
 
     pub fn note_protected_frame(&mut self, output_name: &str) {
         self.protocols.note_protected_frame(output_name);
+    }
+
+    /// Defensive cleanup for abrupt client death. Graceful protocol/XWM
+    /// destroy callbacks still remove state immediately; this catches the
+    /// paths where a disconnected resource becomes dead without one.
+    pub fn cleanup_dead_client_state(&mut self) -> usize {
+        let removed = self
+            .canvases
+            .values_mut()
+            .map(Canvas::remove_dead_windows)
+            .sum();
+        self.protocols.idle_inhibitors.retain(WlSurface::is_alive);
+
+        for view in self.group_views.values_mut() {
+            if view
+                .keyboard_focus
+                .as_ref()
+                .is_some_and(|focus| !focus.alive())
+            {
+                view.keyboard_focus = None;
+            }
+        }
+        if self.drag.as_ref().is_some_and(|drag| match drag {
+            Drag::Move { surface, .. } | Drag::Resize { surface, .. } => !surface.is_alive(),
+            Drag::Pan { .. } => false,
+        }) {
+            self.drag = None;
+        }
+        if self
+            .dnd_icon
+            .as_ref()
+            .is_some_and(|icon| !icon.surface.is_alive())
+        {
+            self.dnd_icon = None;
+        }
+
+        removed
     }
 }
 

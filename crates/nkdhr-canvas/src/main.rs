@@ -6,6 +6,7 @@ mod keybindings;
 mod protocols;
 mod render;
 mod state;
+mod widget_host;
 
 use backends::Backend;
 

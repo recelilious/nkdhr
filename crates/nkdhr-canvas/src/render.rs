@@ -18,8 +18,9 @@ use smithay::wayland::compositor::{
 };
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
-use crate::canvas::world::{ManagedWindow, Viewport};
+use crate::canvas::world::{Canvas, ManagedWindow, Viewport};
 use crate::state::App;
+use crate::widget_host::{PinnedLayer, PinnedRenderData};
 
 smithay::backend::renderer::element::render_elements! {
     /// Unified element list for client surfaces and compositor-owned
@@ -34,6 +35,10 @@ smithay::backend::renderer::element::render_elements! {
 /// drawing the next set of frames.
 pub fn advance_animations(app: &mut App) {
     app.popup_manager.cleanup();
+    let reclaimed = app.cleanup_dead_client_state();
+    if reclaimed > 0 {
+        println!("nkdhr-canvas: reclaimed {reclaimed} dead window(s)");
+    }
     let now = Instant::now();
     for view in app.group_views.values_mut() {
         let Some(animation) = &view.animation else {
@@ -135,6 +140,57 @@ where
     elements
 }
 
+/// Adapt renderer-independent pinned-node payloads to the concrete renderer
+/// used by either backend. Elements are returned front-to-back, matching the
+/// ordering expected by Smithay's render helpers.
+pub fn pinned_render_elements<R>(
+    renderer: &mut R,
+    canvas: &Canvas,
+    layer: PinnedLayer,
+    viewport: Viewport,
+    group_size: Size<i32, Logical>,
+    output_group_location: Point<i32, Logical>,
+    output_scale: f64,
+) -> Vec<CanvasRenderElement<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    canvas
+        .pinned_nodes()
+        .rev()
+        .filter(|node| node.layer() == layer)
+        .filter_map(|node| {
+            let rect = node.world_rect();
+            let width = (rect.size.w * viewport.zoom * output_scale).round() as i32;
+            let height = (rect.size.h * viewport.zoom * output_scale).round() as i32;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+
+            let group_point = viewport.to_group_logical(rect.loc, group_size);
+            let local = group_point - output_group_location.to_f64();
+            let offset = local.to_physical(output_scale);
+            match node.render_data() {
+                PinnedRenderData::Memory {
+                    buffer,
+                    source_size,
+                } => MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    offset,
+                    buffer,
+                    None,
+                    Some(Rectangle::from_size(source_size.to_f64())),
+                    Some((width, height).into()),
+                    Kind::Unspecified,
+                )
+                .map(CanvasRenderElement::from)
+                .ok(),
+            }
+        })
+        .collect()
+}
+
 /// Render the pointer in output-local physical coordinates. Client cursor
 /// surfaces keep their committed hotspot; the compositor-owned arrow covers
 /// the background and clients that do not set a cursor surface.
@@ -164,8 +220,14 @@ where
             location.to_f64(),
             app.cursor.fallback(),
             None,
-            None,
-            None,
+            Some(Rectangle::from_size(app.cursor.fallback_size().to_f64())),
+            Some(
+                app.cursor
+                    .fallback_size()
+                    .to_f64()
+                    .upscale(output_scale)
+                    .to_i32_round(),
+            ),
             Kind::Cursor,
         )
         .map(CanvasRenderElement::from)
