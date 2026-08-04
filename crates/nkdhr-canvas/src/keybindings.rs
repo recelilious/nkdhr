@@ -59,7 +59,7 @@ pub fn watch() -> Arc<Mutex<Keybindings>> {
             let Ok(args) = signal.args() else {
                 continue;
             };
-            if args.key().starts_with("canvas.") {
+            if is_keybinding_key(args.key()) {
                 let updated = fetch(&connection);
                 *watched.lock().unwrap() = updated;
                 println!("nkdhr-canvas: keybindings reloaded: {updated:?}");
@@ -68,6 +68,13 @@ pub fn watch() -> Arc<Mutex<Keybindings>> {
     });
 
     current
+}
+
+fn is_keybinding_key(key: &str) -> bool {
+    matches!(
+        key,
+        "canvas.close_window" | "canvas.cycle_focus" | "canvas.overview"
+    )
 }
 
 fn fetch(connection: &Connection) -> Keybindings {
@@ -97,5 +104,21 @@ fn fetch_key(config: &ConfigProxyBlocking<'_>, key: &str, fallback: Keysym) -> K
         fallback
     } else {
         sym
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_keybinding_key;
+
+    #[test]
+    fn reloads_only_for_keybinding_leaves() {
+        assert!(is_keybinding_key("canvas.close_window"));
+        assert!(is_keybinding_key("canvas.cycle_focus"));
+        assert!(is_keybinding_key("canvas.overview"));
+        assert!(!is_keybinding_key("canvas.marks"));
+        assert!(!is_keybinding_key(
+            "canvas.outputs.desk.members.Virtual-1.x"
+        ));
     }
 }

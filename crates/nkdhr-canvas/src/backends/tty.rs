@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +12,7 @@ use smithay::backend::drm::compositor::FrameFlags;
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, NodeType};
-use smithay::backend::egl::{self, EGLDevice, EGLDisplay, context::ContextPriority};
+use smithay::backend::egl::{self, context::ContextPriority};
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::element::Kind;
@@ -56,17 +58,31 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 type TtyRenderer<'a> = MultiRenderer<
     'a,
     'a,
-    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
-    GbmGlesBackend<GlesRenderer, DrmDeviceFd>,
+    GbmGlesBackend<GlesRenderer, RenderDeviceFd>,
+    GbmGlesBackend<GlesRenderer, RenderDeviceFd>,
 >;
 type OutputManager = DrmOutputManager<
-    GbmAllocator<DrmDeviceFd>,
+    GbmAllocator<RenderDeviceFd>,
     GbmFramebufferExporter<DrmDeviceFd>,
     (),
     DrmDeviceFd,
 >;
 type ManagedDrmOutput =
-    DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
+    DrmOutput<GbmAllocator<RenderDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
+
+/// A DRM render-node descriptor that deliberately has no DRM-control traits.
+///
+/// Keeping renderer descriptors distinct from `DrmDeviceFd` is a safety
+/// invariant: constructing `DrmDeviceFd` attempts to acquire DRM master,
+/// while a renderer never needs modesetting privileges.
+#[derive(Clone, Debug)]
+struct RenderDeviceFd(DeviceFd);
+
+impl AsFd for RenderDeviceFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
 
 pub struct TtyBackend;
 
@@ -109,7 +125,8 @@ struct TtyState {
     session: LibSeatSession,
     primary_gpu: DrmNode,
     scanout_filter: Option<DrmNode>,
-    gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
+    gpus: GpuManager<GbmGlesBackend<GlesRenderer, RenderDeviceFd>>,
+    render_allocators: HashMap<DrmNode, GbmAllocator<RenderDeviceFd>>,
     devices: HashMap<DrmNode, DeviceData>,
     output_config: OutputConfig,
     output_config_generation: u64,
@@ -124,15 +141,24 @@ fn run() -> BackendResult {
     let (session, session_notifier) = LibSeatSession::new()?;
     let seat_name = session.seat();
 
-    let primary_gpu = select_primary_gpu(&session)?;
     let scanout_filter = std::env::var_os("NKDHR_DRM_SCANOUT_DEVICE")
         .map(DrmNode::from_path)
         .transpose()?;
+    if let Some(node) = scanout_filter
+        && node.ty() != NodeType::Primary
+    {
+        return Err(
+            format!("NKDHR_DRM_SCANOUT_DEVICE must name a DRM primary node, not {node}").into(),
+        );
+    }
+    let primary_gpu = select_primary_gpu(&session)?;
     println!("nkdhr-canvas: using {primary_gpu} as the primary render GPU");
     if let Some(node) = scanout_filter {
         println!("nkdhr-canvas: limiting scanout to {node}");
     }
-    let gpus = GpuManager::new(GbmGlesBackend::with_context_priority(ContextPriority::High))?;
+    let mut gpus = GpuManager::new(GbmGlesBackend::with_context_priority(ContextPriority::High))?;
+    let primary_allocator = register_render_node(&mut gpus, primary_gpu)?;
+    let render_allocators = HashMap::from([(primary_gpu, primary_allocator)]);
     let output_config = OutputConfig::watch();
     let output_config_generation = output_config.generation();
     let app = App::new(&display_handle, DmabufState::new())?;
@@ -144,6 +170,7 @@ fn run() -> BackendResult {
         primary_gpu,
         scanout_filter,
         gpus,
+        render_allocators,
         devices: HashMap::new(),
         output_config,
         output_config_generation,
@@ -261,7 +288,11 @@ fn run() -> BackendResult {
 
 fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::error::Error>> {
     if let Some(path) = std::env::var_os("NKDHR_DRM_DEVICE") {
-        return Ok(DrmNode::from_path(path)?);
+        let node = DrmNode::from_path(path)?;
+        if node.ty() != NodeType::Render {
+            return Err(format!("NKDHR_DRM_DEVICE must name a DRM render node, not {node}").into());
+        }
+        return Ok(node);
     }
     if let Some(node) = find_primary_gpu(session.seat())?
         .and_then(|path| DrmNode::from_path(path).ok())
@@ -276,8 +307,59 @@ fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::
     }
     all_gpus(session.seat())?
         .into_iter()
-        .find_map(|path| DrmNode::from_path(path).ok())
-        .ok_or_else(|| "no DRM GPU found on the active seat".into())
+        .filter_map(|path| DrmNode::from_path(path).ok())
+        .find_map(|node| {
+            node.node_with_type(NodeType::Render)
+                .transpose()
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| "no DRM render node found on the active seat".into())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RenderNodeError {
+    #[error("{0} is not a DRM render node")]
+    NotRenderNode(DrmNode),
+    #[error("no device path exists for DRM render node {0}")]
+    MissingPath(DrmNode),
+    #[error("failed to open DRM render node {path:?}: {source}")]
+    Open {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to initialize GBM on the render node: {0}")]
+    Gbm(std::io::Error),
+    #[error("failed to initialize EGL on the render node: {0}")]
+    Egl(egl::Error),
+}
+
+fn register_render_node(
+    gpus: &mut GpuManager<GbmGlesBackend<GlesRenderer, RenderDeviceFd>>,
+    node: DrmNode,
+) -> Result<GbmAllocator<RenderDeviceFd>, RenderNodeError> {
+    if node.ty() != NodeType::Render {
+        return Err(RenderNodeError::NotRenderNode(node));
+    }
+    let path = node.dev_path().ok_or(RenderNodeError::MissingPath(node))?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| RenderNodeError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    let fd: OwnedFd = file.into();
+    let gbm = GbmDevice::new(RenderDeviceFd(DeviceFd::from(fd))).map_err(RenderNodeError::Gbm)?;
+    gpus.as_mut()
+        .add_node(node, gbm.clone())
+        .map_err(RenderNodeError::Egl)?;
+    Ok(GbmAllocator::new(
+        gbm,
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    ))
 }
 
 fn register_wayland_sources(
@@ -322,18 +404,6 @@ fn initialize_devices(
     state: &mut TtyState,
     devices: &[(u64, std::path::PathBuf)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let primary_node = state
-        .primary_gpu
-        .node_with_type(NodeType::Primary)
-        .transpose()
-        .ok()
-        .flatten();
-    if let Some((device_id, path)) = devices.iter().find(|(device_id, _)| {
-        primary_node.is_some_and(|node| *device_id == node.dev_id())
-            || *device_id == state.primary_gpu.dev_id()
-    }) {
-        state.device_added(DrmNode::from_dev_id(*device_id)?, path)?;
-    }
     for (device_id, path) in devices {
         let node = DrmNode::from_dev_id(*device_id)?;
         if state.should_manage_device(node) && !state.devices.contains_key(&node) {
@@ -351,23 +421,17 @@ enum DeviceAddError {
     Drm(DrmError),
     #[error("failed to initialize GBM: {0}")]
     Gbm(std::io::Error),
-    #[error("failed to initialize EGL: {0}")]
-    Egl(egl::Error),
+    #[error(transparent)]
+    RenderNode(#[from] RenderNodeError),
     #[error("failed to acquire a renderer: {0}")]
     Renderer(String),
-    #[error("the scanout-only device appeared before the primary render GPU")]
-    MissingPrimaryGpu,
+    #[error("no render allocator is registered for {0}")]
+    MissingRenderAllocator(DrmNode),
 }
 
 impl TtyState {
     fn should_manage_device(&self, node: DrmNode) -> bool {
         self.scanout_filter.is_none_or(|filter| node == filter)
-            || node
-                .node_with_type(NodeType::Render)
-                .transpose()
-                .ok()
-                .flatten()
-                == Some(self.primary_gpu)
     }
 
     fn initialize_buffer_globals(&mut self) -> BackendResult {
@@ -404,40 +468,20 @@ impl TtyState {
             })
             .expect("DRM notifier registration must succeed");
 
-        let render_node = (|| {
-            // SAFETY: GBM owns a valid DRM fd for the lifetime of this EGL display.
-            let display = unsafe { EGLDisplay::new(gbm.clone()) }.map_err(DeviceAddError::Egl)?;
-            let egl_device =
-                EGLDevice::device_for_display(&display).map_err(DeviceAddError::Egl)?;
-            if egl_device.is_software() {
-                return Ok(None);
-            }
-            let render_node = egl_device
-                .try_get_render_node()
-                .ok()
-                .flatten()
-                .unwrap_or(node);
-            self.gpus
-                .as_mut()
-                .add_node(render_node, gbm.clone())
-                .map_err(DeviceAddError::Egl)?;
-            Ok::<_, DeviceAddError>(Some(render_node))
-        })()?;
-
-        let allocator = render_node
-            .map(|_| {
-                GbmAllocator::new(
-                    gbm.clone(),
-                    GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-                )
-            })
-            .or_else(|| {
-                self.devices
-                    .values()
-                    .find(|device| device.render_node == Some(self.primary_gpu))
-                    .map(|device| device.output_manager.allocator().clone())
-            })
-            .ok_or(DeviceAddError::MissingPrimaryGpu)?;
+        let render_node = node
+            .node_with_type(NodeType::Render)
+            .transpose()
+            .map_err(|error| DeviceAddError::Renderer(error.to_string()))?;
+        let allocator_node = render_node.unwrap_or(self.primary_gpu);
+        if !self.render_allocators.contains_key(&allocator_node) {
+            let allocator = register_render_node(&mut self.gpus, allocator_node)?;
+            self.render_allocators.insert(allocator_node, allocator);
+        }
+        let allocator = self
+            .render_allocators
+            .get(&allocator_node)
+            .cloned()
+            .ok_or(DeviceAddError::MissingRenderAllocator(allocator_node))?;
         let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
         let target_node = render_node.unwrap_or(self.primary_gpu);
         let mut renderer = self
@@ -615,8 +659,11 @@ impl TtyState {
         let Some(device) = self.devices.remove(&node) else {
             return;
         };
-        if let Some(render_node) = device.render_node {
+        if let Some(render_node) = device.render_node
+            && render_node != self.primary_gpu
+        {
             self.gpus.as_mut().remove_node(&render_node);
+            self.render_allocators.remove(&render_node);
         }
         self.loop_handle.remove(device.registration);
         self.reconcile_output_layout();
