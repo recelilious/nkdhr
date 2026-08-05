@@ -12,7 +12,7 @@ use smithay::desktop::utils::output_update;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{IsAlive, Logical, Point, Rectangle, Size};
+use smithay::utils::{IsAlive, Logical, Point, Rectangle};
 use smithay::wayland::compositor::{
     SurfaceAttributes, TraversalAction, with_surface_tree_downward,
 };
@@ -82,10 +82,10 @@ pub fn send_frame_callbacks(surface: &WlSurface, time: u32) {
 pub fn window_group_rect(
     window: &ManagedWindow,
     viewport: Viewport,
-    group_size: Size<i32, Logical>,
+    canvas_anchor: Point<f64, Logical>,
 ) -> Rectangle<i32, Logical> {
     let location = viewport
-        .to_group_logical(window.position, group_size)
+        .to_group_logical(window.position, canvas_anchor)
         .to_i32_round();
     let size = window.size();
     let size = (
@@ -100,7 +100,7 @@ pub fn window_render_elements<R>(
     renderer: &mut R,
     window: &ManagedWindow,
     viewport: Viewport,
-    group_size: Size<i32, Logical>,
+    canvas_anchor: Point<f64, Logical>,
     output_group_location: smithay::utils::Point<i32, Logical>,
     output_scale: f64,
 ) -> Vec<CanvasRenderElement<R>>
@@ -108,7 +108,7 @@ where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Clone + 'static,
 {
-    let group_point = viewport.to_group_logical(window.position, group_size);
+    let group_point = viewport.to_group_logical(window.position, canvas_anchor);
     let local = group_point - output_group_location.to_f64();
     let offset = local.to_physical(output_scale).to_i32_round();
     let scale = viewport.zoom * output_scale;
@@ -125,7 +125,7 @@ where
             rect.size.h.round().max(1.0) as i32,
         );
         buffer.resize(size);
-        let group_point = viewport.to_group_logical(rect.loc, group_size);
+        let group_point = viewport.to_group_logical(rect.loc, canvas_anchor);
         let local = group_point - output_group_location.to_f64();
         let offset = local.to_physical(output_scale).to_i32_round();
         elements.push(
@@ -151,7 +151,7 @@ pub fn pinned_render_elements<R>(
     canvas: &Canvas,
     layer: PinnedLayer,
     viewport: Viewport,
-    group_size: Size<i32, Logical>,
+    canvas_anchor: Point<f64, Logical>,
     output_group_location: Point<i32, Logical>,
     output_scale: f64,
 ) -> Vec<CanvasRenderElement<R>>
@@ -171,7 +171,7 @@ where
                 return None;
             }
 
-            let group_point = viewport.to_group_logical(rect.loc, group_size);
+            let group_point = viewport.to_group_logical(rect.loc, canvas_anchor);
             let local = group_point - output_group_location.to_f64();
             let offset = local.to_physical(output_scale);
             match node.render_data() {

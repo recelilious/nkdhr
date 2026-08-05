@@ -15,6 +15,11 @@ pub type CanvasOutputGroups = BTreeMap<String, CanvasOutputGroup>;
 pub struct CanvasOutputGroup {
     /// The canvas this output group views.
     pub canvas: String,
+    /// Connector whose logical center is the canvas anchor. An empty value
+    /// selects the first connected member deterministically, preserving old
+    /// configurations while giving multi-output groups a stable reference.
+    #[serde(default)]
+    pub primary: String,
     /// Connector name to its fixed position within the group.
     pub members: BTreeMap<String, CanvasOutputPlacement>,
 }

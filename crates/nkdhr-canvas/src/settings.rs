@@ -27,8 +27,9 @@ impl Default for Keybindings {
     }
 }
 
-/// World-coordinate grid used by window placement and interactive geometry.
-/// It never applies to a viewport or pinned node.
+/// World-coordinate grid used by window placement, interactive geometry,
+/// and the work viewport's primary-output anchor. It does not apply to
+/// pinned nodes or the transient overview camera.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridSettings {
     pub enabled: bool,

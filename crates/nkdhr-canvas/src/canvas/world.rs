@@ -350,9 +350,10 @@ impl Canvas {
     }
 }
 
-/// A camera onto the canvas: a world-space point at the center of the
-/// view, plus a zoom factor. COMP-5 owns one per output group, shared by
-/// every physical output in that group's rigid arrangement.
+/// A camera onto the canvas: the world-space point shown at the output
+/// group's canvas anchor, plus a zoom factor. The anchor defaults to the
+/// primary physical output's center. COMP-5 owns one viewport per output
+/// group, shared by every output in that group's rigid arrangement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub center: Point<f64, World>,
@@ -371,10 +372,10 @@ impl Viewport {
     pub fn to_group_logical(
         self,
         point: Point<f64, World>,
-        group_size: Size<i32, Logical>,
+        canvas_anchor: Point<f64, Logical>,
     ) -> Point<f64, Logical> {
-        let x = (point.x - self.center.x) * self.zoom + f64::from(group_size.w) / 2.0;
-        let y = (point.y - self.center.y) * self.zoom + f64::from(group_size.h) / 2.0;
+        let x = (point.x - self.center.x) * self.zoom + canvas_anchor.x;
+        let y = (point.y - self.center.y) * self.zoom + canvas_anchor.y;
         (x, y).into()
     }
 
@@ -384,10 +385,10 @@ impl Viewport {
     pub fn group_logical_to_world(
         self,
         point: Point<f64, Logical>,
-        group_size: Size<i32, Logical>,
+        canvas_anchor: Point<f64, Logical>,
     ) -> Point<f64, World> {
-        let x = (point.x - f64::from(group_size.w) / 2.0) / self.zoom + self.center.x;
-        let y = (point.y - f64::from(group_size.h) / 2.0) / self.zoom + self.center.y;
+        let x = (point.x - canvas_anchor.x) / self.zoom + self.center.x;
+        let y = (point.y - canvas_anchor.y) / self.zoom + self.center.y;
         (x, y).into()
     }
 
@@ -403,9 +404,13 @@ impl Viewport {
     /// Never zooms *in* past 1:1 — overview only ever zooms out or stays
     /// put, per the sharpness policy (ROADMAP §2.4: 1:1 in work state,
     /// scaling blur only accepted in the transient overview state).
-    pub fn fit_group(rect: Rectangle<f64, World>, group_size: Size<i32, Logical>) -> Viewport {
+    pub fn fit_group(
+        rect: Rectangle<f64, World>,
+        group_size: Size<i32, Logical>,
+        canvas_anchor: Point<f64, Logical>,
+    ) -> Viewport {
         const MARGIN: f64 = 1.25;
-        let center = (
+        let rect_center: Point<f64, World> = (
             rect.loc.x + rect.size.w / 2.0,
             rect.loc.y + rect.size.h / 2.0,
         )
@@ -415,6 +420,13 @@ impl Viewport {
         let zoom = (f64::from(group_size.w) / content_w)
             .min(f64::from(group_size.h) / content_h)
             .min(1.0);
+        let group_center: Point<f64, Logical> =
+            (f64::from(group_size.w) / 2.0, f64::from(group_size.h) / 2.0).into();
+        let center = (
+            rect_center.x - (group_center.x - canvas_anchor.x) / zoom,
+            rect_center.y - (group_center.y - canvas_anchor.y) / zoom,
+        )
+            .into();
         Viewport { center, zoom }
     }
 }
@@ -573,6 +585,35 @@ mod tests {
 
     use super::*;
     use crate::widget_host::{PinnedLocal, PinnedRenderData};
+
+    #[test]
+    fn viewport_maps_its_world_center_to_the_canvas_anchor() {
+        let viewport = Viewport {
+            center: (64.0, -32.0).into(),
+            zoom: 2.0,
+        };
+        let anchor = (300.0, 200.0).into();
+
+        assert_eq!(viewport.to_group_logical(viewport.center, anchor), anchor);
+        assert_eq!(
+            viewport.group_logical_to_world(anchor, anchor),
+            viewport.center
+        );
+    }
+
+    #[test]
+    fn overview_centers_content_in_the_group_with_an_off_center_anchor() {
+        let rect = Rectangle::new((100.0, 200.0).into(), (1000.0, 500.0).into());
+        let group_size = (2000, 1000).into();
+        let anchor = (400.0, 300.0).into();
+        let viewport = Viewport::fit_group(rect, group_size, anchor);
+        let rect_center = (600.0, 450.0).into();
+
+        assert_eq!(
+            viewport.to_group_logical(rect_center, anchor),
+            (1000.0, 500.0).into()
+        );
+    }
 
     #[test]
     fn position_animation_eases_and_finishes_at_target() {

@@ -29,6 +29,7 @@ const BTN_RIGHT: u32 = 0x111;
 const TRANSITION: Duration = Duration::from_millis(250);
 const KEYBOARD_PAN_TRANSITION: Duration = Duration::from_millis(140);
 const WINDOW_SNAP_TRANSITION: Duration = Duration::from_millis(120);
+const VIEWPORT_SNAP_TRANSITION: Duration = Duration::from_millis(120);
 const PAN_STEP: f64 = 80.0;
 type RelativeMotion = (Point<f64, Logical>, Point<f64, Logical>, u64);
 
@@ -36,6 +37,7 @@ type RelativeMotion = (Point<f64, Logical>, Point<f64, Logical>, u64);
 struct InputGroup {
     origin: Point<i32, Logical>,
     size: Size<i32, Logical>,
+    canvas_anchor: Point<f64, Logical>,
 }
 
 /// Backend-independent compositor input dispatch. Backend code supplies the
@@ -60,7 +62,7 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
     match event {
         InputEvent::Keyboard { event } => {
             if let Some(group) = active_group(app, layout) {
-                handle_keyboard::<B>(app, &keyboard, group.size, event);
+                handle_keyboard::<B>(app, &keyboard, group, event);
             }
         }
         InputEvent::PointerMotion { event } => {
@@ -141,17 +143,20 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
                 );
             }
         }
-        InputEvent::GestureSwipeEnd { event } if !std::mem::take(&mut app.canvas_swipe_active) => {
-            pointer.gesture_swipe_end(
-                app,
-                &PointerSwipeEndEvent {
-                    serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
-                    cancelled: event.cancelled(),
-                },
-            );
+        InputEvent::GestureSwipeEnd { event } => {
+            if std::mem::take(&mut app.canvas_swipe_active) {
+                animate_viewport_snap(app);
+            } else {
+                pointer.gesture_swipe_end(
+                    app,
+                    &PointerSwipeEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        cancelled: event.cancelled(),
+                    },
+                );
+            }
         }
-        InputEvent::GestureSwipeEnd { .. } => {}
         _ => {}
     }
 }
@@ -319,6 +324,7 @@ fn active_group(app: &App, layout: &OutputLayout) -> Option<InputGroup> {
         .map(|group| InputGroup {
             origin: group.global_location,
             size: group.logical_size,
+            canvas_anchor: group.canvas_anchor,
         })
 }
 
@@ -514,9 +520,10 @@ fn pointer_focus_at(
     pointer_pos: Point<f64, Logical>,
 ) -> Option<(WlSurface, Point<f64, Logical>)> {
     let viewport = app.active_view().viewport;
-    let world_pos = viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+    let world_pos =
+        viewport.group_logical_to_world(local_point(group, pointer_pos), group.canvas_anchor);
     let (window, surface, surface_offset) = app.active_canvas().surface_at(world_pos)?;
-    let root_offset = viewport.to_group_logical(window.position, group.size);
+    let root_offset = viewport.to_group_logical(window.position, group.canvas_anchor);
     let surface_offset = surface_offset.to_f64().upscale(viewport.zoom);
     let offset = group.origin.to_f64() + root_offset + surface_offset;
     Some((surface, offset))
@@ -531,7 +538,8 @@ fn dispatch_pinned_pointer(
     event: impl Fn(Point<f64, crate::widget_host::PinnedLocal>) -> PinnedPointerEvent,
 ) -> InputHandled {
     let viewport = app.active_view().viewport;
-    let world_pos = viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+    let world_pos =
+        viewport.group_logical_to_world(local_point(group, pointer_pos), group.canvas_anchor);
 
     if app
         .active_canvas_mut()
@@ -554,12 +562,13 @@ fn pointer_focus_for_surface(
 ) -> Option<(WlSurface, Point<f64, Logical>)> {
     let pointer_pos = app.seat.get_pointer()?.current_location();
     let viewport = app.active_view().viewport;
-    let world_pos = viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+    let world_pos =
+        viewport.group_logical_to_world(local_point(group, pointer_pos), group.canvas_anchor);
     let (window, candidate, surface_offset) = app.active_canvas().surface_at(world_pos)?;
     if &candidate != surface {
         return None;
     }
-    let root_offset = viewport.to_group_logical(window.position, group.size);
+    let root_offset = viewport.to_group_logical(window.position, group.canvas_anchor);
     let surface_offset = surface_offset.to_f64().upscale(viewport.zoom);
     Some((
         surface.clone(),
@@ -570,7 +579,7 @@ fn pointer_focus_for_surface(
 fn handle_keyboard<B: InputBackend>(
     app: &mut App,
     keyboard: &KeyboardHandle<App>,
-    group_size: Size<i32, Logical>,
+    group: InputGroup,
     event: B::KeyboardKeyEvent,
 ) {
     let serial = SERIAL_COUNTER.next_serial();
@@ -598,7 +607,7 @@ fn handle_keyboard<B: InputBackend>(
             }
             if modifiers.logo && sym == bindings.overview {
                 if pressed {
-                    toggle_overview(app, group_size);
+                    toggle_overview(app, group.size, group.canvas_anchor);
                 }
                 return FilterResult::Intercept(());
             }
@@ -624,16 +633,20 @@ fn handle_keyboard<B: InputBackend>(
                 };
                 if let Some((dx, dy)) = step {
                     if pressed {
+                        let grid = { app.interaction_settings.lock().unwrap().grid };
                         let view = app.active_view_mut();
                         let base = view
                             .animation
                             .as_ref()
                             .map(Animation::target)
                             .unwrap_or(view.viewport);
-                        let target = Viewport {
-                            center: (base.center.x + dx, base.center.y + dy).into(),
-                            zoom: base.zoom,
-                        };
+                        let target = snapped_viewport(
+                            grid,
+                            Viewport {
+                                center: (base.center.x + dx, base.center.y + dy).into(),
+                                zoom: base.zoom,
+                            },
+                        );
                         view.animation = Some(Animation::new(
                             view.viewport,
                             target,
@@ -773,13 +786,18 @@ fn jump_to_mark(app: &mut App, digit: u8) {
     let Some(&center) = app.marks.get(&canvas).and_then(|marks| marks.get(&digit)) else {
         return;
     };
+    let grid = { app.interaction_settings.lock().unwrap().grid };
     let view = app.active_view_mut();
-    let target = Viewport { center, zoom: 1.0 };
+    let target = snapped_viewport(grid, Viewport { center, zoom: 1.0 });
     view.animation = Some(Animation::new(view.viewport, target, TRANSITION));
     view.in_overview = false;
 }
 
-fn toggle_overview(app: &mut App, group_size: Size<i32, Logical>) {
+fn toggle_overview(
+    app: &mut App,
+    group_size: Size<i32, Logical>,
+    canvas_anchor: Point<f64, Logical>,
+) {
     if app.active_view().in_overview {
         exit_overview(app, None);
         return;
@@ -788,7 +806,9 @@ fn toggle_overview(app: &mut App, group_size: Size<i32, Logical>) {
     let target = app
         .active_canvas()
         .bounding_rect()
-        .map_or(viewport, |rect| Viewport::fit_group(rect, group_size));
+        .map_or(viewport, |rect| {
+            Viewport::fit_group(rect, group_size, canvas_anchor)
+        });
     let view = app.active_view_mut();
     view.pre_overview_viewport = viewport;
     view.animation = Some(Animation::new(viewport, target, TRANSITION));
@@ -796,8 +816,9 @@ fn toggle_overview(app: &mut App, group_size: Size<i32, Logical>) {
 }
 
 fn exit_overview(app: &mut App, target: Option<Viewport>) {
+    let grid = { app.interaction_settings.lock().unwrap().grid };
     let view = app.active_view_mut();
-    let target = target.unwrap_or(view.pre_overview_viewport);
+    let target = snapped_viewport(grid, target.unwrap_or(view.pre_overview_viewport));
     view.animation = Some(Animation::new(view.viewport, target, TRANSITION));
     view.in_overview = false;
 }
@@ -856,7 +877,7 @@ fn handle_pointer_button<B: InputBackend>(
         let modifiers = keyboard.modifier_state();
         let viewport = app.active_view().viewport;
         let world_pos =
-            viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+            viewport.group_logical_to_world(local_point(group, pointer_pos), group.canvas_anchor);
         let hit = app.active_canvas().window_at(world_pos).and_then(|window| {
             Some((
                 window.wl_surface()?,
@@ -990,7 +1011,8 @@ fn gesture_pan_center(
 fn handle_overview_click(app: &mut App, pointer: &PointerHandle<App>, group: &InputGroup) {
     let pointer_pos = pointer.current_location();
     let viewport = app.active_view().viewport;
-    let world_pos = viewport.group_logical_to_world(local_point(group, pointer_pos), group.size);
+    let world_pos =
+        viewport.group_logical_to_world(local_point(group, pointer_pos), group.canvas_anchor);
     let Some((surface, center, focus)) =
         app.active_canvas().window_at(world_pos).and_then(|window| {
             Some((
@@ -1066,6 +1088,9 @@ fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
 
 fn finish_drag(app: &mut App, drag: &Drag) {
     let Drag::Move { surface, .. } = drag else {
+        if matches!(drag, Drag::Pan { .. }) {
+            animate_viewport_snap(app);
+        }
         return;
     };
     let grid = { app.interaction_settings.lock().unwrap().grid };
@@ -1084,6 +1109,33 @@ fn finish_drag(app: &mut App, drag: &Drag) {
     let target = (grid.snap(position.x), grid.snap(position.y)).into();
     app.active_canvas_mut()
         .animate_position(surface, target, WINDOW_SNAP_TRANSITION);
+}
+
+fn snapped_viewport(grid: GridSettings, viewport: Viewport) -> Viewport {
+    Viewport {
+        center: (grid.snap(viewport.center.x), grid.snap(viewport.center.y)).into(),
+        ..viewport
+    }
+}
+
+fn animate_viewport_snap(app: &mut App) {
+    if app.active_view().in_overview {
+        return;
+    }
+    let grid = { app.interaction_settings.lock().unwrap().grid };
+    if !grid.enabled {
+        return;
+    }
+    let view = app.active_view_mut();
+    let target = snapped_viewport(grid, view.viewport);
+    if target == view.viewport {
+        return;
+    }
+    view.animation = Some(Animation::new(
+        view.viewport,
+        target,
+        VIEWPORT_SNAP_TRANSITION,
+    ));
 }
 
 fn resize_geometry(
@@ -1279,5 +1331,32 @@ mod tests {
             gesture_pan_center((100.0, -50.0).into(), (12.0, -8.0).into(), 2.0),
             (94.0, -46.0).into()
         );
+    }
+
+    #[test]
+    fn work_viewport_center_snaps_to_the_world_grid() {
+        let viewport = Viewport {
+            center: (47.0, -49.0).into(),
+            zoom: 1.0,
+        };
+
+        assert_eq!(
+            snapped_viewport(GridSettings::default(), viewport).center,
+            (32.0, -64.0).into()
+        );
+    }
+
+    #[test]
+    fn disabled_grid_preserves_the_exact_viewport_center() {
+        let viewport = Viewport {
+            center: (47.25, -49.75).into(),
+            zoom: 1.0,
+        };
+        let grid = GridSettings {
+            enabled: false,
+            ..GridSettings::default()
+        };
+
+        assert_eq!(snapped_viewport(grid, viewport), viewport);
     }
 }

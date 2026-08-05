@@ -40,6 +40,9 @@ pub struct ResolvedOutputGroup {
     pub name: String,
     pub canvas: String,
     pub logical_size: Size<i32, Logical>,
+    /// Logical point within the rigid group that represents the viewport's
+    /// world-space center. Normally this is the primary output's center.
+    pub canvas_anchor: Point<f64, Logical>,
     pub global_location: Point<i32, Logical>,
     pub outputs: Vec<ResolvedOutput>,
 }
@@ -67,6 +70,7 @@ impl OutputLayout {
             let mut x = 0;
             let mut names = connected.keys().copied().collect::<Vec<_>>();
             names.sort_unstable();
+            let primary = names.first().copied().unwrap_or_default().to_owned();
             for name in names {
                 members.insert(
                     name.to_owned(),
@@ -81,6 +85,7 @@ impl OutputLayout {
                 DEFAULT_GROUP.to_owned(),
                 CanvasOutputGroup {
                     canvas: DEFAULT_CANVAS.to_owned(),
+                    primary,
                     members,
                 },
             )])
@@ -92,6 +97,7 @@ impl OutputLayout {
         let mut groups = requested
             .into_iter()
             .filter_map(|(name, group)| {
+                let primary = group.primary;
                 let outputs = group
                     .members
                     .into_iter()
@@ -101,7 +107,7 @@ impl OutputLayout {
                         Some(unpositioned_output(output, output_name, placement))
                     })
                     .collect::<Vec<_>>();
-                resolve_group(name, group.canvas, outputs)
+                resolve_group(name, group.canvas, primary, outputs)
             })
             .collect::<Vec<_>>();
 
@@ -119,7 +125,12 @@ impl OutputLayout {
                     output.name.clone(),
                     CanvasOutputPlacement::default(),
                 );
-                if let Some(group) = resolve_group(identity.clone(), identity, vec![resolved]) {
+                if let Some(group) = resolve_group(
+                    identity.clone(),
+                    identity,
+                    output.name.clone(),
+                    vec![resolved],
+                ) {
                     groups.push(group);
                 }
             }
@@ -221,12 +232,24 @@ fn unpositioned_output(
 fn resolve_group(
     name: String,
     canvas: String,
+    primary: String,
     outputs: Vec<UnpositionedOutput>,
 ) -> Option<ResolvedOutputGroup> {
     let bounds = outputs
         .iter()
         .map(|output| Rectangle::new(output.configured_location, output.logical_size))
         .reduce(|left, right| left.merge(right))?;
+    let primary_output = outputs
+        .iter()
+        .find(|output| output.name == primary)
+        .or_else(|| outputs.first())?;
+    let canvas_anchor = (
+        f64::from(primary_output.configured_location.x - bounds.loc.x)
+            + f64::from(primary_output.logical_size.w) / 2.0,
+        f64::from(primary_output.configured_location.y - bounds.loc.y)
+            + f64::from(primary_output.logical_size.h) / 2.0,
+    )
+        .into();
     let outputs = outputs
         .into_iter()
         .map(|output| ResolvedOutput {
@@ -242,6 +265,7 @@ fn resolve_group(
         name,
         canvas,
         logical_size: bounds.size,
+        canvas_anchor,
         global_location: (0, 0).into(),
         outputs,
     })
@@ -324,6 +348,14 @@ fn decode_flat(values: HashMap<String, OwnedValue>) -> CanvasOutputGroups {
                         .canvas = canvas.to_string();
                 }
             }
+            [group_name, "primary"] => {
+                if let Value::Str(primary) = Value::from(owned) {
+                    groups
+                        .entry((*group_name).to_owned())
+                        .or_insert_with(empty_group)
+                        .primary = primary.to_string();
+                }
+            }
             [group_name, "members", output_name, field] => {
                 let group = groups
                     .entry((*group_name).to_owned())
@@ -347,6 +379,7 @@ fn decode_flat(values: HashMap<String, OwnedValue>) -> CanvasOutputGroups {
 fn empty_group() -> CanvasOutputGroup {
     CanvasOutputGroup {
         canvas: String::new(),
+        primary: String::new(),
         members: BTreeMap::new(),
     }
 }
@@ -391,6 +424,7 @@ mod tests {
         assert_eq!(group.logical_size, (4480, 1440).into());
         assert_eq!(group.outputs[0].name, "DP-1");
         assert_eq!(group.outputs[1].group_location, (2560, 0).into());
+        assert_eq!(group.canvas_anchor, (1280.0, 720.0).into());
     }
 
     #[test]
@@ -417,6 +451,7 @@ mod tests {
             "desk".to_owned(),
             CanvasOutputGroup {
                 canvas: "work".to_owned(),
+                primary: "eDP-1".to_owned(),
                 members,
             },
         )]);
@@ -430,6 +465,7 @@ mod tests {
         assert_eq!(group.outputs[0].group_location, (1920, 0).into());
         assert_eq!(group.outputs[0].logical_size, (1920, 1080).into());
         assert_eq!(group.outputs[1].group_location, (0, 360).into());
+        assert_eq!(group.canvas_anchor, (960.0, 900.0).into());
     }
 
     #[test]
@@ -438,6 +474,7 @@ mod tests {
             "internal".to_owned(),
             CanvasOutputGroup {
                 canvas: "main".to_owned(),
+                primary: "eDP-1".to_owned(),
                 members: BTreeMap::from([("eDP-1".to_owned(), CanvasOutputPlacement::default())]),
             },
         )]);
@@ -449,6 +486,31 @@ mod tests {
         assert_eq!(layout.groups.len(), 2);
         assert_eq!(layout.groups[1].name, "auto:HDMI-A-1");
         assert_eq!(layout.groups[1].global_location, (1920, 0).into());
+        assert_eq!(layout.groups[1].canvas_anchor, (960.0, 540.0).into());
+    }
+
+    #[test]
+    fn disconnected_primary_falls_back_to_a_connected_member() {
+        let config = BTreeMap::from([(
+            "desk".to_owned(),
+            CanvasOutputGroup {
+                canvas: "main".to_owned(),
+                primary: "DP-1".to_owned(),
+                members: BTreeMap::from([
+                    ("eDP-1".to_owned(), CanvasOutputPlacement::default()),
+                    (
+                        "DP-1".to_owned(),
+                        CanvasOutputPlacement {
+                            x: 1920,
+                            ..CanvasOutputPlacement::default()
+                        },
+                    ),
+                ]),
+            },
+        )]);
+        let layout = OutputLayout::resolve(&config, &[output("eDP-1", 1920, 1080)]);
+
+        assert_eq!(layout.groups[0].canvas_anchor, (960.0, 540.0).into());
     }
 
     #[test]
@@ -457,6 +519,7 @@ mod tests {
             "desk".to_owned(),
             CanvasOutputGroup {
                 canvas: "main".to_owned(),
+                primary: "left".to_owned(),
                 members: BTreeMap::from([
                     (
                         "left".to_owned(),

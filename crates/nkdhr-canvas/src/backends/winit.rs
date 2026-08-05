@@ -210,7 +210,7 @@ fn run() -> BackendResult {
                 .expect("resolved output group must have a canvas");
             for window in canvas.windows() {
                 let window_rect =
-                    render::window_group_rect(window, view.viewport, group.logical_size);
+                    render::window_group_rect(window, view.viewport, group.canvas_anchor);
                 let output_rect = Rectangle::new(resolved.group_location, resolved.logical_size);
                 let overlap = window_rect.intersection(output_rect).map(|intersection| {
                     Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
@@ -256,7 +256,7 @@ fn run() -> BackendResult {
                     canvas,
                     PinnedLayer::AboveWindows,
                     view.viewport,
-                    group.logical_size,
+                    group.canvas_anchor,
                     resolved.group_location,
                     resolved.scale,
                 ));
@@ -265,7 +265,7 @@ fn run() -> BackendResult {
                         renderer,
                         window,
                         view.viewport,
-                        group.logical_size,
+                        group.canvas_anchor,
                         resolved.group_location,
                         resolved.scale,
                     )
@@ -275,7 +275,7 @@ fn run() -> BackendResult {
                     canvas,
                     PinnedLayer::BehindWindows,
                     view.viewport,
-                    group.logical_size,
+                    group.canvas_anchor,
                     resolved.group_location,
                     resolved.scale,
                 ));

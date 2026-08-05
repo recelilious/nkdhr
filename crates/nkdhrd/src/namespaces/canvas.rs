@@ -30,8 +30,9 @@ use crate::backends::config_store::Namespace;
 ///
 /// `snap_to_grid` and `grid_size` are the compositor's world-coordinate
 /// placement policy. The interval is an integer number of logical world
-/// units; `nkdhr-canvas` applies it to new-window positions and the moving
-/// edges of interactive move/resize operations, never to the viewport.
+/// units; `nkdhr-canvas` applies it to new-window positions, the moving
+/// edges of interactive move/resize operations, and the work viewport's
+/// primary-output anchor after canvas panning ends.
 ///
 /// `marks` is a compact, versioned, `nkdhr-canvas`-owned encoding. COMP-4's
 /// original `"<index>:<x>,<y>;..."` form remains readable as marks on the
@@ -105,6 +106,12 @@ impl Namespace for CanvasSettings {
                     "output group {group_name:?} must contain at least one output"
                 ));
             }
+            if !group.primary.is_empty() && !group.members.contains_key(&group.primary) {
+                return Err(format!(
+                    "primary output {:?} is not a member of output group {group_name:?}",
+                    group.primary
+                ));
+            }
             for (output_name, placement) in &group.members {
                 validate_path_segment("output", output_name)?;
                 if !assigned_outputs.insert(output_name) {
@@ -166,6 +173,7 @@ mod tests {
             "desk".to_owned(),
             CanvasOutputGroup {
                 canvas: "main".to_owned(),
+                primary: "eDP-1".to_owned(),
                 members,
             },
         )]);
@@ -181,6 +189,7 @@ mod tests {
                 "one".to_owned(),
                 CanvasOutputGroup {
                     canvas: "one".to_owned(),
+                    primary: "eDP-1".to_owned(),
                     members: member.clone(),
                 },
             ),
@@ -188,6 +197,7 @@ mod tests {
                 "two".to_owned(),
                 CanvasOutputGroup {
                     canvas: "two".to_owned(),
+                    primary: "eDP-1".to_owned(),
                     members: member,
                 },
             ),
@@ -209,5 +219,22 @@ mod tests {
 
         settings.grid_size = 4097;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_a_primary_output_outside_its_group() {
+        let groups = BTreeMap::from([(
+            "desk".to_owned(),
+            CanvasOutputGroup {
+                canvas: "main".to_owned(),
+                primary: "DP-1".to_owned(),
+                members: BTreeMap::from([("eDP-1".to_owned(), CanvasOutputPlacement::default())]),
+            },
+        )]);
+
+        assert_eq!(
+            settings_with(groups).validate().unwrap_err(),
+            "primary output \"DP-1\" is not a member of output group \"desk\""
+        );
     }
 }

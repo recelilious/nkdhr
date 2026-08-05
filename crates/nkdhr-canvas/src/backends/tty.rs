@@ -842,7 +842,7 @@ impl TtyState {
             return;
         };
         for window in canvas.windows() {
-            let window_rect = render::window_group_rect(window, view.viewport, group.logical_size);
+            let window_rect = render::window_group_rect(window, view.viewport, group.canvas_anchor);
             let output_rect =
                 Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
             let overlap = window_rect.intersection(output_rect).map(|intersection| {
@@ -898,7 +898,7 @@ impl TtyState {
                 canvas,
                 PinnedLayer::AboveWindows,
                 view.viewport,
-                group.logical_size,
+                group.canvas_anchor,
                 resolved_output.group_location,
                 resolved_output.scale,
             ));
@@ -907,7 +907,7 @@ impl TtyState {
                     &mut renderer,
                     window,
                     view.viewport,
-                    group.logical_size,
+                    group.canvas_anchor,
                     resolved_output.group_location,
                     resolved_output.scale,
                 )
@@ -917,7 +917,7 @@ impl TtyState {
                 canvas,
                 PinnedLayer::BehindWindows,
                 view.viewport,
-                group.logical_size,
+                group.canvas_anchor,
                 resolved_output.group_location,
                 resolved_output.scale,
             ));
