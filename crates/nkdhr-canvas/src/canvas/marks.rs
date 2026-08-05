@@ -10,7 +10,7 @@ use super::world::World;
 /// Vim-style world-position bookmarks (ROADMAP.md §2.3): digit `0`-`9` ->
 /// the world point recorded there. Loaded once at startup and saved
 /// (via [`save`]) whenever `main.rs` sets one — unlike
-/// [`crate::keybindings`], marks have no background hot-reload watcher:
+/// [`crate::settings`], marks have no background hot-reload watcher:
 /// nothing outside `nkdhr-canvas` itself needs to change them live, so a
 /// load-once-and-write-through model is simpler and sufficient.
 pub type Marks = HashMap<u8, Point<f64, World>>;
@@ -24,7 +24,7 @@ pub type CanvasMarks = BTreeMap<String, Marks>;
 /// [`Marks`] map. Falls back to an empty map — no marks set — if
 /// `nkdhrd` isn't reachable or the stored value is unparsable, rather
 /// than failing compositor startup over it; the same "log and degrade"
-/// treatment `crate::keybindings::watch` gives a missing session bus.
+/// treatment `crate::settings::watch` gives a missing session bus.
 pub fn load() -> CanvasMarks {
     let Ok(connection) = Connection::session() else {
         eprintln!("nkdhr-canvas: no session D-Bus, starting with no marks");

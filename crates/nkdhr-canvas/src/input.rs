@@ -1,12 +1,16 @@
 use std::time::Duration;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, ButtonState, Event, InputBackend, InputEvent, KeyState,
-    KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+    GestureEndEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
-use smithay::input::keyboard::{FilterResult, KeyboardHandle, Keysym, keysyms};
+use smithay::input::keyboard::{FilterResult, KeyboardHandle, Keysym, ModifiersState, keysyms};
 use smithay::input::pointer::{
-    AxisFrame, ButtonEvent, MotionEvent, PointerHandle, RelativeMotionEvent,
+    AxisFrame, ButtonEvent, GestureSwipeBeginEvent as PointerSwipeBeginEvent,
+    GestureSwipeEndEvent as PointerSwipeEndEvent,
+    GestureSwipeUpdateEvent as PointerSwipeUpdateEvent, MotionEvent, PointerHandle,
+    RelativeMotionEvent,
 };
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
@@ -15,14 +19,16 @@ use smithay::wayland::seat::WaylandFocus;
 
 use crate::canvas::marks;
 use crate::canvas::output_group::OutputLayout;
-use crate::canvas::world::{Animation, Drag, ManagedWindow, ResizeEdge, Viewport};
+use crate::canvas::world::{Animation, Drag, ManagedWindow, ResizeEdge, Viewport, World};
+use crate::settings::GridSettings;
 use crate::state::{App, KeyboardFocusTarget};
 use crate::widget_host::{InputHandled, PinnedLayer, PinnedPointerEvent};
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const TRANSITION: Duration = Duration::from_millis(250);
-const SCROLL_PAN_SPEED: f64 = 1.0;
+const KEYBOARD_PAN_TRANSITION: Duration = Duration::from_millis(140);
+const WINDOW_SNAP_TRANSITION: Duration = Duration::from_millis(120);
 const PAN_STEP: f64 = 80.0;
 type RelativeMotion = (Point<f64, Logical>, Point<f64, Logical>, u64);
 
@@ -99,6 +105,53 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
                 handle_pointer_axis::<B>(app, &pointer, &group, &event);
             }
         }
+        InputEvent::GestureSwipeBegin { event } => {
+            activate_group_at(app, layout, pointer.current_location());
+            // Three fingers are the compositor's global canvas gesture.
+            // Client focus, grabs and pointer constraints must not turn it
+            // back into an application gesture; session lock has its own
+            // fail-closed input path above this dispatcher.
+            let compositor_owned = event.fingers() == 3 && app.drag.is_none();
+            app.canvas_swipe_active = compositor_owned;
+            if compositor_owned {
+                app.active_view_mut().animation = None;
+            } else {
+                pointer.gesture_swipe_begin(
+                    app,
+                    &PointerSwipeBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        fingers: event.fingers(),
+                    },
+                );
+            }
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            if app.canvas_swipe_active {
+                let view = app.active_view_mut();
+                view.viewport.center =
+                    gesture_pan_center(view.viewport.center, event.delta(), view.viewport.zoom);
+            } else {
+                pointer.gesture_swipe_update(
+                    app,
+                    &PointerSwipeUpdateEvent {
+                        time: event.time_msec(),
+                        delta: event.delta(),
+                    },
+                );
+            }
+        }
+        InputEvent::GestureSwipeEnd { event } if !std::mem::take(&mut app.canvas_swipe_active) => {
+            pointer.gesture_swipe_end(
+                app,
+                &PointerSwipeEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                    cancelled: event.cancelled(),
+                },
+            );
+        }
+        InputEvent::GestureSwipeEnd { .. } => {}
         _ => {}
     }
 }
@@ -122,13 +175,27 @@ fn handle_session_lock_input<B: InputBackend>(
 
     match event {
         InputEvent::Keyboard { event } => {
+            let key_state = event.state();
             keyboard.input::<(), _>(
                 app,
                 event.key_code(),
-                event.state(),
+                key_state,
                 SERIAL_COUNTER.next_serial(),
                 event.time_msec(),
-                |_, _, _| FilterResult::Forward,
+                move |app, modifiers, keysym| {
+                    let raw_syms = keysym.raw_syms();
+                    if handle_vt_switch(
+                        app,
+                        modifiers,
+                        keysym.modified_sym(),
+                        &raw_syms,
+                        key_state == KeyState::Pressed,
+                    ) {
+                        FilterResult::Intercept(())
+                    } else {
+                        FilterResult::Forward
+                    }
+                },
             );
         }
         InputEvent::PointerMotion { event } => {
@@ -185,18 +252,37 @@ fn handle_session_lock_input<B: InputBackend>(
             pointer.frame(app);
         }
         InputEvent::PointerAxis { event } => {
-            let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
-            for axis in [Axis::Horizontal, Axis::Vertical] {
-                frame = frame.relative_direction(axis, event.relative_direction(axis));
-                if let Some(amount) = event.amount(axis) {
-                    frame = frame.value(axis, amount);
-                }
-                if let Some(v120) = event.amount_v120(axis) {
-                    frame = frame.v120(axis, v120.round() as i32);
-                }
-            }
-            pointer.axis(app, frame);
+            pointer.axis(app, axis_frame::<B>(&event));
             pointer.frame(app);
+        }
+        InputEvent::GestureSwipeBegin { event } => {
+            pointer.gesture_swipe_begin(
+                app,
+                &PointerSwipeBeginEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                    fingers: event.fingers(),
+                },
+            );
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            pointer.gesture_swipe_update(
+                app,
+                &PointerSwipeUpdateEvent {
+                    time: event.time_msec(),
+                    delta: event.delta(),
+                },
+            );
+        }
+        InputEvent::GestureSwipeEnd { event } => {
+            pointer.gesture_swipe_end(
+                app,
+                &PointerSwipeEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                    cancelled: event.cancelled(),
+                },
+            );
         }
         _ => {}
     }
@@ -267,6 +353,16 @@ fn handle_pointer_motion(
 ) {
     if let Some(drag) = app.drag.clone() {
         apply_drag(app, &drag, pointer_pos);
+        pointer.motion(
+            app,
+            None,
+            &MotionEvent {
+                location: pointer_pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(app);
         return;
     }
     if app.active_view().in_overview {
@@ -479,7 +575,7 @@ fn handle_keyboard<B: InputBackend>(
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     let key_state = event.state();
-    let bindings = *app.keybindings.lock().unwrap();
+    let bindings = app.interaction_settings.lock().unwrap().keybindings;
     keyboard.input::<(), _>(
         app,
         event.key_code(),
@@ -488,8 +584,12 @@ fn handle_keyboard<B: InputBackend>(
         event.time_msec(),
         move |app, modifiers, keysym| {
             let sym = keysym.modified_sym();
+            let raw_syms = keysym.raw_syms();
             let pressed = key_state == KeyState::Pressed;
 
+            if handle_vt_switch(app, modifiers, sym, &raw_syms, pressed) {
+                return FilterResult::Intercept(());
+            }
             if sym == Keysym::Escape {
                 if pressed && app.active_view().in_overview {
                     exit_overview(app, None);
@@ -525,8 +625,20 @@ fn handle_keyboard<B: InputBackend>(
                 if let Some((dx, dy)) = step {
                     if pressed {
                         let view = app.active_view_mut();
-                        view.viewport.center.x += dx;
-                        view.viewport.center.y += dy;
+                        let base = view
+                            .animation
+                            .as_ref()
+                            .map(Animation::target)
+                            .unwrap_or(view.viewport);
+                        let target = Viewport {
+                            center: (base.center.x + dx, base.center.y + dy).into(),
+                            zoom: base.zoom,
+                        };
+                        view.animation = Some(Animation::new(
+                            view.viewport,
+                            target,
+                            KEYBOARD_PAN_TRANSITION,
+                        ));
                     }
                     return FilterResult::Intercept(());
                 }
@@ -546,6 +658,65 @@ fn handle_keyboard<B: InputBackend>(
             FilterResult::Forward
         },
     );
+}
+
+fn handle_vt_switch(
+    app: &mut App,
+    modifiers: &ModifiersState,
+    modified_sym: Keysym,
+    raw_syms: &[Keysym],
+    pressed: bool,
+) -> bool {
+    if !app.vt_switching_enabled() {
+        return false;
+    }
+    let dedicated_vt = xf86_vt_number(modified_sym);
+    let chord_vt = (modifiers.ctrl && modifiers.alt)
+        .then(|| raw_syms.iter().find_map(|sym| function_key_vt_number(*sym)))
+        .flatten();
+    let Some(vt) = dedicated_vt.or(chord_vt) else {
+        return false;
+    };
+    if pressed {
+        app.request_vt_switch(vt);
+    }
+    true
+}
+
+fn function_key_vt_number(sym: Keysym) -> Option<i32> {
+    match sym {
+        Keysym::F1 => Some(1),
+        Keysym::F2 => Some(2),
+        Keysym::F3 => Some(3),
+        Keysym::F4 => Some(4),
+        Keysym::F5 => Some(5),
+        Keysym::F6 => Some(6),
+        Keysym::F7 => Some(7),
+        Keysym::F8 => Some(8),
+        Keysym::F9 => Some(9),
+        Keysym::F10 => Some(10),
+        Keysym::F11 => Some(11),
+        Keysym::F12 => Some(12),
+        _ => None,
+    }
+}
+
+fn xf86_vt_number(sym: Keysym) -> Option<i32> {
+    match sym {
+        Keysym::XF86_Switch_VT_1 => Some(1),
+        Keysym::XF86_Switch_VT_2 => Some(2),
+        Keysym::XF86_Switch_VT_3 => Some(3),
+        Keysym::XF86_Switch_VT_4 => Some(4),
+        Keysym::XF86_Switch_VT_5 => Some(5),
+        Keysym::XF86_Switch_VT_6 => Some(6),
+        Keysym::XF86_Switch_VT_7 => Some(7),
+        Keysym::XF86_Switch_VT_8 => Some(8),
+        Keysym::XF86_Switch_VT_9 => Some(9),
+        Keysym::XF86_Switch_VT_10 => Some(10),
+        Keysym::XF86_Switch_VT_11 => Some(11),
+        Keysym::XF86_Switch_VT_12 => Some(12),
+        _ => None,
+    }
 }
 
 fn digit_value(sym: Keysym) -> Option<u8> {
@@ -648,7 +819,10 @@ fn handle_pointer_button<B: InputBackend>(
         return;
     }
 
-    if button_state == ButtonState::Released && app.drag.take().is_some() {
+    if button_state == ButtonState::Released
+        && let Some(drag) = app.drag.take()
+    {
+        finish_drag(app, &drag);
         return;
     }
 
@@ -782,9 +956,35 @@ fn handle_pointer_axis<B: InputBackend>(
     {
         return;
     }
-    let view = app.active_view_mut();
-    view.viewport.center.x += dx * SCROLL_PAN_SPEED / view.viewport.zoom;
-    view.viewport.center.y += dy * SCROLL_PAN_SPEED / view.viewport.zoom;
+    pointer.axis(app, axis_frame::<B>(event));
+    pointer.frame(app);
+}
+
+fn axis_frame<B: InputBackend>(event: &B::PointerAxisEvent) -> AxisFrame {
+    let source = event.source();
+    let mut frame = AxisFrame::new(event.time_msec()).source(source);
+    for axis in [Axis::Horizontal, Axis::Vertical] {
+        frame = frame.relative_direction(axis, event.relative_direction(axis));
+        if let Some(amount) = event.amount(axis) {
+            if matches!(source, AxisSource::Finger) && amount == 0.0 {
+                frame = frame.stop(axis);
+            } else {
+                frame = frame.value(axis, amount);
+            }
+        }
+        if let Some(v120) = event.amount_v120(axis) {
+            frame = frame.v120(axis, v120.round() as i32);
+        }
+    }
+    frame
+}
+
+fn gesture_pan_center(
+    center: Point<f64, World>,
+    delta: Point<f64, Logical>,
+    zoom: f64,
+) -> Point<f64, World> {
+    (center.x - delta.x / zoom, center.y - delta.y / zoom).into()
 }
 
 fn handle_overview_click(app: &mut App, pointer: &PointerHandle<App>, group: &InputGroup) {
@@ -812,6 +1012,7 @@ fn handle_overview_click(app: &mut App, pointer: &PointerHandle<App>, group: &In
 }
 
 fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
+    let grid = { app.interaction_settings.lock().unwrap().grid };
     match drag {
         Drag::Move {
             surface,
@@ -822,8 +1023,8 @@ fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
                 .active_view()
                 .viewport
                 .to_world_delta(pointer_pos - *pointer_start);
-            app.active_canvas_mut()
-                .set_position(surface, *window_start + delta);
+            let position = *window_start + delta;
+            app.active_canvas_mut().set_position(surface, position);
         }
         Drag::Resize {
             surface,
@@ -836,37 +1037,8 @@ fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
                 .active_view()
                 .viewport
                 .to_world_delta(pointer_pos - *pointer_start);
-            let width_delta = if edge.left() {
-                -delta.x
-            } else if edge.right() {
-                delta.x
-            } else {
-                0.0
-            };
-            let height_delta = if edge.top() {
-                -delta.y
-            } else if edge.bottom() {
-                delta.y
-            } else {
-                0.0
-            };
-            let new_size = Size::from((
-                (f64::from(size_start.w) + width_delta).round().max(1.0) as i32,
-                (f64::from(size_start.h) + height_delta).round().max(1.0) as i32,
-            ));
-            let new_position = (
-                if edge.left() {
-                    window_start.x + f64::from(size_start.w - new_size.w)
-                } else {
-                    window_start.x
-                },
-                if edge.top() {
-                    window_start.y + f64::from(size_start.h - new_size.h)
-                } else {
-                    window_start.y
-                },
-            )
-                .into();
+            let (new_position, new_size) =
+                resize_geometry(*window_start, *size_start, delta, *edge, grid);
             app.active_canvas_mut().set_position(surface, new_position);
             if let Some(toplevel) = app
                 .active_canvas()
@@ -890,6 +1062,71 @@ fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
                 .into();
         }
     }
+}
+
+fn finish_drag(app: &mut App, drag: &Drag) {
+    let Drag::Move { surface, .. } = drag else {
+        return;
+    };
+    let grid = { app.interaction_settings.lock().unwrap().grid };
+    if !grid.enabled {
+        return;
+    }
+    let Some(position) = app
+        .active_canvas()
+        .windows()
+        .iter()
+        .find(|window| window.matches_surface(surface))
+        .map(|window| window.position)
+    else {
+        return;
+    };
+    let target = (grid.snap(position.x), grid.snap(position.y)).into();
+    app.active_canvas_mut()
+        .animate_position(surface, target, WINDOW_SNAP_TRANSITION);
+}
+
+fn resize_geometry(
+    window_start: Point<f64, World>,
+    size_start: Size<i32, Logical>,
+    delta: Point<f64, World>,
+    edge: ResizeEdge,
+    grid: GridSettings,
+) -> (Point<f64, World>, Size<i32, Logical>) {
+    let mut left = window_start.x;
+    let mut top = window_start.y;
+    let mut right = left + f64::from(size_start.w);
+    let mut bottom = top + f64::from(size_start.h);
+
+    if edge.left() {
+        left = grid.snap(left + delta.x);
+    } else if edge.right() {
+        right = grid.snap(right + delta.x);
+    }
+    if edge.top() {
+        top = grid.snap(top + delta.y);
+    } else if edge.bottom() {
+        bottom = grid.snap(bottom + delta.y);
+    }
+
+    let new_size = Size::from((
+        (right - left).round().max(1.0) as i32,
+        (bottom - top).round().max(1.0) as i32,
+    ));
+    let new_position = (
+        if edge.left() {
+            right - f64::from(new_size.w)
+        } else {
+            left
+        },
+        if edge.top() {
+            bottom - f64::from(new_size.h)
+        } else {
+            top
+        },
+    )
+        .into();
+    (new_position, new_size)
 }
 
 /// Begin a client-requested move using the compositor's existing canvas
@@ -966,5 +1203,81 @@ fn keyboard_target(window: &ManagedWindow) -> Option<KeyboardFocusTarget> {
         Some(KeyboardFocusTarget::X11(surface.clone()))
     } else {
         window.wl_surface().map(KeyboardFocusTarget::Wayland)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_function_keys_to_linux_vts() {
+        for (sym, vt) in [
+            (Keysym::F1, 1),
+            (Keysym::F2, 2),
+            (Keysym::F3, 3),
+            (Keysym::F4, 4),
+            (Keysym::F5, 5),
+            (Keysym::F6, 6),
+            (Keysym::F7, 7),
+            (Keysym::F8, 8),
+            (Keysym::F9, 9),
+            (Keysym::F10, 10),
+            (Keysym::F11, 11),
+            (Keysym::F12, 12),
+        ] {
+            assert_eq!(function_key_vt_number(sym), Some(vt));
+        }
+        assert_eq!(function_key_vt_number(Keysym::Escape), None);
+        assert_eq!(xf86_vt_number(Keysym::XF86_Switch_VT_2), Some(2));
+        assert_eq!(xf86_vt_number(Keysym::F2), None);
+    }
+
+    #[test]
+    fn resize_snaps_only_the_moving_edges() {
+        let (position, size) = resize_geometry(
+            (96.0, 96.0).into(),
+            (250, 200).into(),
+            (17.0, 19.0).into(),
+            ResizeEdge::BottomRight,
+            GridSettings::default(),
+        );
+        assert_eq!(position, (96.0, 96.0).into());
+        assert_eq!(size, (256, 224).into());
+
+        let (position, size) = resize_geometry(
+            (96.0, 96.0).into(),
+            (256, 224).into(),
+            (-45.0, -33.0).into(),
+            ResizeEdge::TopLeft,
+            GridSettings::default(),
+        );
+        assert_eq!(position, (64.0, 64.0).into());
+        assert_eq!(size, (288, 256).into());
+    }
+
+    #[test]
+    fn resize_preserves_exact_delta_when_grid_is_disabled() {
+        let grid = GridSettings {
+            enabled: false,
+            ..GridSettings::default()
+        };
+        let (position, size) = resize_geometry(
+            (100.0, 100.0).into(),
+            (250, 200).into(),
+            (17.0, 19.0).into(),
+            ResizeEdge::BottomRight,
+            grid,
+        );
+        assert_eq!(position, (100.0, 100.0).into());
+        assert_eq!(size, (267, 219).into());
+    }
+
+    #[test]
+    fn three_finger_pan_tracks_the_gesture_at_current_zoom() {
+        assert_eq!(
+            gesture_pan_center((100.0, -50.0).into(), (12.0, -8.0).into(), 2.0),
+            (94.0, -46.0).into()
+        );
     }
 }

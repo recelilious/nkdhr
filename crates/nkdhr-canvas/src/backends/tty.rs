@@ -106,6 +106,7 @@ struct SurfaceData {
     mode: WlMode,
     render_node: Option<DrmNode>,
     drm_output: ManagedDrmOutput,
+    frame_pending: bool,
     protected_frame_queued: bool,
 }
 
@@ -169,7 +170,8 @@ fn run() -> BackendResult {
     let render_allocators = HashMap::from([(primary_gpu, primary_allocator)]);
     let output_config = OutputConfig::watch();
     let output_config_generation = output_config.generation();
-    let app = App::new(&display_handle, DmabufState::new())?;
+    let mut app = App::new(&display_handle, DmabufState::new())?;
+    app.enable_vt_switching();
     let mut state = TtyState {
         app,
         display_handle: display_handle.clone(),
@@ -240,6 +242,11 @@ fn run() -> BackendResult {
                 InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
             ) {
                 input::handle(&mut state.app, &state.output_layout, event);
+                if let Some(vt) = state.app.take_vt_switch_request()
+                    && let Err(error) = state.session.change_vt(vt)
+                {
+                    eprintln!("nkdhr-canvas: failed to switch to VT {vt}: {error:?}");
+                }
             }
         },
     )?;
@@ -251,6 +258,10 @@ fn run() -> BackendResult {
                 libinput_context.suspend();
                 for device in state.devices.values_mut() {
                     device.output_manager.pause();
+                    for surface in device.surfaces.values_mut() {
+                        surface.frame_pending = false;
+                        surface.protected_frame_queued = false;
+                    }
                 }
                 println!("nkdhr-canvas: TTY session paused");
             }
@@ -261,8 +272,19 @@ fn run() -> BackendResult {
                     return;
                 }
                 for device in state.devices.values_mut() {
-                    if let Err(error) = device.output_manager.activate(false) {
-                        eprintln!("nkdhr-canvas: failed to reactivate DRM device: {error}");
+                    let activated = match device.output_manager.activate(false) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            eprintln!("nkdhr-canvas: failed to reactivate DRM device: {error}");
+                            false
+                        }
+                    };
+                    for surface in device.surfaces.values_mut() {
+                        surface.frame_pending = false;
+                        surface.protected_frame_queued = false;
+                        if activated {
+                            surface.drm_output.reset_buffers();
+                        }
                     }
                 }
                 println!("nkdhr-canvas: TTY session resumed");
@@ -275,7 +297,12 @@ fn run() -> BackendResult {
             .app
             .group_views
             .values()
-            .any(|view| view.animation.is_some());
+            .any(|view| view.animation.is_some())
+            || state
+                .app
+                .canvases
+                .values()
+                .any(crate::canvas::world::Canvas::animations_running);
         let timeout = if animation_running {
             Duration::from_millis(16)
         } else {
@@ -686,6 +713,7 @@ impl TtyState {
                 mode,
                 render_node: device.render_node,
                 drm_output,
+                frame_pending: false,
                 protected_frame_queued: false,
             },
         );
@@ -782,6 +810,9 @@ impl TtyState {
         let Some(surface) = device.surfaces.get_mut(&crtc) else {
             return;
         };
+        if surface.frame_pending {
+            return;
+        }
         let output_name = surface.output.name();
         let screencopies = self.app.take_pending_screencopies(&output_name);
         let include_cursor = screencopies
@@ -892,6 +923,14 @@ impl TtyState {
             ));
         }
 
+        let frame_flags = if screencopies.is_empty() {
+            FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+        } else {
+            // Screencopy reads the composed primary framebuffer. Keep a
+            // requested cursor in that composition for this frame rather
+            // than assigning it to a hardware plane the readback cannot see.
+            FrameFlags::empty()
+        };
         match surface.drm_output.render_frame(
             &mut renderer,
             &elements,
@@ -900,7 +939,7 @@ impl TtyState {
             } else {
                 CANVAS_BACKGROUND
             },
-            FrameFlags::empty(),
+            frame_flags,
         ) {
             Ok(frame) => {
                 if !screencopies.is_empty() {
@@ -983,6 +1022,7 @@ impl TtyState {
                         eprintln!("nkdhr-canvas: failed to queue {output_name}: {error}");
                         return;
                     }
+                    surface.frame_pending = true;
                     surface.protected_frame_queued = locked;
                 }
                 let frame_time = self.app.start_time.elapsed().as_millis() as u32;
@@ -1013,6 +1053,7 @@ impl TtyState {
                 return;
             };
             let output_name = surface.output.name();
+            surface.frame_pending = false;
             if let Err(error) = surface.drm_output.frame_submitted() {
                 eprintln!("nkdhr-canvas: failed to finish frame on {output_name}: {error}");
                 None

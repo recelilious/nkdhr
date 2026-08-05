@@ -242,6 +242,7 @@ impl SessionLockHandler for App {
         self.protocols.lock.presented_outputs.clear();
         self.protocols.lock.surfaces.clear();
         self.drag = None;
+        self.canvas_swipe_active = false;
         self.dnd_icon = None;
 
         if let Some(keyboard) = self.seat.get_keyboard() {

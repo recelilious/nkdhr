@@ -10,6 +10,7 @@ use smithay::utils::{IsAlive, Logical, Point, Rectangle, Size};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::xwayland::X11Surface;
 
+use crate::settings::GridSettings;
 use crate::widget_host::{InputHandled, PinnedLayer, PinnedNode, PinnedPointerEvent};
 
 /// Type-level marker for nkdhr's own canvas world coordinate space
@@ -23,6 +24,7 @@ pub struct World;
 pub struct ManagedWindow {
     pub window: Window,
     pub position: Point<f64, World>,
+    position_animation: Option<PositionAnimation>,
     decoration: SolidColorBuffer,
 }
 
@@ -147,12 +149,13 @@ impl Canvas {
     /// go, not that a sensible starting point doesn't exist. Each new
     /// window offsets from the last so opening several in a row produces
     /// visibly distinct, not perfectly overlapping, windows.
-    pub fn map(&mut self, window: Window) -> Point<f64, World> {
-        let n = self.windows.len() as f64;
-        let position = (100.0 + 40.0 * (n % 10.0), 100.0 + 40.0 * (n % 10.0)).into();
+    pub fn map(&mut self, window: Window, grid: GridSettings) -> Point<f64, World> {
+        let coordinate = grid.cascade_coordinate(self.windows.len());
+        let position = (coordinate, coordinate).into();
         self.windows.push(ManagedWindow {
             window,
             position,
+            position_animation: None,
             decoration: SolidColorBuffer::new((0, 0), DECORATION_COLOR),
         });
         position
@@ -247,6 +250,7 @@ impl Canvas {
             .find(|window| window.matches_surface(surface))
         {
             window.position = position;
+            window.position_animation = None;
         }
     }
 
@@ -257,6 +261,49 @@ impl Canvas {
             .find(|window| window.matches_x11(surface))
         {
             window.position = position;
+            window.position_animation = None;
+        }
+    }
+
+    pub fn animate_position(
+        &mut self,
+        surface: &WlSurface,
+        target: Point<f64, World>,
+        duration: Duration,
+    ) {
+        let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.matches_surface(surface))
+        else {
+            return;
+        };
+        if window.position == target {
+            window.position_animation = None;
+        } else {
+            window.position_animation =
+                Some(PositionAnimation::new(window.position, target, duration));
+        }
+    }
+
+    pub fn animations_running(&self) -> bool {
+        self.windows
+            .iter()
+            .any(|window| window.position_animation.is_some())
+    }
+
+    pub fn advance_animations(&mut self, now: Instant) {
+        for window in &mut self.windows {
+            let Some(animation) = &window.position_animation else {
+                continue;
+            };
+            match animation.advance(now) {
+                Some(position) => window.position = position,
+                None => {
+                    window.position = animation.target;
+                    window.position_animation = None;
+                }
+            }
         }
     }
 
@@ -404,15 +451,7 @@ impl Animation {
     /// its full duration, at which point the caller should snap to `to`
     /// directly (not keep calling this) and drop the `Animation`.
     pub fn advance(&self, now: Instant) -> Option<Viewport> {
-        let elapsed = now.saturating_duration_since(self.start).as_secs_f64();
-        let t = elapsed / self.duration.as_secs_f64();
-        if t >= 1.0 {
-            return None;
-        }
-        // Ease-out cubic: fast start, gentle settle — a normal choice for
-        // "camera" moves, not something the project has a stronger opinion
-        // on yet (that's a Phase 3 theming/motion concern).
-        let eased = 1.0 - (1.0 - t).powi(3);
+        let eased = eased_progress(self.start, self.duration, now)?;
         Some(Viewport {
             center: (
                 self.from.center.x + (self.to.center.x - self.from.center.x) * eased,
@@ -421,6 +460,45 @@ impl Animation {
                 .into(),
             zoom: self.from.zoom + (self.to.zoom - self.from.zoom) * eased,
         })
+    }
+}
+
+struct PositionAnimation {
+    from: Point<f64, World>,
+    target: Point<f64, World>,
+    start: Instant,
+    duration: Duration,
+}
+
+impl PositionAnimation {
+    fn new(from: Point<f64, World>, target: Point<f64, World>, duration: Duration) -> Self {
+        Self {
+            from,
+            target,
+            start: Instant::now(),
+            duration,
+        }
+    }
+
+    fn advance(&self, now: Instant) -> Option<Point<f64, World>> {
+        let eased = eased_progress(self.start, self.duration, now)?;
+        Some(
+            (
+                self.from.x + (self.target.x - self.from.x) * eased,
+                self.from.y + (self.target.y - self.from.y) * eased,
+            )
+                .into(),
+        )
+    }
+}
+
+fn eased_progress(start: Instant, duration: Duration, now: Instant) -> Option<f64> {
+    let elapsed = now.saturating_duration_since(start).as_secs_f64();
+    let progress = elapsed / duration.as_secs_f64();
+    if progress >= 1.0 {
+        None
+    } else {
+        Some(1.0 - (1.0 - progress).powi(3))
     }
 }
 
@@ -495,6 +573,24 @@ mod tests {
 
     use super::*;
     use crate::widget_host::{PinnedLocal, PinnedRenderData};
+
+    #[test]
+    fn position_animation_eases_and_finishes_at_target() {
+        let start = Instant::now();
+        let animation = PositionAnimation {
+            from: (0.0, 0.0).into(),
+            target: (32.0, -64.0).into(),
+            start,
+            duration: Duration::from_millis(100),
+        };
+
+        assert_eq!(animation.advance(start), Some((0.0, 0.0).into()));
+        let midpoint = animation
+            .advance(start + Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(midpoint, (28.0, -56.0).into());
+        assert_eq!(animation.advance(start + Duration::from_millis(100)), None);
+    }
 
     struct TestNode {
         id: &'static str,

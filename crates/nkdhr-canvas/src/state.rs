@@ -45,8 +45,8 @@ use crate::canvas::marks::CanvasMarks;
 use crate::canvas::output_group::OutputLayout;
 use crate::canvas::world::{Animation, Canvas, Drag, Viewport};
 use crate::cursor::CursorState;
-use crate::keybindings::Keybindings;
 use crate::protocols::ProtocolState;
+use crate::settings::InteractionSettings;
 
 const DEFAULT_GROUP: &str = "default";
 const DEFAULT_CANVAS: &str = "default";
@@ -219,12 +219,19 @@ pub struct App {
     /// The in-progress `super+drag` move/resize interaction, if any —
     /// `input.rs` is the only thing that reads or writes this.
     pub drag: Option<Drag>,
-    /// Hot-reloadable copy of the `canvas` CTRL-5 namespace's keybindings
-    /// (see `crate::keybindings`), shared with the background thread that
-    /// watches `Config1.Changed` for it.
-    pub keybindings: Arc<Mutex<Keybindings>>,
+    /// Whether the current libinput swipe belongs to the compositor's
+    /// exactly-three-finger canvas-pan gesture. Other swipe counts are
+    /// forwarded through the Wayland pointer-gestures protocol.
+    pub canvas_swipe_active: bool,
+    /// Hot-reloadable keybindings and grid policy from CTRL-5's `canvas`
+    /// namespace, shared with the `Config1.Changed` watcher.
+    pub interaction_settings: Arc<Mutex<InteractionSettings>>,
     /// COMP-4 position marks, now namespaced by first-class canvas.
     pub marks: CanvasMarks,
+    /// TTY-only backend control seam. The shared input layer records a
+    /// requested VT, while the backend that owns libseat performs it.
+    vt_switching_enabled: bool,
+    pending_vt_switch: Option<i32>,
 }
 
 impl App {
@@ -274,9 +281,30 @@ impl App {
             visible_canvases: BTreeSet::new(),
             active_group: DEFAULT_GROUP.to_owned(),
             drag: None,
-            keybindings: crate::keybindings::watch(),
+            canvas_swipe_active: false,
+            interaction_settings: crate::settings::watch(),
             marks,
+            vt_switching_enabled: false,
+            pending_vt_switch: None,
         })
+    }
+
+    pub fn enable_vt_switching(&mut self) {
+        self.vt_switching_enabled = true;
+    }
+
+    pub fn vt_switching_enabled(&self) -> bool {
+        self.vt_switching_enabled
+    }
+
+    pub fn request_vt_switch(&mut self, vt: i32) {
+        if self.vt_switching_enabled {
+            self.pending_vt_switch = Some(vt);
+        }
+    }
+
+    pub fn take_vt_switch_request(&mut self) -> Option<i32> {
+        self.pending_vt_switch.take()
     }
 
     /// Reconcile hotplug/config output identities without deleting stale
@@ -518,9 +546,10 @@ impl XdgShellHandler for App {
 
         let group = self.active_group.clone();
         let canvas_name = self.active_view().canvas.clone();
+        let grid = { self.interaction_settings.lock().unwrap().grid };
         let position = self
             .active_canvas_mut()
-            .map(Window::new_wayland_window(surface.clone()));
+            .map(Window::new_wayland_window(surface.clone()), grid);
         println!(
             "nkdhr-canvas: mapped window on canvas {canvas_name:?} via group {group:?} at world {position:?}"
         );

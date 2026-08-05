@@ -2,9 +2,9 @@ mod backends;
 mod canvas;
 mod cursor;
 mod input;
-mod keybindings;
 mod protocols;
 mod render;
+mod settings;
 mod state;
 mod widget_host;
 

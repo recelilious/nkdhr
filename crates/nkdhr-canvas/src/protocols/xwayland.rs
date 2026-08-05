@@ -63,9 +63,10 @@ impl App {
 
         let group = self.active_group.clone();
         let canvas_name = self.active_view().canvas.clone();
+        let grid = { self.interaction_settings.lock().unwrap().grid };
         let position = self
             .active_canvas_mut()
-            .map(Window::new_x11_window(surface.clone()));
+            .map(Window::new_x11_window(surface.clone()), grid);
         println!(
             "nkdhr-canvas: mapped X11 window {} on canvas {canvas_name:?} via group {group:?} at world {position:?}",
             surface.window_id()

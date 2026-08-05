@@ -31,8 +31,8 @@ smithay::backend::renderer::element::render_elements! {
     Decoration=SolidColorRenderElement,
 }
 
-/// Advance every output group's independent viewport animation once before
-/// drawing the next set of frames.
+/// Advance viewport and compositor-owned window-position animations once
+/// before drawing the next set of frames.
 pub fn advance_animations(app: &mut App) {
     app.popup_manager.cleanup();
     let reclaimed = app.cleanup_dead_client_state();
@@ -51,6 +51,9 @@ pub fn advance_animations(app: &mut App) {
                 view.animation = None;
             }
         }
+    }
+    for canvas in app.canvases.values_mut() {
+        canvas.advance_animations(now);
     }
 }
 
