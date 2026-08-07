@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
@@ -56,10 +56,10 @@ use crate::widget_host::PinnedLayer;
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
 const LOCK_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
 const SUPPORTED_FORMATS: &[Fourcc] = &[
-    Fourcc::Abgr2101010,
-    Fourcc::Argb2101010,
     Fourcc::Abgr8888,
     Fourcc::Argb8888,
+    Fourcc::Abgr2101010,
+    Fourcc::Argb2101010,
 ];
 
 type TtyRenderer<'a> = MultiRenderer<
@@ -140,6 +140,7 @@ struct TtyState {
     output_config: OutputConfig,
     output_config_generation: u64,
     output_layout: OutputLayout,
+    drm_paused: bool,
     running: bool,
 }
 
@@ -185,6 +186,7 @@ fn run() -> BackendResult {
         output_config,
         output_config_generation,
         output_layout: OutputLayout::default(),
+        drm_paused: false,
         running: true,
     };
 
@@ -243,9 +245,14 @@ fn run() -> BackendResult {
             ) {
                 input::handle(&mut state.app, &state.output_layout, event);
                 if let Some(vt) = state.app.take_vt_switch_request()
-                    && let Err(error) = state.session.change_vt(vt)
+                    && current_tty_vt() != Some(vt)
                 {
-                    eprintln!("nkdhr-canvas: failed to switch to VT {vt}: {error:?}");
+                    match state.session.change_vt(vt) {
+                        Ok(()) => state.pause_drm_devices(),
+                        Err(error) => {
+                            eprintln!("nkdhr-canvas: failed to switch to VT {vt}: {error:?}");
+                        }
+                    }
                 }
             }
         },
@@ -256,13 +263,7 @@ fn run() -> BackendResult {
         .insert_source(session_notifier, move |event, _, state| match event {
             SessionEvent::PauseSession => {
                 libinput_context.suspend();
-                for device in state.devices.values_mut() {
-                    device.output_manager.pause();
-                    for surface in device.surfaces.values_mut() {
-                        surface.frame_pending = false;
-                        surface.protected_frame_queued = false;
-                    }
-                }
+                state.pause_drm_devices();
                 println!("nkdhr-canvas: TTY session paused");
             }
             SessionEvent::ActivateSession => {
@@ -271,21 +272,13 @@ fn run() -> BackendResult {
                     state.running = false;
                     return;
                 }
-                for device in state.devices.values_mut() {
-                    let activated = match device.output_manager.activate(false) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            eprintln!("nkdhr-canvas: failed to reactivate DRM device: {error}");
-                            false
-                        }
-                    };
-                    for surface in device.surfaces.values_mut() {
-                        surface.frame_pending = false;
-                        surface.protected_frame_queued = false;
-                        if activated {
-                            surface.drm_output.reset_buffers();
-                        }
-                    }
+                if !state.activate_drm_devices() {
+                    state.running = false;
+                    return;
+                }
+                let nodes = state.devices.keys().copied().collect::<Vec<_>>();
+                for node in nodes {
+                    state.device_changed(node);
                 }
                 println!("nkdhr-canvas: TTY session resumed");
             }
@@ -321,6 +314,18 @@ fn run() -> BackendResult {
         state.display_handle.flush_clients()?;
     }
     Ok(())
+}
+
+fn current_tty_vt() -> Option<i32> {
+    tty_vt_from_path(&fs::read_link("/proc/self/fd/0").ok()?)
+}
+
+fn tty_vt_from_path(path: &Path) -> Option<i32> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("tty")?
+        .parse()
+        .ok()
 }
 
 fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::error::Error>> {
@@ -467,6 +472,44 @@ enum DeviceAddError {
 }
 
 impl TtyState {
+    fn pause_drm_devices(&mut self) {
+        if self.drm_paused {
+            return;
+        }
+        self.drm_paused = true;
+        for device in self.devices.values_mut() {
+            if device.output_manager.device().is_active()
+                && let Err(error) = device.output_manager.device_mut().reset_state()
+            {
+                eprintln!("nkdhr-canvas: failed to clear DRM state before VT handoff: {error}");
+            }
+            device.output_manager.pause();
+            for surface in device.surfaces.values_mut() {
+                surface.frame_pending = false;
+                surface.protected_frame_queued = false;
+            }
+        }
+    }
+
+    fn activate_drm_devices(&mut self) -> bool {
+        if !self.drm_paused {
+            return true;
+        }
+        for device in self.devices.values_mut() {
+            if let Err(error) = device.output_manager.activate(true) {
+                eprintln!("nkdhr-canvas: failed to reactivate DRM device: {error}");
+                return false;
+            }
+            for surface in device.surfaces.values_mut() {
+                surface.frame_pending = false;
+                surface.protected_frame_queued = false;
+                surface.drm_output.reset_buffers();
+            }
+        }
+        self.drm_paused = false;
+        true
+    }
+
     fn start_xwayland(&mut self) -> BackendResult {
         let (xwayland, client) = match XWayland::spawn(
             &self.display_handle,
@@ -596,6 +639,9 @@ impl TtyState {
     }
 
     fn device_changed(&mut self, node: DrmNode) {
+        if self.drm_paused {
+            return;
+        }
         let scan = {
             let Some(device) = self.devices.get_mut(&node) else {
                 return;
@@ -704,6 +750,7 @@ impl TtyState {
                 return;
             }
         };
+        let scanout_format = drm_output.format();
         device.surfaces.insert(
             crtc,
             SurfaceData {
@@ -717,17 +764,72 @@ impl TtyState {
                 protected_frame_queued: false,
             },
         );
-        println!("nkdhr-canvas: connected output {output_name} at {mode:?}");
+        println!(
+            "nkdhr-canvas: connected output {output_name} at {mode:?} using {scanout_format:?}"
+        );
     }
 
     fn connector_disconnected(&mut self, node: DrmNode, crtc: crtc::Handle) {
+        let mut removed = false;
         if let Some(device) = self.devices.get_mut(&node)
             && let Some(surface) = device.surfaces.remove(&crtc)
         {
+            if device.output_manager.device().is_active()
+                && let Err(error) = surface
+                    .drm_output
+                    .with_compositor(|compositor| compositor.clear())
+            {
+                eprintln!(
+                    "nkdhr-canvas: failed to clear disconnected output {}: {error}",
+                    surface.output.name()
+                );
+            }
             println!(
                 "nkdhr-canvas: disconnected output {}",
                 surface.output.name()
             );
+            removed = true;
+        }
+        if removed {
+            self.restore_output_modifiers(node);
+        }
+    }
+
+    fn restore_output_modifiers(&mut self, node: DrmNode) {
+        let Some(device) = self.devices.get_mut(&node) else {
+            return;
+        };
+        let Some(format) = device
+            .surfaces
+            .values()
+            .next()
+            .map(|surface| surface.drm_output.format())
+        else {
+            return;
+        };
+        let render_node = device.render_node.unwrap_or(self.primary_gpu);
+        let renderer = if render_node == self.primary_gpu {
+            self.gpus.single_renderer(&render_node)
+        } else {
+            self.gpus.renderer(&self.primary_gpu, &render_node, format)
+        };
+        let Ok(mut renderer) = renderer else {
+            return;
+        };
+        if let Err(error) = device
+            .output_manager
+            .try_to_restore_modifiers::<_, render::CanvasRenderElement<TtyRenderer<'_>>>(
+                &mut renderer,
+                &DrmOutputRenderElements::default(),
+            )
+        {
+            eprintln!("nkdhr-canvas: failed to restore scanout modifiers on {node}: {error}");
+            return;
+        }
+        for surface in device.surfaces.values_mut() {
+            surface.frame_pending = false;
+            surface.protected_frame_queued = false;
+            surface.drm_output.reset_buffers();
         }
     }
 
@@ -793,6 +895,9 @@ impl TtyState {
     }
 
     fn render_all(&mut self) {
+        if self.drm_paused {
+            return;
+        }
         let outputs = self
             .devices
             .iter()
@@ -1170,5 +1275,26 @@ impl XwmHandler for TtyState {
 
     fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
         XwmHandler::cleared_selection(&mut self.app, xwm, selection);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_real_virtual_terminal_paths() {
+        assert_eq!(tty_vt_from_path(Path::new("/dev/tty2")), Some(2));
+        assert_eq!(tty_vt_from_path(Path::new("/dev/tty12")), Some(12));
+        assert_eq!(tty_vt_from_path(Path::new("/dev/pts/2")), None);
+        assert_eq!(tty_vt_from_path(Path::new("/dev/ttyS0")), None);
+    }
+
+    #[test]
+    fn sdr_scanout_formats_precede_ten_bit_fallbacks() {
+        assert_eq!(SUPPORTED_FORMATS[0], Fourcc::Abgr8888);
+        assert_eq!(SUPPORTED_FORMATS[1], Fourcc::Argb8888);
+        assert!(SUPPORTED_FORMATS[2..].contains(&Fourcc::Abgr2101010));
+        assert!(SUPPORTED_FORMATS[2..].contains(&Fourcc::Argb2101010));
     }
 }
