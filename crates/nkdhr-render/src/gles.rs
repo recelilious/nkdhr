@@ -18,7 +18,8 @@ use smithay::{
 
 use crate::{
     AlphaMode, CornerRadii, DisplayList, Point, Primitive, Rect, Sampling, ShapePrimitive,
-    ShapeStyle, TextureAsset, TextureError, TextureId, TexturePrimitive, TextureStore,
+    ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId, TexturePrimitive,
+    TextureStore,
 };
 
 const SHAPE_VERTEX_SHADER: &str = include_str!("shaders/shape.vert");
@@ -160,6 +161,7 @@ struct ShapeVertex {
 struct TextureVertex {
     position: [f32; 2],
     uv: [f32; 2],
+    tint: [f32; 4],
     opacity: f32,
 }
 
@@ -175,6 +177,7 @@ enum Batch {
         texture: TextureId,
         sampling: Sampling,
         alpha_mode: AlphaMode,
+        format: TextureFormat,
         buffer_offset: usize,
         vertices: Vec<TextureVertex>,
     },
@@ -225,8 +228,10 @@ struct TextureProgram {
     projection: i32,
     sampler: i32,
     alpha_mode: i32,
+    format: i32,
     position: u32,
     uv: u32,
+    tint: u32,
     opacity: u32,
 }
 
@@ -430,12 +435,14 @@ fn compile_batches(
                         texture: batch_texture,
                         sampling: batch_sampling,
                         alpha_mode: batch_alpha,
+                        format: batch_format,
                         buffer_offset: _,
                         vertices: batch_vertices,
                     }) if *batch_clip == clip
                         && *batch_texture == texture.texture
                         && *batch_sampling == texture.sampling
-                        && *batch_alpha == asset.alpha_mode() =>
+                        && *batch_alpha == asset.alpha_mode()
+                        && *batch_format == asset.format() =>
                     {
                         batch_vertices.extend(vertices);
                     }
@@ -444,6 +451,7 @@ fn compile_batches(
                         texture: texture.texture,
                         sampling: texture.sampling,
                         alpha_mode: asset.alpha_mode(),
+                        format: asset.format(),
                         buffer_offset: 0,
                         vertices: vertices.to_vec(),
                     }),
@@ -590,11 +598,13 @@ fn texture_vertices(
     let u1 = source.right() / asset.width() as f32;
     let v1 = source.bottom() / asset.height() as f32;
     let uv = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
+    let tint = primitive.tint.components();
     std::array::from_fn(|index| {
         let target = primitive.transform.map_point(points[index]);
         TextureVertex {
             position: [target.x * scale, target.y * scale],
             uv: uv[index],
+            tint,
             opacity: primitive.opacity,
         }
     })
@@ -666,8 +676,10 @@ fn create_resources(
             projection: uniform(gl, texture_id, "u_projection")?,
             sampler: uniform(gl, texture_id, "u_texture")?,
             alpha_mode: uniform(gl, texture_id, "u_alpha_mode")?,
+            format: uniform(gl, texture_id, "u_texture_format")?,
             position: attribute(gl, texture_id, "a_position")?,
             uv: attribute(gl, texture_id, "a_uv")?,
+            tint: attribute(gl, texture_id, "a_tint")?,
             opacity: attribute(gl, texture_id, "a_opacity")?,
         };
         let mut buffers = [0; 2];
@@ -731,14 +743,18 @@ fn upload_texture(
             ffi::TEXTURE_WRAP_T,
             ffi::CLAMP_TO_EDGE as i32,
         );
+        let format = match asset.format() {
+            TextureFormat::Rgba8 => ffi::RGBA,
+            TextureFormat::Alpha8 => ffi::ALPHA,
+        };
         gl.TexImage2D(
             ffi::TEXTURE_2D,
             0,
-            ffi::RGBA as i32,
+            format as i32,
             width,
             height,
             0,
-            ffi::RGBA,
+            format,
             ffi::UNSIGNED_BYTE,
             asset.pixels().as_ptr().cast(),
         );
@@ -876,6 +892,7 @@ fn draw_batches(
                     texture,
                     sampling,
                     alpha_mode,
+                    format,
                     buffer_offset,
                     vertices,
                     ..
@@ -889,6 +906,7 @@ fn draw_batches(
                         texture.id,
                         *sampling,
                         *alpha_mode,
+                        *format,
                         *buffer_offset,
                         vertices.len(),
                         projection,
@@ -987,6 +1005,7 @@ fn draw_texture_batch(
     texture: u32,
     sampling: Sampling,
     alpha_mode: AlphaMode,
+    format: TextureFormat,
     buffer_offset: usize,
     vertex_count: usize,
     projection: &[f32; 9],
@@ -1001,11 +1020,16 @@ fn draw_texture_batch(
         AlphaMode::Premultiplied => 1.0,
         AlphaMode::Opaque => 2.0,
     };
+    let format = match format {
+        TextureFormat::Rgba8 => 0.0,
+        TextureFormat::Alpha8 => 1.0,
+    };
     unsafe {
         gl.UseProgram(program.id);
         gl.UniformMatrix3fv(program.projection, 1, ffi::FALSE, projection.as_ptr());
         gl.Uniform1i(program.sampler, 0);
         gl.Uniform1f(program.alpha_mode, alpha_mode);
+        gl.Uniform1f(program.format, format);
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, texture);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, filter as i32);
@@ -1027,6 +1051,13 @@ fn draw_texture_batch(
         enable_attribute::<TextureVertex>(
             gl,
             resources.reset_attribute_divisors,
+            program.tint,
+            4,
+            buffer_offset + offset_of!(TextureVertex, tint),
+        );
+        enable_attribute::<TextureVertex>(
+            gl,
+            resources.reset_attribute_divisors,
             program.opacity,
             1,
             buffer_offset + offset_of!(TextureVertex, opacity),
@@ -1037,7 +1068,7 @@ fn draw_texture_batch(
             ffi::UNSIGNED_SHORT,
             std::ptr::null(),
         );
-        for attribute in [program.position, program.uv, program.opacity] {
+        for attribute in [program.position, program.uv, program.tint, program.opacity] {
             gl.DisableVertexAttribArray(attribute);
         }
     }

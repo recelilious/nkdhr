@@ -7,7 +7,8 @@ use std::fmt;
 
 use crate::{
     AlphaMode, Color, CornerRadii, DisplayList, Point, Primitive, Rect, Sampling, ShapePrimitive,
-    ShapeStyle, TextureAsset, TextureError, TextureId, TexturePrimitive, TextureStore,
+    ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId, TexturePrimitive,
+    TextureStore,
 };
 
 #[derive(Debug)]
@@ -199,6 +200,9 @@ impl SoftwareRenderer {
             let u = (local.x - primitive.rect.x) / primitive.rect.width;
             let v = (local.y - primitive.rect.y) / primitive.rect.height;
             let sample = sample_texture(asset, source, u, v, primitive.sampling);
+            if asset.format() == TextureFormat::Alpha8 {
+                return (primitive.tint, sample[3] * primitive.opacity);
+            }
             let alpha = match asset.alpha_mode() {
                 AlphaMode::Opaque => 1.0,
                 AlphaMode::Straight | AlphaMode::Premultiplied => sample[3],
@@ -213,8 +217,14 @@ impl SoftwareRenderer {
                 AlphaMode::Premultiplied => [0.0; 4],
                 AlphaMode::Straight | AlphaMode::Opaque => [sample[0], sample[1], sample[2], alpha],
             };
-            let color = Color::new(straight[0], straight[1], straight[2], straight[3])
-                .unwrap_or(Color::TRANSPARENT);
+            let tint = primitive.tint.components();
+            let color = Color::new(
+                straight[0] * tint[0],
+                straight[1] * tint[1],
+                straight[2] * tint[2],
+                straight[3] * tint[3],
+            )
+            .unwrap_or(Color::TRANSPARENT);
             (color, primitive.opacity)
         });
         Ok(())
@@ -347,14 +357,18 @@ fn sample_texture(
 }
 
 fn texel(asset: &TextureAsset, x: u32, y: u32) -> [f32; 4] {
-    let offset = (y as usize * asset.width() as usize + x as usize) * 4;
+    let offset =
+        (y as usize * asset.width() as usize + x as usize) * asset.format().bytes_per_pixel();
     let pixels = asset.pixels();
-    [
-        pixels[offset] as f32 / 255.0,
-        pixels[offset + 1] as f32 / 255.0,
-        pixels[offset + 2] as f32 / 255.0,
-        pixels[offset + 3] as f32 / 255.0,
-    ]
+    match asset.format() {
+        TextureFormat::Rgba8 => [
+            pixels[offset] as f32 / 255.0,
+            pixels[offset + 1] as f32 / 255.0,
+            pixels[offset + 2] as f32 / 255.0,
+            pixels[offset + 3] as f32 / 255.0,
+        ],
+        TextureFormat::Alpha8 => [1.0, 1.0, 1.0, pixels[offset] as f32 / 255.0],
+    }
 }
 
 fn mix(left: [f32; 4], right: [f32; 4], amount: f32) -> [f32; 4] {
@@ -458,5 +472,35 @@ mod tests {
         let mut renderer = SoftwareRenderer::new(4, 1).unwrap();
         renderer.render(&builder.finish(), &textures, 1.0).unwrap();
         assert_eq!(renderer.rgba8()[8..16], [255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn one_mask_texture_can_be_drawn_with_different_tints() {
+        let mut textures = TextureStore::new();
+        let mask = textures.insert_mask(1, 1, vec![128]).unwrap();
+        let mut builder = DisplayListBuilder::new();
+        builder
+            .tinted_texture(
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                mask,
+                None,
+                Color::from_srgba8(255, 0, 0, 255),
+                1.0,
+                Sampling::Nearest,
+            )
+            .unwrap();
+        builder
+            .tinted_texture(
+                Rect::new(1.0, 0.0, 1.0, 1.0),
+                mask,
+                None,
+                Color::from_srgba8(0, 255, 0, 255),
+                1.0,
+                Sampling::Nearest,
+            )
+            .unwrap();
+        let mut renderer = SoftwareRenderer::new(2, 1).unwrap();
+        renderer.render(&builder.finish(), &textures, 1.0).unwrap();
+        assert_eq!(renderer.rgba8(), [255, 0, 0, 128, 0, 255, 0, 128]);
     }
 }

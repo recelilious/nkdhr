@@ -16,4 +16,6 @@ pub use display_list::{
     TexturePrimitive,
 };
 pub use geometry::{Color, CornerRadii, Point, Rect, Transform};
-pub use texture::{AlphaMode, Sampling, TextureAsset, TextureError, TextureId, TextureStore};
+pub use texture::{
+    AlphaMode, Sampling, TextureAsset, TextureError, TextureFormat, TextureId, TextureStore,
+};

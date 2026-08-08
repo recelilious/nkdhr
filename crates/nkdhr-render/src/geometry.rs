@@ -327,6 +327,7 @@ impl fmt::Debug for Color {
 
 impl Color {
     pub const TRANSPARENT: Self = Self([0.0; 4]);
+    pub const WHITE: Self = Self([1.0; 4]);
 
     pub fn new(red: f32, green: f32, blue: f32, alpha: f32) -> Option<Self> {
         let components = [red, green, blue, alpha];

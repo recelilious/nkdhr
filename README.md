@@ -25,8 +25,11 @@ Phase 2 was accepted on 2026-08-08. Phase 3 — the shared rendering and UI
 toolkit — is now underway: UI-1 provides the renderer-independent primitive
 display list, batched Smithay GLES backend, deterministic golden-image oracle
 and live offscreen cross-check. Its 1,000-primitive native 2560×1600 benchmark
-reaches a 1.228 ms p95 GPU duration on the reference Iris Xe. UI-2 text shaping
-and glyph atlases are next.
+reaches a 1.228 ms p95 GPU duration on the reference Iris Xe. UI-2 adds
+advanced Unicode shaping, CJK/emoji font fallback, color emoji, cached
+paragraph layout and bounded mask/color glyph atlases. Its 5,000-line,
+265,000-glyph scrolling benchmark records clipped text at 0.262 ms CPU p95.
+UI-3 retained widgets and layout are next.
 
 ## Documentation
 

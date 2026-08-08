@@ -19,12 +19,31 @@ pub enum Sampling {
     Linear,
 }
 
+/// Pixel storage used by a texture asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureFormat {
+    /// Four bytes per pixel in red, green, blue and alpha order.
+    Rgba8,
+    /// One byte per pixel containing coverage. The draw tint supplies color.
+    Alpha8,
+}
+
+impl TextureFormat {
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Rgba8 => 4,
+            Self::Alpha8 => 1,
+        }
+    }
+}
+
 /// One CPU-side RGBA8 texture revision.
 #[derive(Debug, Clone)]
 pub struct TextureAsset {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+    format: TextureFormat,
     alpha_mode: AlphaMode,
     revision: u64,
 }
@@ -40,6 +59,10 @@ impl TextureAsset {
 
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    pub fn format(&self) -> TextureFormat {
+        self.format
     }
 
     pub fn alpha_mode(&self) -> AlphaMode {
@@ -99,8 +122,36 @@ impl TextureStore {
         pixels: impl Into<Arc<[u8]>>,
         alpha_mode: AlphaMode,
     ) -> Result<TextureId, TextureError> {
+        self.insert_with_format(width, height, pixels, TextureFormat::Rgba8, alpha_mode)
+    }
+
+    /// Insert a single-channel coverage mask. Masks are tinted when recorded
+    /// into a display list and do not need one texture revision per color.
+    pub fn insert_mask(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> Result<TextureId, TextureError> {
+        self.insert_with_format(
+            width,
+            height,
+            pixels,
+            TextureFormat::Alpha8,
+            AlphaMode::Straight,
+        )
+    }
+
+    fn insert_with_format(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+        format: TextureFormat,
+        alpha_mode: AlphaMode,
+    ) -> Result<TextureId, TextureError> {
         let pixels = pixels.into();
-        validate_data(width, height, pixels.len())?;
+        validate_data(width, height, pixels.len(), format)?;
         let id = TextureId(self.next_id);
         self.next_id = self
             .next_id
@@ -113,6 +164,7 @@ impl TextureStore {
                 width,
                 height,
                 pixels,
+                format,
                 alpha_mode,
                 revision,
             },
@@ -128,11 +180,40 @@ impl TextureStore {
         pixels: impl Into<Arc<[u8]>>,
         alpha_mode: AlphaMode,
     ) -> Result<(), TextureError> {
+        self.update_with_format(id, width, height, pixels, TextureFormat::Rgba8, alpha_mode)
+    }
+
+    pub fn update_mask(
+        &mut self,
+        id: TextureId,
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+    ) -> Result<(), TextureError> {
+        self.update_with_format(
+            id,
+            width,
+            height,
+            pixels,
+            TextureFormat::Alpha8,
+            AlphaMode::Straight,
+        )
+    }
+
+    fn update_with_format(
+        &mut self,
+        id: TextureId,
+        width: u32,
+        height: u32,
+        pixels: impl Into<Arc<[u8]>>,
+        format: TextureFormat,
+        alpha_mode: AlphaMode,
+    ) -> Result<(), TextureError> {
         if !self.assets.contains_key(&id) {
             return Err(TextureError::UnknownTexture(id));
         }
         let pixels = pixels.into();
-        validate_data(width, height, pixels.len())?;
+        validate_data(width, height, pixels.len(), format)?;
         let revision = self.take_revision()?;
         self.assets.insert(
             id,
@@ -140,6 +221,7 @@ impl TextureStore {
                 width,
                 height,
                 pixels,
+                format,
                 alpha_mode,
                 revision,
             },
@@ -173,7 +255,12 @@ impl TextureStore {
     }
 }
 
-fn validate_data(width: u32, height: u32, actual: usize) -> Result<(), TextureError> {
+fn validate_data(
+    width: u32,
+    height: u32,
+    actual: usize,
+    format: TextureFormat,
+) -> Result<(), TextureError> {
     if width == 0 || height == 0 {
         return Err(TextureError::EmptySize);
     }
@@ -184,7 +271,7 @@ fn validate_data(width: u32, height: u32, actual: usize) -> Result<(), TextureEr
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         })
-        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|pixels| pixels.checked_mul(format.bytes_per_pixel()))
         .ok_or(TextureError::SizeOverflow)?;
     if expected != actual {
         return Err(TextureError::UnexpectedDataLength { expected, actual });
@@ -208,5 +295,19 @@ mod tests {
             .unwrap();
         assert!(store.get(id).unwrap().revision() > first);
         assert_eq!(store.get(id).unwrap().pixels(), &[5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn masks_use_one_byte_per_pixel() {
+        let mut store = TextureStore::new();
+        let id = store.insert_mask(2, 2, vec![0, 64, 128, 255]).unwrap();
+        assert_eq!(store.get(id).unwrap().format(), TextureFormat::Alpha8);
+        assert_eq!(
+            store.insert_mask(2, 2, vec![0; 16]),
+            Err(TextureError::UnexpectedDataLength {
+                expected: 4,
+                actual: 16,
+            })
+        );
     }
 }

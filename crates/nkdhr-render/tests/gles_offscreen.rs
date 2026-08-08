@@ -165,6 +165,15 @@ fn scene() -> (DisplayList, TextureStore) {
     }
     let mut textures = TextureStore::new();
     let texture = textures.insert(4, 4, pixels, AlphaMode::Straight).unwrap();
+    let mask = textures
+        .insert_mask(
+            4,
+            4,
+            vec![
+                0, 64, 128, 255, 64, 128, 255, 128, 128, 255, 128, 64, 255, 128, 64, 0,
+            ],
+        )
+        .unwrap();
 
     let mut builder = DisplayListBuilder::new();
     builder
@@ -187,6 +196,16 @@ fn scene() -> (DisplayList, TextureStore) {
             CornerRadii::new(11.0, 4.0, 16.0, 1.0),
             2.0,
             Color::from_srgba8(130, 204, 255, 220),
+        )
+        .unwrap();
+    builder
+        .tinted_texture(
+            Rect::new(91.0, 12.0, 24.0, 24.0),
+            mask,
+            None,
+            Color::from_srgba8(245, 211, 105, 230),
+            0.9,
+            Sampling::Nearest,
         )
         .unwrap();
     builder

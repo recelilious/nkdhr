@@ -51,6 +51,9 @@ pub struct TexturePrimitive {
     pub texture: TextureId,
     pub source: Option<Rect>,
     pub opacity: f32,
+    /// Straight-alpha color multiplier. Alpha-mask textures take their RGB
+    /// color entirely from this value.
+    pub tint: Color,
     pub sampling: Sampling,
     pub transform: Transform,
     pub clip: Option<Rect>,
@@ -202,6 +205,19 @@ impl DisplayListBuilder {
         opacity: f32,
         sampling: Sampling,
     ) -> Result<(), BuildError> {
+        self.tinted_texture(rect, texture, source, Color::WHITE, opacity, sampling)
+    }
+
+    /// Record a texture with a straight-alpha color multiplier.
+    pub fn tinted_texture(
+        &mut self,
+        rect: Rect,
+        texture: TextureId,
+        source: Option<Rect>,
+        tint: Color,
+        opacity: f32,
+        sampling: Sampling,
+    ) -> Result<(), BuildError> {
         validate_rect(rect)?;
         if let Some(source) = source {
             validate_rect(source)?;
@@ -217,6 +233,7 @@ impl DisplayListBuilder {
             texture,
             source,
             opacity,
+            tint,
             sampling,
             transform: self.current_transform(),
             clip: self.current_clip(),
