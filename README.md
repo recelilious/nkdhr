@@ -16,12 +16,30 @@ file manager, task manager, lock screen — is developed in this project on a
 single custom OpenGL ES UI stack, targeting a stock minimal Fedora Linux
 base.
 
-The project is in early development. Documentation will land in `docs/` as
-components are completed.
+The project is in early development. Accepted component documentation lives
+in `docs/` in English and Simplified Chinese.
 
 ## Status
 
-Pre-implementation: planning and repository bootstrap.
+Phase 2 accepted (2026-08-08): the Phase 1 control plane and Phase 2 canvas
+compositor are implemented, including real-TTY operation, multi-monitor
+output groups,
+physical hotplug, canvas navigation, protocol compatibility and the final
+eight-hour stability run. Phase 3 — the shared rendering and UI toolkit — is
+next and has not started.
+
+## Documentation
+
+- [Control plane user guide](docs/control-plane/USAGE.md) ·
+  [中文](docs/control-plane/USAGE_zh_CN.md)
+- [Control plane internals](docs/control-plane/INTERNALS.md) ·
+  [中文](docs/control-plane/INTERNALS_zh_CN.md)
+- [Canvas user guide](docs/canvas/USAGE.md) ·
+  [中文](docs/canvas/USAGE_zh_CN.md)
+- [Canvas internals](docs/canvas/INTERNALS.md) ·
+  [中文](docs/canvas/INTERNALS_zh_CN.md)
+- [Pinned-widget extension seam](docs/canvas/EXTENDING.md) ·
+  [中文](docs/canvas/EXTENDING_zh_CN.md)
 
 ## License
 
