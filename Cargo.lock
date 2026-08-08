@@ -1338,6 +1338,9 @@ dependencies = [
 [[package]]
 name = "nkdhr-render"
 version = "0.1.0"
+dependencies = [
+ "smithay",
+]
 
 [[package]]
 name = "nkdhr-sessiond"

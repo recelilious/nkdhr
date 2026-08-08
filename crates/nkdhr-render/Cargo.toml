@@ -11,3 +11,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+smithay = { version = "0.7.0", default-features = false, features = ["renderer_gl"] }
