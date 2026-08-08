@@ -247,10 +247,22 @@ fn run() -> BackendResult {
                 if let Some(vt) = state.app.take_vt_switch_request()
                     && current_tty_vt() != Some(vt)
                 {
+                    if !state.pause_drm_devices() {
+                        eprintln!(
+                            "nkdhr-canvas: refusing VT {vt} switch because DRM state could not be cleared"
+                        );
+                        if !state.reactivate_and_rescan_drm_devices() {
+                            state.running = false;
+                        }
+                        return;
+                    }
                     match state.session.change_vt(vt) {
-                        Ok(()) => state.pause_drm_devices(),
+                        Ok(()) => {}
                         Err(error) => {
                             eprintln!("nkdhr-canvas: failed to switch to VT {vt}: {error:?}");
+                            if !state.reactivate_and_rescan_drm_devices() {
+                                state.running = false;
+                            }
                         }
                     }
                 }
@@ -272,13 +284,9 @@ fn run() -> BackendResult {
                     state.running = false;
                     return;
                 }
-                if !state.activate_drm_devices() {
+                if !state.reactivate_and_rescan_drm_devices() {
                     state.running = false;
                     return;
-                }
-                let nodes = state.devices.keys().copied().collect::<Vec<_>>();
-                for node in nodes {
-                    state.device_changed(node);
                 }
                 println!("nkdhr-canvas: TTY session resumed");
             }
@@ -472,16 +480,18 @@ enum DeviceAddError {
 }
 
 impl TtyState {
-    fn pause_drm_devices(&mut self) {
+    fn pause_drm_devices(&mut self) -> bool {
         if self.drm_paused {
-            return;
+            return true;
         }
         self.drm_paused = true;
+        let mut cleared = true;
         for device in self.devices.values_mut() {
             if device.output_manager.device().is_active()
                 && let Err(error) = device.output_manager.device_mut().reset_state()
             {
                 eprintln!("nkdhr-canvas: failed to clear DRM state before VT handoff: {error}");
+                cleared = false;
             }
             device.output_manager.pause();
             for surface in device.surfaces.values_mut() {
@@ -489,6 +499,7 @@ impl TtyState {
                 surface.protected_frame_queued = false;
             }
         }
+        cleared
     }
 
     fn activate_drm_devices(&mut self) -> bool {
@@ -507,6 +518,17 @@ impl TtyState {
             }
         }
         self.drm_paused = false;
+        true
+    }
+
+    fn reactivate_and_rescan_drm_devices(&mut self) -> bool {
+        if !self.activate_drm_devices() {
+            return false;
+        }
+        let nodes = self.devices.keys().copied().collect::<Vec<_>>();
+        for node in nodes {
+            self.device_changed(node);
+        }
         true
     }
 

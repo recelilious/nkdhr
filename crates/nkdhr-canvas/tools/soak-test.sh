@@ -311,6 +311,17 @@ capture_kernel_drm_log() {
     fi
 }
 
+capture_compositor_error_log() {
+    local run_dir=$1
+    local target="${run_dir}/compositor-errors.log"
+
+    if ! grep -Eai \
+        '(^nkdhr-canvas: (failed|fatal))|(panicked at)|(fatal runtime error)' \
+        "${run_dir}/compositor.log" >"${target}"; then
+        : >"${target}"
+    fi
+}
+
 write_report() {
     local run_dir=$1
     local state
@@ -320,7 +331,7 @@ write_report() {
     local stats
     local samples live_samples first_rss last_rss peak_hwm first_fd last_fd peak_fd
     local first_cpu last_cpu first_render last_render idle_intervals
-    local rss_growth fd_growth kernel_errors warnings=0
+    local rss_growth fd_growth kernel_errors compositor_errors warnings=0
     local automatic_verdict
     local report="${run_dir}/report.md"
 
@@ -329,6 +340,7 @@ write_report() {
     start_epoch=$(metadata_value "${run_dir}" start_epoch)
     active_seconds=$(<"${run_dir}/active_seconds")
     capture_kernel_drm_log "${run_dir}" "${start_epoch}"
+    capture_compositor_error_log "${run_dir}"
 
     stats=$(awk -F, '
         NR > 1 {
@@ -357,6 +369,7 @@ write_report() {
     rss_growth=$((last_rss - first_rss))
     fd_growth=$((last_fd - first_fd))
     kernel_errors=$(wc -l <"${run_dir}/kernel-drm.log")
+    compositor_errors=$(wc -l <"${run_dir}/compositor-errors.log")
 
     case ${state} in
         completed) automatic_verdict=PASS ;;
@@ -372,6 +385,9 @@ write_report() {
         warnings=$((warnings + 1))
     fi
     if ((kernel_errors > 0)); then
+        warnings=$((warnings + 1))
+    fi
+    if ((compositor_errors > 0)); then
         warnings=$((warnings + 1))
     fi
     if ((samples > 1 && idle_intervals == 0)); then
@@ -402,6 +418,7 @@ write_report() {
         echo "- DRM render-engine time: ${first_render} ns -> ${last_render} ns"
         echo "- Intervals with no DRM render-engine increase: ${idle_intervals}"
         echo "- Filtered kernel DRM failure lines: ${kernel_errors}"
+        echo "- Compositor failure/panic lines: ${compositor_errors}"
         echo
         echo "## Automatic review"
         echo
@@ -424,6 +441,11 @@ write_report() {
             echo "- [!] Kernel DRM/GPU failure lines were captured in \`kernel-drm.log\`."
         else
             echo "- [x] No matching kernel DRM/GPU failure line was captured."
+        fi
+        if ((compositor_errors > 0)); then
+            echo "- [!] Compositor failures were captured in \`compositor-errors.log\`."
+        else
+            echo "- [x] No compositor failure or panic line was captured."
         fi
         if ((samples > 1 && idle_intervals == 0)); then
             echo "- [!] No sampled interval showed a flat DRM render counter; confirm an idle period manually."
@@ -638,6 +660,7 @@ start_monitor() {
     printf '0\n' >"${run_dir}/active_seconds"
     : >"${run_dir}/events.log"
     : >"${run_dir}/compositor.log"
+    : >"${run_dir}/compositor-errors.log"
     : >"${run_dir}/kernel-drm.log"
     printf '%s\n' \
         'timestamp,wall_seconds,active_seconds,session_active,pid_alive,pid_identity,rss_kib,vmhwm_kib,threads,fd_count,cpu_ticks,drm_clients,drm_render_ns,drm_copy_ns,drm_video_ns,drm_video_enhance_ns,drm_total_kib,drm_resident_kib,drm_available,outputs' \
@@ -647,6 +670,7 @@ start_monitor() {
 
     if ! systemd-run --user --quiet --collect --unit="${unit}" \
         --description="nkdhr COMP-8 soak ${run_id}" --property=Type=exec \
+        --setenv="NKDHR_SOAK_STATE_ROOT=${STATE_ROOT}" \
         systemd-inhibit --what=sleep --who=nkdhr-soak \
         --why="nkdhr COMP-8 stability measurement" --mode=block \
         "${SCRIPT_PATH}" _collect "${run_dir}"; then
@@ -828,7 +852,10 @@ case ${1:-} in
     report)
         (($# <= 2)) || die "report accepts at most one run id"
         run_dir=$(resolve_run_dir "${2:-}")
-        write_report "${run_dir}"
+        report_state=$(<"${run_dir}/state")
+        if [[ ${report_state} == running || ${report_state} == starting || ! -f ${run_dir}/report.md ]]; then
+            write_report "${run_dir}"
+        fi
         cat "${run_dir}/report.md"
         ;;
     self-test)
