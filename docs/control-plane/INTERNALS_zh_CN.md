@@ -192,18 +192,19 @@ Power、Network、Session 的监听器已确认能无错误地完成订阅,并�
 
 ## 配置存储(CTRL-5)
 
-**目前注册的 namespace 数量为零。** CTRL-1 … CTRL-4 内置的模块最终都没有
-真正需要持久化的设置项,而 USAGE.md 中提到的 namespace(`theme`、`canvas`)
-属于还没设计出真实 schema 的阶段(UI-4、COMP-3)——现在就把它们定下来,会是
-一种典型的、超前于实际需求的臆测式设计。CTRL-5 真正交付的是这套通用引擎,
-其正确性由 `nkdhrd/src/backends/config_store.rs` 自带单元测试中的一个仅供
-测试使用的 namespace 证明(不会随产品发布),开发过程中还额外用一个临时的
-scratch namespace 针对真实运行中的守护进程做过完整验证,验证完成后已从提交
-中移除。后续阶段要注册自己的 namespace,做法是在一个 `serde` 派生的结构体
+CTRL-5 最初没有注册 namespace,因为 CTRL-1 … CTRL-4 没有真正需要持久化的
+设置,提前定义后续 schema 只会变成臆测。COMP-3 随后注册了 `canvas`,UI-4
+现在注册了 `theme`。后者只有一个标量 `profile` 叶子;其中的 JSON payload
+必须先由共享的纯数据 crate `nkdhr-theme` 完成继承解析和完整校验,namespace
+才能提交。使用单叶子是有意为之:稀疏覆盖包含数组和嵌套结构,而活动主题必须作为
+一个原子整体切换。原本的通用引擎仍由
+`nkdhrd/src/backends/config_store.rs` 中仅供测试的 namespace 覆盖,每个真实
+namespace 还会补充自己的校验和 last-known-good 测试。后续阶段要注册新的
+namespace,做法是在一个 `serde` 派生的结构体
 上实现 `Namespace` trait(`backends::config_store::Namespace`——**位于
-`nkdhrd`,而非 `nkdhr-ipc`**:从未有任何客户端需要以类型化 Rust 方式访问某个
-namespace 的具体形状,只需要下面这套通用的点分 key `Config1` IPC,因此这个
-校验 schema 的 trait 就放在实现它的引擎旁边),然后在 `nkdhrd/src/main.rs`
+`nkdhrd`,而非 `nkdhr-ipc`**:客户端仍使用下面这套通用的点分 key `Config1`
+IPC;UI-4 可移植 profile 的类型则放在守护进程校验和 UI 解析共同使用、与后端
+无关的 `nkdhr-theme` crate 中),然后在 `nkdhrd/src/main.rs`
 的 `static NAMESPACES: &[NamespaceSchema]` 列表里加一条
 `NamespaceSchema::of::<T>()`。
 

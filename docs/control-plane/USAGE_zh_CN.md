@@ -87,16 +87,19 @@ nkdhrctl config set <key> <value>
 nkdhrctl config watch <prefix>
 ```
 
-key 是以点分隔的路径(例如 `theme.accent-color`、`canvas.pan-speed`——一旦对应
-组件注册了自己的设置,见下方提示)。底层文件是 `~/.config/nkdhr/` 下的纯 TOML
+key 是以点分隔的路径(例如 `theme.profile`、`canvas.grid_size` 和
+`canvas.outputs.<group>...`)。底层文件是 `~/.config/nkdhr/` 下的纯 TOML
 文件,可以直接用文本编辑器修改——`nkdhrd` 会检测到变化并重新校验,校验通过则
 生效,不通过则拒绝(保留上一个有效值)并在 journal 中记录诊断信息。
 
-> 截至 CTRL-5,该存储尚未注册任何设置:目前没有其他组件真正需要持久化的配置
-> 项。此时对任意 key 执行 `nkdhrctl config get/set` 都会返回 "unknown config
-> namespace" 错误,直到后续某个里程碑(主题、画布按键绑定等)注册自己的
-> namespace 为止。机制本身——校验、拒绝、热重载——已经完整可用;可以用
-> `nkdhrctl status` 验证,其中会列出已加载的 `Config` 模块。
+目前已注册的 namespace 是 `canvas` 和 `theme`。UI-4 把完整可移植主题保存为
+单个标量叶子 `theme.profile`:其中是一份带版本的 JSON 文档,由不可变内置/壁纸
+基础和稀疏显式覆盖组成。使用单叶子能让导入、校验、发布和 `Changed` 通知成为
+同一个原子事务。壁纸主题始终携带冻结后的完整调色板,所以导出后即使没有原壁纸
+仍可使用;实时重新生成只替换基础,不会改写显式覆盖对象。可用
+`nkdhrctl config get theme.profile` 查看,或用 `nkdhrctl config watch theme`
+监听。通常应通过设置应用编辑;直接 `config set` 主要用于导入一份已经准备好的
+JSON 文档。
 
 ## 故障排查
 

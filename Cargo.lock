@@ -1528,13 +1528,25 @@ name = "nkdhr-tasks"
 version = "0.1.0"
 
 [[package]]
+name = "nkdhr-theme"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nkdhr-ui"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "nkdhr-ipc",
  "nkdhr-render",
+ "nkdhr-theme",
  "oxitext-raster",
+ "serde_json",
  "unicode-segmentation",
+ "zbus",
 ]
 
 [[package]]
@@ -1554,6 +1566,7 @@ version = "0.1.0"
 dependencies = [
  "inotify",
  "nkdhr-ipc",
+ "nkdhr-theme",
  "pipewire",
  "serde",
  "serde_json",

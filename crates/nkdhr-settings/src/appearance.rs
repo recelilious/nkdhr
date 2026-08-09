@@ -20,8 +20,8 @@ use nkdhr_ui::{
     CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
     ListItem, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, MotionFamily,
     Padding, PaintCtx, Reactive, ScalarMotion, Scroll, ScrollOffset, SemanticRole, Semantics,
-    SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme, Toggle, UiError,
-    UpdateCtx, Widget,
+    SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme, ThemeReadSet,
+    Toggle, UiError, UpdateCtx, Widget,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -2073,6 +2073,23 @@ struct SettingsBodyLayoutState {
 }
 
 impl Widget for SettingsBodyLayout {
+    fn theme_reads(&self) -> ThemeReadSet {
+        ThemeReadSet::from_paths([
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.settle",
+            "motion.exit",
+            "motion.durations.panel_enter",
+            "motion.durations.panel_exit",
+            "motion.durations.drawer_enter",
+            "motion.durations.drawer_exit",
+        ])
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::new(SettingsBodyLayoutState {
             inspector_openness: ScalarMotion::settled(self.target_openness()),

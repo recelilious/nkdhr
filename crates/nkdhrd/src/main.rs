@@ -27,8 +27,10 @@ use zbus::fdo::RequestNameFlags;
 /// CTRL-5's namespace registry. `canvas` (COMP-3) is the first real
 /// entry — see `backends::config_store`'s module doc for why it started
 /// empty — grown by later phases (UI-4's `theme`, ...) adding their own.
-static NAMESPACES: &[NamespaceSchema] =
-    &[NamespaceSchema::of::<namespaces::canvas::CanvasSettings>()];
+static NAMESPACES: &[NamespaceSchema] = &[
+    NamespaceSchema::of::<namespaces::canvas::CanvasSettings>(),
+    NamespaceSchema::of::<namespaces::theme::ThemeSettings>(),
+];
 
 /// `$XDG_CONFIG_HOME/nkdhr`, falling back to `$HOME/.config/nkdhr` per the
 /// XDG base directory spec.

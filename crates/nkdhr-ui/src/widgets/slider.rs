@@ -6,10 +6,10 @@ use crate::theme::with_alpha;
 use crate::{
     Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier, MeasureCtx,
     Modifiers, MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion, SemanticRole,
-    Semantics, SemanticsCtx, Size, Theme, UiError, UiEvent, Widget,
+    Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface};
+use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
 
 pub struct Slider {
     label: String,
@@ -171,6 +171,28 @@ impl Default for SliderState {
 }
 
 impl Widget for Slider {
+    fn theme_reads(&self) -> ThemeReadSet {
+        let mut reads = surface_theme_reads(MaterialTier::CompactNode);
+        reads.extend([
+            "density",
+            "palette.accent",
+            "palette.accent_secondary",
+            "palette.warning",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.standard",
+            "motion.exit",
+            "motion.durations.slider_trail",
+            "motion.durations.hover_in",
+            "motion.durations.hover_out",
+        ]);
+        reads
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<SliderState>::default()
     }

@@ -6,10 +6,10 @@ use crate::text::{TextLayout, TextWrap};
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
     MeasureCtx, MotionFamily, PaintCtx, PointerButton, ScalarMotion, SemanticRole, Semantics,
-    SemanticsCtx, Size, Theme, UiError, UiEvent, UpdateCtx, Widget,
+    SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx, Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface};
+use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ButtonVariant {
@@ -108,6 +108,42 @@ impl Default for ButtonState {
 }
 
 impl Widget for Button {
+    fn theme_reads(&self) -> ThemeReadSet {
+        let tier = if self.variant == ButtonVariant::Quiet {
+            MaterialTier::Ghost
+        } else {
+            MaterialTier::CompactNode
+        };
+        let mut reads = surface_theme_reads(tier);
+        reads.extend([
+            "density",
+            "spacing.small",
+            "radii.control",
+            "typography.ui_families",
+            "typography.scale",
+            "typography.label.font_size",
+            "typography.label.line_height",
+            "typography.label.weight",
+            "palette.text_muted",
+            "palette.on_accent",
+            "palette.text_primary",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.standard",
+            "motion.settle",
+            "motion.exit",
+            "motion.durations.hover_in",
+            "motion.durations.hover_out",
+            "motion.durations.press",
+            "motion.durations.release",
+        ]);
+        reads
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<ButtonState>::default()
     }

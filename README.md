@@ -69,10 +69,16 @@ two preserve requested versus effective values. Settings provides per-setting
 generation-ordered begin/complete feedback tokens, allowing independent
 concurrent pending states while stale same-setting replies cannot replace newer
 state; its global speed control scales every control, panel and fluid
-duration without changing the selected curves. The standalone/in-compositor
-window hosts still belong to later milestones. UI-3 remains open for owner
-review of the real static-glass frame, compact navigation icons and transition
-output.
+duration without changing the selected curves. The owner accepted the resting
+and transition frames, closing UI-3. UI-4 is now underway without changing
+those visuals: `nkdhr-theme` defines versioned portable Tokyo Night/Nord and
+wallpaper-based profiles with sparse explicit overrides and a frozen fallback
+palette; `nkdhrd` validates and publishes the complete profile as one CTRL-5
+leaf; `nkdhr-ui` exposes immutable generation snapshots, typed semantic token
+reads and exact paint/layout diffs. Live roots synchronize at retained-tree
+boundaries, so valid color and metric changes apply without restart while an
+invalid candidate preserves the last-known-good generation. The standalone/
+in-compositor window hosts still belong to later milestones.
 
 ## Documentation
 

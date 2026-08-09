@@ -1,11 +1,15 @@
 //! Typed owner-approved design tokens used by UI-3 components.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use nkdhr_render::Color;
+use nkdhr_theme::{
+    DensityData, GlassMaterialData, MotionData, MotionDurationsData, MotionModeData, PaletteData,
+    ThemeData, TypeData, parse_color,
+};
 
-use crate::MotionProfile;
 use crate::text::TextStyle;
+use crate::{CubicBezier, FluidTuning, MotionDurations, MotionMode, MotionProfile};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Density {
@@ -354,6 +358,65 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// Convert a completely resolved portable UI-4 profile into the runtime
+    /// representation used by widgets. The portable document is validated
+    /// independently first, but this conversion still fails closed so callers
+    /// never have to rely on that ordering.
+    pub fn from_data(data: &ThemeData) -> Result<Self, ThemeError> {
+        data.validate().map_err(|_| ThemeError::InvalidProfile)?;
+        let motion = motion_from_data(&data.motion)?;
+        let theme = Self {
+            density: match data.density {
+                DensityData::Compact => Density::Compact,
+                DensityData::Standard => Density::Standard,
+                DensityData::Relaxed => Density::Relaxed,
+            },
+            spacing: Spacing {
+                xxs: data.spacing.xxs,
+                xs: data.spacing.xs,
+                small: data.spacing.small,
+                medium: data.spacing.medium,
+                large: data.spacing.large,
+                xl: data.spacing.xl,
+                xxl: data.spacing.xxl,
+            },
+            radii: Radii {
+                small: data.radii.small,
+                control: data.radii.control,
+                relaxed: data.radii.relaxed,
+                group: data.radii.group,
+                popover: data.radii.popover,
+                major: data.radii.major,
+            },
+            typography: Typography {
+                families: FontStacks {
+                    ui: data.typography.ui_families.clone(),
+                    mono: data.typography.mono_families.clone(),
+                },
+                caption: type_from_data(data.typography.caption),
+                body_small: type_from_data(data.typography.body_small),
+                body: type_from_data(data.typography.body),
+                label: type_from_data(data.typography.label),
+                section: type_from_data(data.typography.section),
+                page: type_from_data(data.typography.page),
+                display: type_from_data(data.typography.display),
+                mono: type_from_data(data.typography.mono),
+                scale: data.typography.scale,
+            },
+            palette: palette_from_data(&data.palette)?,
+            motion,
+            ghost: material_from_data(data.materials.ghost),
+            compact_node: material_from_data(data.materials.compact_node),
+            hover_transient: material_from_data(data.materials.hover_transient),
+            popover: material_from_data(data.materials.popover),
+            expanded_panel: material_from_data(data.materials.expanded_panel),
+            content_surface: material_from_data(data.materials.content_surface),
+            terminal: material_from_data(data.materials.terminal),
+        };
+        theme.validate()?;
+        Ok(theme)
+    }
+
     pub fn density_metrics(&self) -> DensityMetrics {
         DensityMetrics::for_density(self.density)
     }
@@ -549,6 +612,7 @@ pub enum ThemeError {
     InvalidMaterial(MaterialTier),
     InvalidTypography,
     InvalidMotion,
+    InvalidProfile,
 }
 
 impl fmt::Display for ThemeError {
@@ -558,11 +622,111 @@ impl fmt::Display for ThemeError {
             Self::InvalidMaterial(tier) => write!(formatter, "invalid {tier:?} material token"),
             Self::InvalidTypography => formatter.write_str("invalid typography token"),
             Self::InvalidMotion => formatter.write_str("invalid motion token"),
+            Self::InvalidProfile => formatter.write_str("invalid portable theme profile"),
         }
     }
 }
 
 impl std::error::Error for ThemeError {}
+
+fn type_from_data(data: TypeData) -> TypeToken {
+    TypeToken::new(data.font_size, data.line_height, data.weight)
+}
+
+fn material_from_data(data: GlassMaterialData) -> GlassMaterial {
+    GlassMaterial::new(data.opacity, data.backdrop_blur, data.wallpaper_tint)
+}
+
+fn palette_from_data(data: &PaletteData) -> Result<Palette, ThemeError> {
+    Ok(Palette {
+        backdrop: color_from_text(&data.backdrop)?,
+        surface: color_from_text(&data.surface)?,
+        surface_raised: color_from_text(&data.surface_raised)?,
+        text_primary: color_from_text(&data.text_primary)?,
+        text_secondary: color_from_text(&data.text_secondary)?,
+        text_muted: color_from_text(&data.text_muted)?,
+        accent: color_from_text(&data.accent)?,
+        accent_secondary: color_from_text(&data.accent_secondary)?,
+        on_accent: color_from_text(&data.on_accent)?,
+        success: color_from_text(&data.success)?,
+        warning: color_from_text(&data.warning)?,
+        error: color_from_text(&data.error)?,
+        edge: color_from_text(&data.edge)?,
+        inverse_edge: color_from_text(&data.inverse_edge)?,
+        shadow: color_from_text(&data.shadow)?,
+    })
+}
+
+fn color_from_text(value: &str) -> Result<Color, ThemeError> {
+    let [red, green, blue, alpha] = parse_color(value).map_err(|_| ThemeError::InvalidProfile)?;
+    Ok(Color::from_srgba8(red, green, blue, alpha))
+}
+
+fn motion_from_data(data: &MotionData) -> Result<MotionProfile, ThemeError> {
+    let curve = |values: [f32; 4]| {
+        CubicBezier::new(values[0], values[1], values[2], values[3])
+            .map_err(|_| ThemeError::InvalidMotion)
+    };
+    let profile = MotionProfile {
+        mode: match data.mode {
+            MotionModeData::Off => MotionMode::Off,
+            MotionModeData::Reduced => MotionMode::Reduced,
+            MotionModeData::Standard => MotionMode::Standard,
+            MotionModeData::Expressive => MotionMode::Expressive,
+        },
+        standard: curve(data.standard)?,
+        settle: curve(data.settle)?,
+        exit: curve(data.exit)?,
+        soft: curve(data.soft)?,
+        durations: durations_from_data(data.durations),
+        fluid: FluidTuning {
+            neck_variation: data.fluid.neck_variation,
+            trail_variation: data.fluid.trail_variation,
+            phase_variation: data.fluid.phase_variation,
+            maximum_path_offset: data.fluid.maximum_path_offset,
+            toggle_stretch: data.fluid.toggle_stretch,
+            slider_trail: data.fluid.slider_trail,
+            transfer_base: Duration::from_millis(data.fluid.transfer_base),
+            transfer_per_unit_ms: data.fluid.transfer_per_unit_ms,
+            transfer_maximum: Duration::from_millis(data.fluid.transfer_maximum),
+            bud_duration: Duration::from_millis(data.fluid.bud_duration),
+            bud_stagger: Duration::from_millis(data.fluid.bud_stagger),
+            group_maximum: Duration::from_millis(data.fluid.group_maximum),
+        },
+    };
+    profile
+        .with_speed_multiplier(data.speed_multiplier)
+        .map_err(|_| ThemeError::InvalidMotion)
+}
+
+fn durations_from_data(data: MotionDurationsData) -> MotionDurations {
+    MotionDurations {
+        reduced_transition: Duration::from_millis(data.reduced_transition),
+        hover_in: Duration::from_millis(data.hover_in),
+        hover_out: Duration::from_millis(data.hover_out),
+        press: Duration::from_millis(data.press),
+        release: Duration::from_millis(data.release),
+        focus: Duration::from_millis(data.focus),
+        toggle: Duration::from_millis(data.toggle),
+        slider_trail: Duration::from_millis(data.slider_trail),
+        list_transfer: Duration::from_millis(data.list_transfer),
+        text_input_focus: Duration::from_millis(data.text_input_focus),
+        validation: Duration::from_millis(data.validation),
+        scrollbar_show: Duration::from_millis(data.scrollbar_show),
+        scrollbar_hide: Duration::from_millis(data.scrollbar_hide),
+        overscroll: Duration::from_millis(data.overscroll),
+        tooltip_enter: Duration::from_millis(data.tooltip_enter),
+        tooltip_exit: Duration::from_millis(data.tooltip_exit),
+        popover_enter: Duration::from_millis(data.popover_enter),
+        popover_exit: Duration::from_millis(data.popover_exit),
+        panel_enter: Duration::from_millis(data.panel_enter),
+        panel_exit: Duration::from_millis(data.panel_exit),
+        drawer_enter: Duration::from_millis(data.drawer_enter),
+        drawer_exit: Duration::from_millis(data.drawer_exit),
+        workspace: Duration::from_millis(data.workspace),
+        wallpaper: Duration::from_millis(data.wallpaper),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -617,5 +781,13 @@ mod tests {
         let mut theme = Theme::default();
         theme.motion.fluid.neck_variation = 0.75;
         assert_eq!(theme.validate(), Err(ThemeError::InvalidMotion));
+    }
+
+    #[test]
+    fn portable_default_is_byte_for_byte_the_existing_runtime_default() {
+        assert_eq!(
+            Theme::from_data(&ThemeData::default()).unwrap(),
+            Theme::default()
+        );
     }
 }

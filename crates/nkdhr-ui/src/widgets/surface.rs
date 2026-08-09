@@ -5,7 +5,7 @@ use nkdhr_render::{CornerRadii, Rect, Shadow};
 use crate::theme::{mix, with_alpha};
 use crate::{
     Constraints, Insets, MaterialCapabilities, MaterialTier, MeasureCtx, PaintCtx,
-    ResolvedMaterial, Size, Theme, UiError, Widget,
+    ResolvedMaterial, Size, Theme, ThemeReadSet, UiError, Widget,
 };
 
 /// Continuous visual state consumed by the material painter. Geometry remains
@@ -30,6 +30,7 @@ pub struct GlassSurface {
     tier: MaterialTier,
     capabilities: MaterialCapabilities,
     radius: f32,
+    radius_from_theme: bool,
     padding: Insets,
     state: SurfaceState,
 }
@@ -50,6 +51,7 @@ impl GlassSurface {
             tier,
             capabilities: MaterialCapabilities::default(),
             radius,
+            radius_from_theme: true,
             padding: Insets::ZERO,
             state: SurfaceState::default(),
         }
@@ -62,6 +64,7 @@ impl GlassSurface {
 
     pub fn radius(mut self, radius: f32) -> Self {
         self.radius = radius;
+        self.radius_from_theme = false;
         self
     }
 
@@ -81,6 +84,37 @@ impl GlassSurface {
 }
 
 impl Widget for GlassSurface {
+    fn theme_reads(&self) -> ThemeReadSet {
+        let mut reads = surface_theme_reads(self.tier);
+        if self.radius_from_theme {
+            reads.record(match self.tier {
+                MaterialTier::Ghost | MaterialTier::CompactNode | MaterialTier::HoverTransient => {
+                    "radii.control"
+                }
+                MaterialTier::Popover => "radii.popover",
+                MaterialTier::ExpandedPanel
+                | MaterialTier::ContentSurface
+                | MaterialTier::Terminal => "radii.group",
+            });
+        }
+        reads
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        if self.radius_from_theme {
+            self.radius = match self.tier {
+                MaterialTier::Ghost | MaterialTier::CompactNode | MaterialTier::HoverTransient => {
+                    theme.radii.control
+                }
+                MaterialTier::Popover => theme.radii.popover,
+                MaterialTier::ExpandedPanel
+                | MaterialTier::ContentSurface
+                | MaterialTier::Terminal => theme.radii.group,
+            };
+        }
+        self.theme = theme;
+    }
+
     fn measure(&self, ctx: &mut MeasureCtx<'_>, constraints: Constraints) -> Result<Size, UiError> {
         self.padding.validate()?;
         if ctx.child_count() > 1 {
@@ -130,6 +164,58 @@ impl Widget for GlassSurface {
         )?;
         ctx.paint_children()
     }
+}
+
+pub(crate) fn surface_theme_reads(tier: MaterialTier) -> ThemeReadSet {
+    let mut reads = ThemeReadSet::from_paths([
+        "palette.surface",
+        "palette.surface_raised",
+        "palette.backdrop",
+        "palette.accent",
+        "palette.accent_secondary",
+        "palette.error",
+        "palette.edge",
+        "palette.inverse_edge",
+        "palette.shadow",
+    ]);
+    reads.extend(match tier {
+        MaterialTier::Ghost => [
+            "materials.ghost.opacity",
+            "materials.ghost.backdrop_blur",
+            "materials.ghost.wallpaper_tint",
+        ],
+        MaterialTier::CompactNode => [
+            "materials.compact_node.opacity",
+            "materials.compact_node.backdrop_blur",
+            "materials.compact_node.wallpaper_tint",
+        ],
+        MaterialTier::HoverTransient => [
+            "materials.hover_transient.opacity",
+            "materials.hover_transient.backdrop_blur",
+            "materials.hover_transient.wallpaper_tint",
+        ],
+        MaterialTier::Popover => [
+            "materials.popover.opacity",
+            "materials.popover.backdrop_blur",
+            "materials.popover.wallpaper_tint",
+        ],
+        MaterialTier::ExpandedPanel => [
+            "materials.expanded_panel.opacity",
+            "materials.expanded_panel.backdrop_blur",
+            "materials.expanded_panel.wallpaper_tint",
+        ],
+        MaterialTier::ContentSurface => [
+            "materials.content_surface.opacity",
+            "materials.content_surface.backdrop_blur",
+            "materials.content_surface.wallpaper_tint",
+        ],
+        MaterialTier::Terminal => [
+            "materials.terminal.opacity",
+            "materials.terminal.backdrop_blur",
+            "materials.terminal.wallpaper_tint",
+        ],
+    });
+    reads
 }
 
 pub(crate) fn paint_surface(

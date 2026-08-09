@@ -8,6 +8,7 @@ mod reactive;
 mod semantics;
 pub mod text;
 mod theme;
+mod theme_runtime;
 mod tree;
 mod widgets;
 
@@ -28,6 +29,10 @@ pub use theme::{
     Density, DensityMetrics, FontStacks, GlassMaterial, MaterialCapabilities, MaterialTier,
     Palette, Radii, ResolvedMaterial, ShadowToken, Spacing, TextRole, Theme, ThemeError, TypeToken,
     Typography,
+};
+pub use theme_runtime::{
+    ThemePublication, ThemeReadSet, ThemeRuntime, ThemeRuntimeError, ThemeSnapshot, ThemeToken,
+    tokens as theme_tokens,
 };
 pub use tree::{
     AnimationCtx, ArrangeCtx, DispatchResult, Element, EventCtx, Invalidation, MeasureCtx,

@@ -221,21 +221,21 @@ from real console input this session has no way to generate remotely
 
 ## Config store (CTRL-5)
 
-**Ships with zero namespaces registered.** None of CTRL-1 … CTRL-4's
-built-in modules ended up with a setting that actually needs persisting,
-and the namespaces sketched in USAGE.md (`theme`, `canvas`) belong to
-phases (UI-4, COMP-3) that haven't designed their real schemas yet —
-defining them now would have been speculative, ahead-of-need design. What
-CTRL-5 delivers is the generic engine, proven by a throwaway test-only
-namespace in `nkdhrd/src/backends/config_store.rs`'s own unit tests (not
-shipped) and, during development, by a temporary scratch namespace
-registered and exercised live against a running daemon, then removed
-before commit. A later phase registers its own namespace by implementing
-the `Namespace` trait (`backends::config_store::Namespace` — **in
-`nkdhrd`, not `nkdhr-ipc`**: no client has ever needed typed Rust access
-to a namespace's shape, only the generic dotted-key `Config1` IPC below,
-so the schema trait lives next to the engine that enforces it) on a
-`serde`-derived struct and adding a `NamespaceSchema::of::<T>()` entry to
+CTRL-5 originally shipped with no namespace because CTRL-1 … CTRL-4 had no
+real persisted setting and defining later schemas early would have been
+speculative. COMP-3 subsequently registered `canvas`; UI-4 now registers
+`theme`. The latter contains one scalar `profile` leaf whose JSON payload is
+resolved and fully validated by the shared `nkdhr-theme` data crate before the
+namespace can commit. One leaf is intentional: sparse overrides contain arrays
+and nested structures, while the active theme must change as one atomic unit.
+The original generic engine remains covered by the test-only namespace in
+`nkdhrd/src/backends/config_store.rs`, and each real namespace adds its own
+validation/last-known-good tests. A later phase registers another namespace by
+implementing the `Namespace` trait (`backends::config_store::Namespace` — **in
+`nkdhrd`, not `nkdhr-ipc`**: clients use the generic dotted-key IPC; UI-4's
+portable profile types instead live in the backend-neutral `nkdhr-theme` crate
+shared by daemon validation and UI resolution) on a `serde`-derived struct and
+adding a `NamespaceSchema::of::<T>()` entry to
 the `static NAMESPACES: &[NamespaceSchema]` list in `nkdhrd/src/main.rs`.
 
 - On disk: TOML files under `~/.config/nkdhr/`, one logical namespace per

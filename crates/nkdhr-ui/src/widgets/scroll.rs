@@ -6,7 +6,7 @@ use crate::theme::with_alpha;
 use crate::{
     AnimationCtx, ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MeasureCtx, Modifiers,
     MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion, ScrollPhase, SemanticRole,
-    Semantics, SemanticsCtx, Size, Theme, UiError, UiEvent, UpdateCtx, Widget,
+    Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx, Widget,
 };
 
 const MINIMUM_THUMB: f32 = 24.0;
@@ -339,6 +339,26 @@ struct ScrollbarGeometry {
 }
 
 impl Widget for Scroll {
+    fn theme_reads(&self) -> ThemeReadSet {
+        ThemeReadSet::from_paths([
+            "density",
+            "palette.text_secondary",
+            "palette.edge",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.standard",
+            "motion.settle",
+            "motion.exit",
+            "motion.durations.scrollbar_show",
+            "motion.durations.scrollbar_hide",
+            "motion.durations.overscroll",
+        ])
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<ScrollState>::default()
     }

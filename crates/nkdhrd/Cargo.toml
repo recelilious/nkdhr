@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 inotify = { version = "0.11.4", default-features = false }
 nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
+nkdhr-theme = { version = "0.1.0", path = "../nkdhr-theme" }
 pipewire = "0.10.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

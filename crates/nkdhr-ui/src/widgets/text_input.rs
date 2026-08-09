@@ -8,10 +8,11 @@ use crate::theme::with_alpha;
 use crate::{
     AnimationCtx, ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities,
     MaterialTier, MeasureCtx, MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion,
-    SemanticRole, Semantics, SemanticsCtx, Size, Theme, UiError, UiEvent, UpdateCtx, Widget,
+    SemanticRole, Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx,
+    Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface};
+use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
 
 type TextCallback = Rc<dyn Fn(&str)>;
 type FormatterCallback = Rc<dyn Fn(TextInputEdit) -> TextInputEdit>;
@@ -441,6 +442,36 @@ impl TextInputState {
 }
 
 impl Widget for TextInput {
+    fn theme_reads(&self) -> ThemeReadSet {
+        let mut reads = surface_theme_reads(MaterialTier::CompactNode);
+        reads.extend([
+            "density",
+            "radii.control",
+            "typography.ui_families",
+            "typography.scale",
+            "typography.body.font_size",
+            "typography.body.line_height",
+            "typography.body.weight",
+            "palette.accent",
+            "palette.accent_secondary",
+            "palette.error",
+            "palette.success",
+            "palette.warning",
+            "palette.text_primary",
+            "palette.text_muted",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.standard",
+            "motion.durations.text_input_focus",
+            "motion.durations.validation",
+        ]);
+        reads
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<TextInputState>::default()
     }

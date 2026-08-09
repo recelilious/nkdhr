@@ -6,3 +6,4 @@
 //! (`theme`, ...) as later phases land their own settings.
 
 pub mod canvas;
+pub mod theme;

@@ -14,10 +14,11 @@ use crate::theme::with_alpha;
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
     MeasureCtx, Modifiers, MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion,
-    SemanticRole, Semantics, SemanticsCtx, Size, Theme, UiError, UiEvent, UpdateCtx, Widget,
+    SemanticRole, Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx,
+    Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface};
+use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
 
 const DEFAULT_TYPEAHEAD_TIMEOUT: Duration = Duration::from_millis(700);
 const TREE_INDENT: f32 = 16.0;
@@ -593,6 +594,25 @@ impl Default for ListState {
 }
 
 impl Widget for List {
+    fn theme_reads(&self) -> ThemeReadSet {
+        let mut reads = surface_theme_reads(self.material_tier);
+        reads.extend([
+            "radii.group",
+            "radii.control",
+            "palette.edge",
+            "palette.accent_secondary",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.settle",
+            "motion.durations.list_transfer",
+        ]);
+        reads
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<ListState>::default()
     }
@@ -1377,6 +1397,32 @@ impl Default for ListItemState {
 }
 
 impl Widget for ListItem {
+    fn theme_reads(&self) -> ThemeReadSet {
+        ThemeReadSet::from_paths([
+            "density",
+            "radii.control",
+            "typography.ui_families",
+            "typography.scale",
+            "typography.body.font_size",
+            "typography.body.line_height",
+            "typography.body.weight",
+            "palette.accent_secondary",
+            "palette.surface_raised",
+            "palette.text_muted",
+            "palette.text_primary",
+            "motion.mode",
+            "motion.speed_multiplier",
+            "motion.standard",
+            "motion.exit",
+            "motion.durations.hover_in",
+            "motion.durations.hover_out",
+        ])
+    }
+
+    fn apply_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<ListItemState>::default()
     }

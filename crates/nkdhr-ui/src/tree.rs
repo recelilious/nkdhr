@@ -16,7 +16,7 @@ use crate::reactive::SubscriptionToken;
 use crate::text::{TextDrawStats, TextError, TextLayout, TextResources, TextStyle};
 use crate::{
     ClipboardRequest, Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, ScrollPhase,
-    SemanticNode, Semantics, Size, SystemClock, UiEvent,
+    SemanticNode, Semantics, Size, SystemClock, ThemeReadSet, ThemeRuntime, ThemeSnapshot, UiEvent,
 };
 
 pub type UiResult<T> = Result<T, UiError>;
@@ -211,6 +211,17 @@ pub trait Widget: AsAny + 'static {
     fn create_state(&self) -> Box<dyn Any> {
         Box::new(())
     }
+
+    /// Semantic theme leaves this descriptor actually resolves. A dynamic
+    /// theme root uses the set to keep paint-only changes out of layout and to
+    /// leave unrelated widgets untouched.
+    fn theme_reads(&self) -> ThemeReadSet {
+        ThemeReadSet::default()
+    }
+
+    /// Replace the immutable generation used by this descriptor. Structural
+    /// and application-private widgets remain theme-neutral by default.
+    fn apply_theme(&mut self, _theme: Arc<crate::Theme>) {}
 
     /// Reconcile new descriptor data against the previous descriptor. The
     /// conservative default requests layout; implementations may override it
@@ -424,6 +435,19 @@ impl Arena {
             .filter_map(|slot| slot.node.as_ref())
             .fold(Invalidation::NONE, |dirty, node| dirty | node.dirty)
     }
+
+    fn ids(&self) -> Vec<WidgetId> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot.node.as_ref().map(|_| WidgetId {
+                    index: index as u32,
+                    generation: slot.generation,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -503,6 +527,12 @@ pub struct UiRoot {
     frame_requested: bool,
     paint_order: Vec<PaintEntry>,
     dirty: Invalidation,
+    theme: Option<RootTheme>,
+}
+
+struct RootTheme {
+    runtime: ThemeRuntime,
+    snapshot: Arc<ThemeSnapshot>,
 }
 
 impl UiRoot {
@@ -546,6 +576,7 @@ impl UiRoot {
             frame_requested: false,
             paint_order: Vec::new(),
             dirty: Invalidation::ALL,
+            theme: None,
         };
         let id = root.mount(element, None)?;
         root.root = Some(id);
@@ -573,6 +604,33 @@ impl UiRoot {
 
     pub fn root_id(&self) -> WidgetId {
         self.root.expect("a UI root always owns a root widget")
+    }
+
+    /// Attach a live UI-4 publication point. The current immutable snapshot is
+    /// installed immediately; future generations synchronize at the same
+    /// explicit boundaries as reactive values.
+    pub fn set_theme_runtime(&mut self, runtime: ThemeRuntime) {
+        let snapshot = runtime.snapshot();
+        self.theme = Some(RootTheme {
+            runtime,
+            snapshot: Arc::clone(&snapshot),
+        });
+        let theme = snapshot.theme();
+        for id in self.arena.ids() {
+            let Some(node) = self.arena.get_mut(id) else {
+                continue;
+            };
+            let reads = node.widget.theme_reads();
+            node.widget.apply_theme(Arc::clone(&theme));
+            if !reads.is_empty() {
+                node.dirty |= Invalidation::LAYOUT | Invalidation::SEMANTICS;
+                self.dirty |= Invalidation::LAYOUT | Invalidation::SEMANTICS;
+            }
+        }
+    }
+
+    pub fn theme_snapshot(&self) -> Option<Arc<ThemeSnapshot>> {
+        self.theme.as_ref().map(|theme| Arc::clone(&theme.snapshot))
     }
 
     pub fn is_alive(&self, id: WidgetId) -> bool {
@@ -838,7 +896,10 @@ impl UiRoot {
         result
     }
 
-    fn mount(&mut self, element: Element, parent: Option<WidgetId>) -> UiResult<WidgetId> {
+    fn mount(&mut self, mut element: Element, parent: Option<WidgetId>) -> UiResult<WidgetId> {
+        if let Some(theme) = &self.theme {
+            element.widget.apply_theme(theme.snapshot.theme());
+        }
         let state = element.widget.create_state();
         let children = element.children;
         let id = self.arena.allocate(Node {
@@ -900,11 +961,14 @@ impl UiRoot {
 
         let id = candidate.expect("reusable candidate exists");
         let Element {
-            widget,
+            mut widget,
             key,
             flex,
             children,
         } = element;
+        if let Some(theme) = &self.theme {
+            widget.apply_theme(theme.snapshot.theme());
+        }
         let now = self.now();
         let reactivity = Rc::clone(&self.reactivity);
         let mut node = self.arena.take(id)?;
@@ -1008,8 +1072,36 @@ impl UiRoot {
     }
 
     fn flush_reactive(&mut self) {
+        self.sync_theme();
         for (id, invalidation) in self.reactivity.drain() {
             self.mark_dirty(id, invalidation);
+        }
+    }
+
+    fn sync_theme(&mut self) {
+        let Some((current, previous)) = self.theme.as_ref().and_then(|theme| {
+            let current = theme.runtime.snapshot();
+            (current.generation() != theme.snapshot.generation())
+                .then(|| (current, Arc::clone(&theme.snapshot)))
+        }) else {
+            return;
+        };
+        let changes = current.changes_from(&previous);
+        let runtime_theme = current.theme();
+        for id in self.arena.ids() {
+            let Some(node) = self.arena.get_mut(id) else {
+                continue;
+            };
+            let reads = node.widget.theme_reads();
+            let invalidation = reads.invalidation_for(&changes);
+            node.widget.apply_theme(Arc::clone(&runtime_theme));
+            if !invalidation.is_empty() {
+                node.dirty |= invalidation;
+                self.dirty |= invalidation;
+            }
+        }
+        if let Some(theme) = &mut self.theme {
+            theme.snapshot = current;
         }
     }
 

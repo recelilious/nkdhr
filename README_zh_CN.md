@@ -49,9 +49,14 @@ Vim 方向键、由宿主时钟驱动且可中断的惯性、有界弹性反馈�
 保持输入屏障；Reduced/Off 会移除空间位移。Button、Toggle、Slider 具备不改变布局的
 可见 pending 边缘，后两者同时保留请求值与实际生效值。Settings 通过按设置项独立的
 generation 排序 begin/complete token 支持并发等待，并阻止同一项的旧后端结果覆盖新请求；
-全局速度会缩放控件、面板和流体运动的全部时长而不改变曲线。独立 Wayland/合成器内窗口
-宿主仍属于后续里程碑。UI-3 仍未完成；
-下一步是共同验收真实静态玻璃画面、紧凑导航图标和转场输出。
+全局速度会缩放控件、面板和流体运动的全部时长而不改变曲线。项目所有者已经接受静态
+与转场帧，UI-3 因此收口。UI-4 现已在不改变这些视觉的前提下开始：
+`nkdhr-theme` 定义带版本、可移植的 Tokyo Night/Nord 和壁纸基础 profile，支持稀疏
+显式覆盖并始终携带冻结回退调色板；`nkdhrd` 把完整 profile 作为一个 CTRL-5 叶子
+校验和发布；`nkdhr-ui` 提供不可变 generation 快照、类型化语义 token 读取和精确的
+paint/layout 差异。live root 会在 retained tree 的安全边界同步，所以有效的颜色/尺寸
+变更无需重启即可生效，无效候选则保留上一个已知有效 generation。独立 Wayland/合成器
+内窗口宿主仍属于后续里程碑。
 
 ## 文档
 

@@ -1,0 +1,529 @@
+//! Atomic immutable theme snapshots and typed semantic token reads.
+
+use std::collections::BTreeSet;
+use std::fmt;
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use nkdhr_ipc::ConfigProxyBlocking;
+use nkdhr_render::Color;
+use nkdhr_theme::{
+    ResolvedTheme, ThemeProfile, ThemeProfileError, ThemeTokenChange, TokenImpact, diff,
+};
+use zbus::blocking::Connection;
+use zbus::zvariant::Value;
+
+use crate::{Density, Invalidation, MotionMode, Theme, ThemeError};
+
+#[derive(Debug, Clone)]
+pub struct ThemeSnapshot {
+    generation: u64,
+    resolved: Arc<ResolvedTheme>,
+    theme: Arc<Theme>,
+}
+
+impl ThemeSnapshot {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn resolved(&self) -> &ResolvedTheme {
+        &self.resolved
+    }
+
+    pub fn theme(&self) -> Arc<Theme> {
+        Arc::clone(&self.theme)
+    }
+
+    pub fn changes_from(&self, previous: &Self) -> Vec<ThemeTokenChange> {
+        diff(&previous.resolved.data, &self.resolved.data)
+    }
+
+    pub fn read<T: Clone>(&self, token: ThemeToken<T>, reads: &mut ThemeReadSet) -> T {
+        reads.record(token.path);
+        (token.resolve)(&self.theme)
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeState {
+    snapshot: Arc<ThemeSnapshot>,
+}
+
+/// Thread-safe publication point. Candidate parsing, inheritance and
+/// validation happen before the mutex is acquired; the visible generation is
+/// swapped in one critical section, so readers can never observe a partial
+/// palette or half-applied metric set.
+#[derive(Clone)]
+pub struct ThemeRuntime {
+    state: Arc<Mutex<RuntimeState>>,
+}
+
+impl fmt::Debug for ThemeRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ThemeRuntime")
+            .field("generation", &self.snapshot().generation())
+            .finish()
+    }
+}
+
+impl Default for ThemeRuntime {
+    fn default() -> Self {
+        Self::new(ThemeProfile::default()).expect("the built-in profile is valid")
+    }
+}
+
+impl ThemeRuntime {
+    /// Read `theme.profile` once and keep following CTRL-5 `Changed` signals.
+    /// A missing daemon degrades to the immutable built-in profile; a malformed
+    /// value is ignored so the runtime retains its last-known-good snapshot.
+    pub fn watch_ctrl5() -> Self {
+        let runtime = Self::default();
+        let Ok(connection) = Connection::session() else {
+            eprintln!("nkdhr-ui: no session D-Bus, using the built-in theme");
+            return runtime;
+        };
+        if let Some(profile) = fetch_ctrl5_profile(&connection)
+            && let Err(error) = runtime.publish_json(&profile)
+        {
+            eprintln!("nkdhr-ui: rejected initial CTRL-5 theme profile: {error}");
+        }
+
+        let watched = runtime.clone();
+        thread::spawn(move || {
+            let Ok(config) = ConfigProxyBlocking::new(&connection) else {
+                return;
+            };
+            let Ok(changed) = config.receive_changed() else {
+                return;
+            };
+            for signal in changed {
+                let Ok(args) = signal.args() else {
+                    continue;
+                };
+                if args.key() != "theme.profile" {
+                    continue;
+                }
+                let Some(profile) = fetch_ctrl5_profile(&connection) else {
+                    continue;
+                };
+                if let Err(error) = watched.publish_json(&profile) {
+                    eprintln!("nkdhr-ui: rejected changed CTRL-5 theme profile: {error}");
+                }
+            }
+        });
+        runtime
+    }
+
+    pub fn new(profile: ThemeProfile) -> Result<Self, ThemeRuntimeError> {
+        let resolved = profile.resolve()?;
+        let theme = Theme::from_data(&resolved.data)?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(RuntimeState {
+                snapshot: Arc::new(ThemeSnapshot {
+                    generation: 1,
+                    resolved: Arc::new(resolved),
+                    theme: Arc::new(theme),
+                }),
+            })),
+        })
+    }
+
+    pub fn snapshot(&self) -> Arc<ThemeSnapshot> {
+        Arc::clone(&self.state.lock().expect("theme runtime poisoned").snapshot)
+    }
+
+    pub fn publish_json(&self, text: &str) -> Result<ThemePublication, ThemeRuntimeError> {
+        self.publish(ThemeProfile::from_json(text)?)
+    }
+
+    pub fn publish(&self, profile: ThemeProfile) -> Result<ThemePublication, ThemeRuntimeError> {
+        let resolved = profile.resolve()?;
+        let theme = Theme::from_data(&resolved.data)?;
+        let mut state = self.state.lock().expect("theme runtime poisoned");
+        let previous = Arc::clone(&state.snapshot);
+        if previous.resolved.as_ref() == &resolved {
+            return Ok(ThemePublication {
+                previous_generation: previous.generation,
+                snapshot: previous,
+                changes: Arc::new(Vec::new()),
+                published: false,
+            });
+        }
+        let changes = diff(&previous.resolved.data, &resolved.data);
+        let snapshot = Arc::new(ThemeSnapshot {
+            generation: previous.generation.wrapping_add(1).max(1),
+            resolved: Arc::new(resolved),
+            theme: Arc::new(theme),
+        });
+        state.snapshot = Arc::clone(&snapshot);
+        Ok(ThemePublication {
+            previous_generation: previous.generation,
+            snapshot,
+            changes: Arc::new(changes),
+            published: true,
+        })
+    }
+}
+
+fn fetch_ctrl5_profile(connection: &Connection) -> Option<String> {
+    let config = ConfigProxyBlocking::new(connection).ok()?;
+    let owned = config.get("theme.profile").ok()?;
+    match Value::from(owned) {
+        Value::Str(profile) => Some(profile.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ThemePublication {
+    previous_generation: u64,
+    snapshot: Arc<ThemeSnapshot>,
+    changes: Arc<Vec<ThemeTokenChange>>,
+    published: bool,
+}
+
+impl ThemePublication {
+    pub fn previous_generation(&self) -> u64 {
+        self.previous_generation
+    }
+
+    pub fn snapshot(&self) -> Arc<ThemeSnapshot> {
+        Arc::clone(&self.snapshot)
+    }
+
+    pub fn changes(&self) -> &[ThemeTokenChange] {
+        &self.changes
+    }
+
+    pub fn was_published(&self) -> bool {
+        self.published
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThemeReadSet {
+    paths: BTreeSet<&'static str>,
+}
+
+impl ThemeReadSet {
+    pub fn from_paths(paths: impl IntoIterator<Item = &'static str>) -> Self {
+        let mut reads = Self::default();
+        reads.extend(paths);
+        reads
+    }
+
+    pub fn record(&mut self, path: &'static str) {
+        self.paths.insert(path);
+    }
+
+    pub fn extend(&mut self, paths: impl IntoIterator<Item = &'static str>) {
+        self.paths.extend(paths);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+
+    pub fn invalidation_for(&self, changes: &[ThemeTokenChange]) -> Invalidation {
+        let mut invalidation = Invalidation::NONE;
+        for change in changes.iter().filter(|change| self.contains(&change.path)) {
+            invalidation |= match change.impact {
+                TokenImpact::Paint => Invalidation::PAINT,
+                TokenImpact::Layout => Invalidation::LAYOUT,
+            };
+        }
+        invalidation
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ThemeToken<T> {
+    path: &'static str,
+    resolve: fn(&Theme) -> T,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T> ThemeToken<T> {
+    pub const fn new(path: &'static str, resolve: fn(&Theme) -> T) -> Self {
+        Self {
+            path,
+            resolve,
+            marker: PhantomData,
+        }
+    }
+
+    pub const fn path(self) -> &'static str {
+        self.path
+    }
+}
+
+pub mod tokens {
+    use super::*;
+
+    pub const PALETTE_SURFACE: ThemeToken<Color> =
+        ThemeToken::new("palette.surface", palette_surface);
+    pub const PALETTE_ACCENT: ThemeToken<Color> = ThemeToken::new("palette.accent", palette_accent);
+    pub const SPACING_MEDIUM: ThemeToken<f32> = ThemeToken::new("spacing.medium", spacing_medium);
+    pub const RADII_CONTROL: ThemeToken<f32> = ThemeToken::new("radii.control", radii_control);
+    pub const TYPOGRAPHY_SCALE: ThemeToken<f32> =
+        ThemeToken::new("typography.scale", typography_scale);
+    pub const DENSITY: ThemeToken<Density> = ThemeToken::new("density", density);
+    pub const MOTION_MODE: ThemeToken<MotionMode> = ThemeToken::new("motion.mode", motion_mode);
+    pub const CONTENT_SURFACE_OPACITY: ThemeToken<f32> =
+        ThemeToken::new("materials.content_surface.opacity", content_surface_opacity);
+
+    fn palette_surface(theme: &Theme) -> Color {
+        theme.palette.surface
+    }
+    fn palette_accent(theme: &Theme) -> Color {
+        theme.palette.accent
+    }
+    fn spacing_medium(theme: &Theme) -> f32 {
+        theme.spacing.medium
+    }
+    fn radii_control(theme: &Theme) -> f32 {
+        theme.radii.control
+    }
+    fn typography_scale(theme: &Theme) -> f32 {
+        theme.typography.scale
+    }
+    fn density(theme: &Theme) -> Density {
+        theme.density
+    }
+    fn motion_mode(theme: &Theme) -> MotionMode {
+        theme.motion.mode
+    }
+    fn content_surface_opacity(theme: &Theme) -> f32 {
+        theme.content_surface.opacity
+    }
+}
+
+#[derive(Debug)]
+pub enum ThemeRuntimeError {
+    Profile(ThemeProfileError),
+    Runtime(ThemeError),
+}
+
+impl fmt::Display for ThemeRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Profile(error) => error.fmt(formatter),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ThemeRuntimeError {}
+
+impl From<ThemeProfileError> for ThemeRuntimeError {
+    fn from(value: ThemeProfileError) -> Self {
+        Self::Profile(value)
+    }
+}
+
+impl From<ThemeError> for ThemeRuntimeError {
+    fn from(value: ThemeError) -> Self {
+        Self::Runtime(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use nkdhr_render::{DisplayListBuilder, Primitive, Rect};
+    use nkdhr_theme::ThemeProfile;
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        Constraints, Element, GlassSurface, MaterialTier, MeasureCtx, PaintCtx, Size, UiError,
+        UiRoot, Widget,
+    };
+
+    struct ThemeProbe {
+        theme: Arc<Theme>,
+        measures: Rc<Cell<u32>>,
+    }
+
+    impl Widget for ThemeProbe {
+        fn create_state(&self) -> Box<dyn Any> {
+            Box::new(())
+        }
+
+        fn theme_reads(&self) -> ThemeReadSet {
+            ThemeReadSet::from_paths(["palette.accent", "spacing.medium"])
+        }
+
+        fn apply_theme(&mut self, theme: Arc<Theme>) {
+            self.theme = theme;
+        }
+
+        fn measure(
+            &self,
+            _ctx: &mut MeasureCtx<'_>,
+            constraints: Constraints,
+        ) -> Result<Size, UiError> {
+            self.measures.set(self.measures.get() + 1);
+            Ok(constraints.constrain(Size::new(
+                self.theme.spacing.medium,
+                self.theme.spacing.medium,
+            )))
+        }
+
+        fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+            let rect = ctx.rect();
+            ctx.builder().rect(rect, self.theme.palette.accent)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn publication_is_atomic_and_rejection_preserves_last_good() {
+        let runtime = ThemeRuntime::default();
+        let initial = runtime.snapshot();
+        let next = ThemeProfile {
+            overrides: json!({"palette": {"accent": "#010203ff"}}),
+            ..ThemeProfile::default()
+        };
+        let publication = runtime.publish(next).unwrap();
+        assert!(publication.was_published());
+        assert_eq!(publication.previous_generation(), initial.generation());
+        assert_eq!(publication.changes().len(), 1);
+        let accepted = runtime.snapshot();
+
+        let invalid = ThemeProfile {
+            overrides: json!({"spacing": {"small": 100.0}}),
+            ..ThemeProfile::default()
+        };
+        assert!(runtime.publish(invalid).is_err());
+        assert!(Arc::ptr_eq(&accepted, &runtime.snapshot()));
+    }
+
+    #[test]
+    fn typed_reads_only_invalidate_for_tokens_actually_read() {
+        let runtime = ThemeRuntime::default();
+        let initial = runtime.snapshot();
+        let mut reads = ThemeReadSet::default();
+        initial.read(tokens::PALETTE_ACCENT, &mut reads);
+
+        let profile = ThemeProfile {
+            overrides: json!({"palette": {"surface": "#010203ff"}}),
+            ..ThemeProfile::default()
+        };
+        let unrelated = runtime.publish(profile).unwrap();
+        assert!(reads.invalidation_for(unrelated.changes()).is_empty());
+
+        let profile = ThemeProfile {
+            overrides: json!({"palette": {"accent": "#040506ff"}}),
+            ..ThemeProfile::default()
+        };
+        let related = runtime.publish(profile).unwrap();
+        assert_eq!(
+            reads.invalidation_for(related.changes()),
+            Invalidation::PAINT
+        );
+    }
+
+    #[test]
+    fn layout_and_paint_diffs_stay_distinct() {
+        let runtime = ThemeRuntime::default();
+        let snapshot = runtime.snapshot();
+        let mut reads = ThemeReadSet::default();
+        snapshot.read(tokens::PALETTE_ACCENT, &mut reads);
+        snapshot.read(tokens::SPACING_MEDIUM, &mut reads);
+        let profile = ThemeProfile {
+            overrides: json!({"palette": {"accent": "#010203ff"}, "spacing": {"medium": 18.0}}),
+            ..ThemeProfile::default()
+        };
+        let publication = runtime.publish(profile).unwrap();
+        let invalidation = reads.invalidation_for(publication.changes());
+        assert!(invalidation.contains(Invalidation::LAYOUT));
+        assert!(invalidation.contains(Invalidation::PAINT));
+    }
+
+    #[test]
+    fn ui_root_hot_swaps_at_boundaries_without_reconcile_or_restart() {
+        let runtime = ThemeRuntime::default();
+        let measures = Rc::new(Cell::new(0));
+        let probe = ThemeProbe {
+            theme: Arc::new(Theme::default()),
+            measures: Rc::clone(&measures),
+        };
+        let mut root = UiRoot::new(Element::new(probe)).unwrap();
+        root.set_theme_runtime(runtime.clone());
+        root.layout(Size::new(80.0, 40.0)).unwrap();
+        let mut builder = DisplayListBuilder::new();
+        root.paint(&mut builder).unwrap();
+        let measured_before_color = measures.get();
+
+        let color = ThemeProfile {
+            overrides: json!({"palette": {"accent": "#010203ff"}}),
+            ..ThemeProfile::default()
+        };
+        runtime.publish(color).unwrap();
+        let invalidation = root.invalidation();
+        assert!(invalidation.contains(Invalidation::PAINT));
+        assert!(!invalidation.contains(Invalidation::LAYOUT));
+        let mut builder = DisplayListBuilder::new();
+        root.paint(&mut builder).unwrap();
+        assert_eq!(measures.get(), measured_before_color);
+        let list = builder.finish();
+        let Primitive::Shape(rect) = &list.primitives()[0] else {
+            panic!("probe must paint one rectangle")
+        };
+        assert_eq!(rect.rect, Rect::new(0.0, 0.0, 80.0, 40.0));
+        assert_eq!(
+            rect.style,
+            nkdhr_render::ShapeStyle::Fill(Color::from_srgba8(1, 2, 3, 255))
+        );
+
+        let layout = ThemeProfile {
+            overrides: json!({"spacing": {"medium": 18.0}}),
+            ..ThemeProfile::default()
+        };
+        runtime.publish(layout).unwrap();
+        assert!(root.invalidation().contains(Invalidation::LAYOUT));
+        root.layout(Size::new(80.0, 40.0)).unwrap();
+        assert_eq!(measures.get(), measured_before_color + 1);
+    }
+
+    #[test]
+    fn standard_glass_surface_consumes_the_live_snapshot() {
+        let runtime = ThemeRuntime::default();
+        let surface = GlassSurface::new(Arc::new(Theme::default()), MaterialTier::ContentSurface);
+        let mut root = UiRoot::new(Element::new(surface)).unwrap();
+        root.set_theme_runtime(runtime.clone());
+        root.layout(Size::new(80.0, 40.0)).unwrap();
+        let mut builder = DisplayListBuilder::new();
+        root.paint(&mut builder).unwrap();
+
+        let profile = ThemeProfile {
+            overrides: json!({"materials": {"content_surface": {"opacity": 0.50}}}),
+            ..ThemeProfile::default()
+        };
+        runtime.publish(profile).unwrap();
+        let invalidation = root.invalidation();
+        assert!(invalidation.contains(Invalidation::PAINT));
+        assert!(!invalidation.contains(Invalidation::LAYOUT));
+        let mut builder = DisplayListBuilder::new();
+        root.paint(&mut builder).unwrap();
+        let has_compensated_fill = builder.finish().primitives().iter().any(|primitive| {
+            matches!(
+                primitive,
+                Primitive::Shape(shape)
+                    if matches!(shape.style, nkdhr_render::ShapeStyle::Fill(color) if (color.components()[3] - 0.61).abs() < 0.0001)
+            )
+        });
+        assert!(has_compensated_fill);
+    }
+}

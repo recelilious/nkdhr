@@ -94,19 +94,24 @@ nkdhrctl config set <key> <value>
 nkdhrctl config watch <prefix>
 ```
 
-Keys are dotted paths (e.g. `theme.accent-color`, `canvas.pan-speed`, once
-those components register their settings — see the note below). The
+Keys are dotted paths (for example `theme.profile`, `canvas.grid_size` and
+`canvas.outputs.<group>...`). The
 backing files are plain TOML under `~/.config/nkdhr/`; you may edit them
 directly with a text editor — `nkdhrd` detects the change, re-validates it,
 and either applies it or rejects it (keeping the last-known-good value
 active) with a diagnostic in the journal.
 
-> As of CTRL-5, this store has no settings registered yet: no other
-> component has landed a real one to persist. `nkdhrctl config get/set`
-> against any key fails with "unknown config namespace" until a later
-> milestone (theming, canvas keybindings, ...) adds its own. The mechanism
-> itself — validation, rejection, hot-reload — is fully working; try it
-> with `nkdhrctl status`, which lists `Config` among the loaded modules.
+The currently registered namespaces are `canvas` and `theme`. UI-4 stores a
+complete portable profile in the single scalar leaf `theme.profile`: one
+versioned JSON document containing an immutable built-in or wallpaper base
+plus sparse explicit overrides. Keeping it one leaf makes import, validation,
+publication and `Changed` delivery one atomic transaction. Wallpaper profiles
+always carry a frozen resolved palette, so an export remains usable without
+the source image; a live regeneration replaces only the base and preserves
+the explicit override object. Use `nkdhrctl config get theme.profile` or
+`nkdhrctl config watch theme` to inspect it. Settings is the normal editor;
+direct `config set` is chiefly useful for importing an already validated JSON
+document.
 
 ## Troubleshooting
 
