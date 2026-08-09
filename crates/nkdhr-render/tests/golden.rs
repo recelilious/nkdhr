@@ -16,6 +16,7 @@ fn primitive_galleries_match_committed_goldens() {
         ("rounded-border", rounded_border()),
         ("shadow-transform", shadow_transform()),
         ("texture-clip", texture_clip()),
+        ("backdrop-blur", backdrop_blur()),
     ];
     let update = std::env::var_os("UPDATE_GOLDENS").is_some_and(|value| value != "0");
     for (name, (display_list, textures)) in cases {
@@ -156,6 +157,39 @@ fn texture_clip() -> (DisplayList, TextureStore) {
         })
         .unwrap();
     (builder.finish(), textures)
+}
+
+fn backdrop_blur() -> (DisplayList, TextureStore) {
+    let mut builder = DisplayListBuilder::new();
+    for x in 0..12 {
+        let color = if x % 3 == 0 {
+            Color::from_srgba8(91, 182, 255, 255)
+        } else if x % 3 == 1 {
+            Color::from_srgba8(238, 92, 120, 255)
+        } else {
+            Color::from_srgba8(245, 211, 105, 255)
+        };
+        builder
+            .rect(Rect::new(x as f32 * 8.0, 0.0, 8.0, 64.0), color)
+            .unwrap();
+    }
+    builder
+        .with_clip(Rect::new(7.0, 6.0, 82.0, 52.0), |builder| {
+            builder.with_transform(
+                Transform::translation(48.0, 32.0)
+                    .concat(Transform::rotation(-0.08))
+                    .concat(Transform::translation(-38.0, -23.0)),
+                |builder| {
+                    let panel = Rect::new(0.0, 0.0, 76.0, 46.0);
+                    let radii = CornerRadii::new(14.0, 5.0, 18.0, 2.0);
+                    builder.backdrop_blur(panel, radii, 7.0)?;
+                    builder.rounded_rect(panel, radii, Color::from_srgba8(36, 40, 59, 178))?;
+                    builder.border(panel, radii, 1.0, Color::from_srgba8(238, 242, 255, 128))
+                },
+            )
+        })
+        .unwrap();
+    (builder.finish(), TextureStore::new())
 }
 
 fn golden_path(name: &str) -> PathBuf {
