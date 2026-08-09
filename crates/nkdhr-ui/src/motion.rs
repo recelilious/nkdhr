@@ -196,6 +196,17 @@ impl FluidTuning {
             && self.bud_duration <= self.group_maximum
             && self.bud_stagger <= self.group_maximum
     }
+
+    fn scaled_speed(mut self, multiplier: f32) -> Self {
+        let duration_factor = 1.0 / f64::from(multiplier);
+        self.transfer_base = scale_duration(self.transfer_base, duration_factor);
+        self.transfer_per_unit_ms /= multiplier;
+        self.transfer_maximum = scale_duration(self.transfer_maximum, duration_factor);
+        self.bud_duration = scale_duration(self.bud_duration, duration_factor);
+        self.bud_stagger = scale_duration(self.bud_stagger, duration_factor);
+        self.group_maximum = scale_duration(self.group_maximum, duration_factor);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -334,6 +345,40 @@ impl MotionDurations {
         .into_iter()
         .all(|duration| duration <= maximum)
     }
+
+    fn scaled_speed(self, multiplier: f32) -> Self {
+        let factor = 1.0 / f64::from(multiplier);
+        Self {
+            reduced_transition: scale_duration(self.reduced_transition, factor),
+            hover_in: scale_duration(self.hover_in, factor),
+            hover_out: scale_duration(self.hover_out, factor),
+            press: scale_duration(self.press, factor),
+            release: scale_duration(self.release, factor),
+            focus: scale_duration(self.focus, factor),
+            toggle: scale_duration(self.toggle, factor),
+            slider_trail: scale_duration(self.slider_trail, factor),
+            list_transfer: scale_duration(self.list_transfer, factor),
+            text_input_focus: scale_duration(self.text_input_focus, factor),
+            validation: scale_duration(self.validation, factor),
+            scrollbar_show: scale_duration(self.scrollbar_show, factor),
+            scrollbar_hide: scale_duration(self.scrollbar_hide, factor),
+            overscroll: scale_duration(self.overscroll, factor),
+            tooltip_enter: scale_duration(self.tooltip_enter, factor),
+            tooltip_exit: scale_duration(self.tooltip_exit, factor),
+            popover_enter: scale_duration(self.popover_enter, factor),
+            popover_exit: scale_duration(self.popover_exit, factor),
+            panel_enter: scale_duration(self.panel_enter, factor),
+            panel_exit: scale_duration(self.panel_exit, factor),
+            drawer_enter: scale_duration(self.drawer_enter, factor),
+            drawer_exit: scale_duration(self.drawer_exit, factor),
+            workspace: scale_duration(self.workspace, factor),
+            wallpaper: scale_duration(self.wallpaper, factor),
+        }
+    }
+}
+
+fn scale_duration(duration: Duration, factor: f64) -> Duration {
+    Duration::from_secs_f64(duration.as_secs_f64() * factor)
 }
 
 /// Approved default profile. It is plain data so UI-7 can replace individual
@@ -401,6 +446,19 @@ impl MotionProfile {
             duration: self.durations.get(family),
             curve,
         }
+    }
+
+    /// Scale every duration-bearing motion token while preserving curves and
+    /// geometric amplitudes. `1.0` is the authored profile, `1.5` runs at 150%
+    /// speed, and `0.5` at 50% speed.
+    pub fn with_speed_multiplier(mut self, multiplier: f32) -> Result<Self, MotionError> {
+        if !multiplier.is_finite() || multiplier <= 0.0 {
+            return Err(MotionError::InvalidSpeedMultiplier);
+        }
+        self.durations = self.durations.scaled_speed(multiplier);
+        self.fluid = self.fluid.scaled_speed(multiplier);
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), MotionError> {
@@ -483,6 +541,7 @@ impl ScalarMotion {
 pub enum MotionError {
     InvalidCurve,
     InvalidFluidTuning,
+    InvalidSpeedMultiplier,
 }
 
 impl fmt::Display for MotionError {
@@ -492,6 +551,9 @@ impl fmt::Display for MotionError {
                 formatter.write_str("motion curve must be finite with x coordinates in 0..=1")
             }
             Self::InvalidFluidTuning => formatter.write_str("invalid fluid motion tuning"),
+            Self::InvalidSpeedMultiplier => {
+                formatter.write_str("motion speed multiplier must be finite and positive")
+            }
         }
     }
 }
@@ -553,5 +615,21 @@ mod tests {
             Duration::from_millis(650)
         );
         assert!(fluid.is_valid());
+    }
+
+    #[test]
+    fn speed_multiplier_scales_control_and_fluid_time_without_changing_curves() {
+        let authored = MotionProfile::default();
+        let faster = authored.clone().with_speed_multiplier(2.0).unwrap();
+        assert_eq!(
+            faster.spec(MotionFamily::DrawerEnter).duration,
+            Duration::from_millis(160)
+        );
+        assert_eq!(
+            faster.fluid.transfer_duration(0.0),
+            Duration::from_millis(140)
+        );
+        assert_eq!(faster.settle, authored.settle);
+        assert!(authored.with_speed_multiplier(0.0).is_err());
     }
 }

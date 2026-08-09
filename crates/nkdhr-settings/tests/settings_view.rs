@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
@@ -6,10 +6,11 @@ use nkdhr_render::{
     software::SoftwareRenderer,
 };
 use nkdhr_settings::{
-    AppearanceSettings, INSPECTOR_WIDTH, LAYOUT_INSET, SettingsAssets, SettingsLayoutMode,
+    AppearanceSetting, AppearanceSettings, INSPECTOR_WIDTH, LAYOUT_INSET, MotionPreference,
+    SettingsAssets, SettingsFeedbackKind, SettingsLayoutMode,
 };
 use nkdhr_ui::{
-    MaterialCapabilities, SemanticRole, Size, Theme, UiRoot,
+    ManualClock, MaterialCapabilities, SemanticRole, Size, Theme, UiRoot,
     text::{TextConfig, TextResources, TextSystem},
 };
 
@@ -60,6 +61,13 @@ fn settings_list(
     (root, builder.finish())
 }
 
+fn body_children(root: &UiRoot) -> [nkdhr_ui::WidgetId; 3] {
+    let shell = root.children(root.root_id()).unwrap()[0];
+    let body_padding = root.children(shell).unwrap()[1];
+    let body_layout = root.children(body_padding).unwrap()[0];
+    root.children(body_layout).unwrap().try_into().unwrap()
+}
+
 fn wallpaper(builder: &mut DisplayListBuilder, size: Size) {
     builder
         .rect(
@@ -95,6 +103,22 @@ fn wallpaper(builder: &mut DisplayListBuilder, size: Size) {
             Color::from_srgba8(187, 104, 158, 220),
         )
         .unwrap();
+}
+
+fn dump_transition_frame(root: &mut UiRoot, size: Size, name: &str) {
+    let Some(directory) = std::env::var_os("DUMP_SETTINGS_TRANSITION") else {
+        return;
+    };
+    fs::create_dir_all(&directory).unwrap();
+    let mut builder = DisplayListBuilder::new();
+    wallpaper(&mut builder, size);
+    root.paint(&mut builder).unwrap();
+    let mut renderer = SoftwareRenderer::new(size.width as u32, size.height as u32).unwrap();
+    renderer.clear(Color::from_srgba8(14, 19, 35, 255));
+    renderer
+        .render(&builder.finish(), root.texture_store().unwrap(), 1.0)
+        .unwrap();
+    fs::write(PathBuf::from(directory).join(name), renderer.ppm()).unwrap();
 }
 
 #[test]
@@ -188,6 +212,50 @@ fn blur_config_and_accessibility_capability_reach_the_outer_surface() {
 }
 
 #[test]
+fn backend_feedback_is_local_visible_and_generation_ordered() {
+    let model = AppearanceSettings::new();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let stale = model.begin_apply(AppearanceSetting::BackgroundBlur, "正在应用背景模糊");
+    let latest_blur = model.begin_apply(AppearanceSetting::BackgroundBlur, "正在重试背景模糊");
+    let wallpaper = model.begin_apply(AppearanceSetting::WallpaperAdaptive, "正在更新壁纸配色");
+    assert!(!model.complete_apply(stale, Ok("不应显示的旧结果".to_owned())));
+    let snapshot = model.snapshot();
+    assert_eq!(snapshot.feedback, SettingsFeedbackKind::Pending);
+    assert_eq!(
+        snapshot.feedback_setting,
+        Some(AppearanceSetting::WallpaperAdaptive)
+    );
+    assert_eq!(
+        snapshot.pending_settings,
+        vec![
+            AppearanceSetting::WallpaperAdaptive,
+            AppearanceSetting::BackgroundBlur,
+        ]
+    );
+
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    assert!(root.frame_requested(), "pending edge requests host frames");
+    let pending = root.semantic_tree().into_iter().find(|node| {
+        node.semantics.role == SemanticRole::Toggle
+            && node.semantics.label.as_deref() == Some("壁纸自适应")
+    });
+    assert_eq!(
+        pending.unwrap().semantics.value.as_deref(),
+        Some("on; pending; effective on")
+    );
+
+    assert!(model.complete_apply(latest_blur, Ok("背景模糊已生效".to_owned())));
+    assert_eq!(
+        model.snapshot().pending_settings,
+        vec![AppearanceSetting::WallpaperAdaptive]
+    );
+    assert!(model.complete_apply(wallpaper, Err("配色服务暂时不可用".to_owned())));
+    let snapshot = model.snapshot();
+    assert_eq!(snapshot.feedback, SettingsFeedbackKind::Error);
+    assert_eq!(snapshot.status, "配色服务暂时不可用");
+}
+
+#[test]
 fn accepted_wide_composition_matches_the_committed_software_golden() {
     let model = AppearanceSettings::new();
     model.set_professional_mode(true);
@@ -210,6 +278,147 @@ fn accepted_wide_composition_matches_the_committed_software_golden() {
         )
     });
     assert_eq!(actual, expected, "Settings composition golden changed");
+}
+
+#[test]
+fn professional_inspector_uses_interruptible_host_clocked_layout_motion() {
+    let model = AppearanceSettings::new();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let mut text_resources = fixture_text_resources();
+    let assets = SettingsAssets::load(text_resources.textures_mut()).unwrap();
+    let theme = Arc::new(Theme::default());
+    let clock = ManualClock::default();
+    let initial = model
+        .element(size, Arc::clone(&theme), &assets, capabilities())
+        .unwrap();
+    let mut root = UiRoot::with_clock_and_text(initial, clock.clone(), text_resources).unwrap();
+    root.layout(size).unwrap();
+    let [_, content, inspector] = body_children(&root);
+    assert_eq!(root.rect(content).unwrap().width, 720.0);
+    assert_eq!(root.rect(inspector).unwrap().x, 1_144.0);
+    dump_transition_frame(&mut root, size, "wide-closed.ppm");
+
+    model.set_professional_mode(true);
+    root.reconcile(
+        model
+            .element(size, Arc::clone(&theme), &assets, capabilities())
+            .unwrap(),
+    )
+    .unwrap();
+    root.layout(size).unwrap();
+    assert!(root.frame_requested());
+    assert_eq!(root.rect(content).unwrap().width, 720.0);
+    dump_transition_frame(&mut root, size, "wide-opening-000.ppm");
+
+    clock.advance(Duration::from_millis(140));
+    assert!(root.tick());
+    root.layout(size).unwrap();
+    let opening_content = root.rect(content).unwrap().width;
+    let opening_inspector_x = root.rect(inspector).unwrap().x;
+    assert!((592.0..720.0).contains(&opening_content));
+    assert!((856.0..1_144.0).contains(&opening_inspector_x));
+    dump_transition_frame(&mut root, size, "wide-opening-140.ppm");
+
+    model.set_professional_mode(false);
+    root.reconcile(
+        model
+            .element(size, Arc::clone(&theme), &assets, capabilities())
+            .unwrap(),
+    )
+    .unwrap();
+    root.layout(size).unwrap();
+    assert!((root.rect(content).unwrap().width - opening_content).abs() < 0.001);
+    assert!((root.rect(inspector).unwrap().x - opening_inspector_x).abs() < 0.001);
+    dump_transition_frame(&mut root, size, "wide-reversed-000.ppm");
+
+    clock.advance(Duration::from_millis(240));
+    assert!(root.tick());
+    root.layout(size).unwrap();
+    assert!((root.rect(content).unwrap().width - 720.0).abs() < 0.001);
+    assert!((root.rect(inspector).unwrap().x - 1_144.0).abs() < 0.001);
+    dump_transition_frame(&mut root, size, "wide-closed-final.ppm");
+}
+
+#[test]
+fn compact_inspector_is_a_clipped_pointer_blocking_drawer_during_entry() {
+    let model = AppearanceSettings::new();
+    let size = Size::new(760.0, 760.0);
+    let mut text_resources = fixture_text_resources();
+    let assets = SettingsAssets::load(text_resources.textures_mut()).unwrap();
+    let theme = Arc::new(Theme::default());
+    let clock = ManualClock::default();
+    let initial = model
+        .element(size, Arc::clone(&theme), &assets, capabilities())
+        .unwrap();
+    let mut root = UiRoot::with_clock_and_text(initial, clock.clone(), text_resources).unwrap();
+    root.layout(size).unwrap();
+    let [_, content, barrier] = body_children(&root);
+    let content_width = root.rect(content).unwrap().width;
+
+    model.set_professional_mode(true);
+    root.reconcile(
+        model
+            .element(size, Arc::clone(&theme), &assets, capabilities())
+            .unwrap(),
+    )
+    .unwrap();
+    root.layout(size).unwrap();
+    let [_, _, open_barrier] = body_children(&root);
+    let mut builder = DisplayListBuilder::new();
+    root.paint(&mut builder).unwrap();
+    assert_eq!(barrier, open_barrier);
+    assert_ne!(root.hit_test(Point::new(740.0, 650.0)), Some(barrier));
+
+    clock.advance(Duration::from_millis(160));
+    assert!(root.tick());
+    root.layout(size).unwrap();
+    let drawer = root.rect(barrier).unwrap();
+    assert!((456.0..744.0).contains(&drawer.x));
+    assert_eq!(root.rect(content).unwrap().width, content_width);
+    let mut builder = DisplayListBuilder::new();
+    root.paint(&mut builder).unwrap();
+    assert_eq!(root.hit_test(Point::new(740.0, 650.0)), Some(barrier));
+
+    model.set_professional_mode(false);
+    root.reconcile(model.element(size, theme, &assets, capabilities()).unwrap())
+        .unwrap();
+    root.layout(size).unwrap();
+    assert_eq!(body_children(&root)[2], barrier);
+    let mut builder = DisplayListBuilder::new();
+    root.paint(&mut builder).unwrap();
+    assert_eq!(root.hit_test(Point::new(740.0, 650.0)), Some(barrier));
+
+    clock.advance(Duration::from_millis(240));
+    assert!(root.tick());
+    root.layout(size).unwrap();
+    let mut builder = DisplayListBuilder::new();
+    root.paint(&mut builder).unwrap();
+    assert_ne!(root.hit_test(Point::new(740.0, 650.0)), Some(barrier));
+}
+
+#[test]
+fn reduced_motion_opens_the_inspector_without_spatial_transition() {
+    let model = AppearanceSettings::new();
+    model.set_motion_preference(MotionPreference::Reduced);
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let mut text_resources = fixture_text_resources();
+    let assets = SettingsAssets::load(text_resources.textures_mut()).unwrap();
+    let theme = Arc::new(Theme::default());
+    let clock = ManualClock::default();
+    let initial = model
+        .element(size, Arc::clone(&theme), &assets, capabilities())
+        .unwrap();
+    let mut root = UiRoot::with_clock_and_text(initial, clock, text_resources).unwrap();
+    root.layout(size).unwrap();
+    let [_, content, inspector] = body_children(&root);
+
+    model.set_professional_mode(true);
+    root.reconcile(model.element(size, theme, &assets, capabilities()).unwrap())
+        .unwrap();
+    root.layout(size).unwrap();
+    assert_eq!(root.rect(content).unwrap().width, 592.0);
+    assert_eq!(root.rect(inspector).unwrap().x, 856.0);
+    assert!(!root.frame_requested());
 }
 
 fn golden_path() -> PathBuf {

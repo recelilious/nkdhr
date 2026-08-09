@@ -18,8 +18,8 @@ pub use layout::{
     Padding, Size, Stack,
 };
 pub use motion::{
-    CubicBezier, FluidTuning, FluidVariation, MotionDurations, MotionFamily, MotionMode,
-    MotionProfile, MotionSpec, ScalarMotion,
+    CubicBezier, FluidTuning, FluidVariation, MotionDurations, MotionError, MotionFamily,
+    MotionMode, MotionProfile, MotionSpec, ScalarMotion,
 };
 pub use reactive::Reactive;
 pub(crate) use reactive::RootReactivity;

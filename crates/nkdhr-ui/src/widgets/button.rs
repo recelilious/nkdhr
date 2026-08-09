@@ -224,6 +224,33 @@ impl Widget for Button {
                 destructive: matches!(self.variant, ButtonVariant::Destructive),
             },
         )?;
+        if self.pending {
+            let edge_width = (rect.width * 0.24).clamp(10.0, 32.0).min(rect.width);
+            let travel = (rect.width - edge_width).max(0.0);
+            let progress = if spatial {
+                let phase = (now.as_secs_f64() % 0.9) / 0.9;
+                if phase <= 0.5 {
+                    (phase * 2.0) as f32
+                } else {
+                    ((1.0 - phase) * 2.0) as f32
+                }
+            } else {
+                0.5
+            };
+            ctx.builder().rounded_rect(
+                Rect::new(
+                    rect.x + travel * progress,
+                    rect.bottom() - 2.0,
+                    edge_width,
+                    2.0,
+                ),
+                CornerRadii::all(1.0),
+                crate::theme::with_alpha(self.theme.palette.accent_secondary, 0.88),
+            )?;
+            if spatial {
+                ctx.request_animation_frame();
+            }
+        }
         if draw_internal_label && let Some(layout) = label_layout {
             let color = if !self.enabled {
                 self.theme.palette.text_muted
@@ -248,6 +275,33 @@ impl Widget for Button {
     fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
         let now = ctx.now();
         match event {
+            UiEvent::PointerDown {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.pending => {
+                ctx.set_handled();
+            }
+            UiEvent::PointerUp {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.pending => {
+                let state = ctx.state_mut::<ButtonState>()?;
+                state.pointer_pressed = false;
+                state.armed = false;
+                state.pressed.settle(0.0);
+                ctx.release_pointer();
+                ctx.set_handled();
+            }
+            UiEvent::KeyDown {
+                key: Key::Space | Key::Enter,
+                ..
+            }
+            | UiEvent::KeyUp {
+                key: Key::Space | Key::Enter,
+                ..
+            } if self.enabled && self.pending => {
+                ctx.set_handled();
+            }
             UiEvent::HoverChanged(hovered) => {
                 let family = if *hovered {
                     MotionFamily::HoverIn

@@ -32,7 +32,7 @@ paragraph layout and bounded mask/color glyph atlases. Its 5,000-line,
 UI-3's style-neutral framework core is now implemented: retained generational
 identity, keyed reconciliation, finite constraint layout, queued reactive
 state, shared paint/hit order, focus scopes, pointer capture/hover, semantics
-and host-clocked animation. Its owner-reviewed product layer is now entering
+and host-clocked animation. Its owner-reviewed product layer is now in
 production translation: typed density/spacing/radius/typography, glass-material
 and motion profiles plus the first public `GlassSurface`, `Button`, `Toggle`,
 `Slider`, `List`, `Scroll`, `Text` and `TextInput` implementations are present.
@@ -61,9 +61,18 @@ test-only gallery. It implements the exact four responsive frames, independent
 navigation/content scrolling, grouped setting surfaces, professional inspector
 drawer, live reactive controls and undo/status feedback. Only the outer window
 requests backdrop blur; a deterministic full-CJK software golden and all four
-width oracles guard the result. The standalone/in-compositor window hosts still
-belong to later milestones. UI-3 remains open for owner review of the real
-static-glass frame, compact navigation icons and transition output.
+width oracles guard the result. The inspector now uses interruptible host-
+clocked panel/drawer entry and exit while preserving its input barrier through
+the complete narrow-screen transition; Reduced/Off removes spatial movement.
+Button, Toggle and Slider expose stable visible pending edges, and the latter
+two preserve requested versus effective values. Settings provides per-setting
+generation-ordered begin/complete feedback tokens, allowing independent
+concurrent pending states while stale same-setting replies cannot replace newer
+state; its global speed control scales every control, panel and fluid
+duration without changing the selected curves. The standalone/in-compositor
+window hosts still belong to later milestones. UI-3 remains open for owner
+review of the real static-glass frame, compact navigation icons and transition
+output.
 
 ## Documentation
 

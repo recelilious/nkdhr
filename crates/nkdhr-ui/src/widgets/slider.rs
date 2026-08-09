@@ -22,6 +22,7 @@ pub struct Slider {
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
     enabled: bool,
+    pending: bool,
     on_change: Option<Rc<dyn Fn(f32)>>,
 }
 
@@ -47,6 +48,7 @@ impl Slider {
             theme,
             capabilities: MaterialCapabilities::default(),
             enabled: true,
+            pending: false,
             on_change: None,
         })
     }
@@ -77,6 +79,11 @@ impl Slider {
         self
     }
 
+    pub fn pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
+        self
+    }
+
     pub fn capabilities(mut self, capabilities: MaterialCapabilities) -> Self {
         self.capabilities = capabilities;
         self
@@ -100,7 +107,7 @@ impl Slider {
     }
 
     fn apply(&self, value: f32) {
-        if !self.enabled {
+        if !self.interactive() {
             return;
         }
         let value = self.quantize(value);
@@ -109,6 +116,17 @@ impl Slider {
         {
             callback(value);
         }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending
+            || self.effective_value.as_ref().is_some_and(|effective| {
+                self.quantize(effective.get()) != self.quantize(self.value.get())
+            })
+    }
+
+    fn interactive(&self) -> bool {
+        self.enabled && !self.is_pending()
     }
 
     fn apply_pointer(&self, rect: Rect, position_x: f32) {
@@ -176,6 +194,7 @@ impl Widget for Slider {
         });
         let progress = self.normalize(value);
         let effective_progress = self.normalize(effective);
+        let pending = self.pending || (effective_progress - progress).abs() > f32::EPSILON;
         let now = ctx.now();
         let (trail, hovered, focused, dragging, active) = {
             let state = ctx.state_mut::<SliderState>()?;
@@ -256,6 +275,29 @@ impl Widget for Slider {
             )?;
         }
 
+        if pending {
+            let width = (track.width * 0.12).clamp(8.0, 18.0).min(track.width);
+            let travel = (track.width - width).max(0.0);
+            let progress = if self.theme.motion.spatial_motion_enabled() {
+                let phase = (now.as_secs_f64() % 0.9) / 0.9;
+                if phase <= 0.5 {
+                    (phase * 2.0) as f32
+                } else {
+                    ((1.0 - phase) * 2.0) as f32
+                }
+            } else {
+                0.5
+            };
+            ctx.builder().rounded_rect(
+                Rect::new(track.x + travel * progress, track.y - 1.0, width, 2.0),
+                CornerRadii::all(1.0),
+                with_alpha(self.theme.palette.accent_secondary, 0.92),
+            )?;
+            if self.theme.motion.spatial_motion_enabled() {
+                ctx.request_animation_frame();
+            }
+        }
+
         let node_x = track.x + track.width * progress;
         let node = Rect::new(
             node_x - node_size * 0.5,
@@ -285,6 +327,29 @@ impl Widget for Slider {
     fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
         let now = ctx.now();
         match event {
+            UiEvent::PointerDown {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.is_pending() => {
+                ctx.set_handled();
+            }
+            UiEvent::PointerMoved { .. } if self.enabled && self.is_pending() => {
+                if ctx.state_mut::<SliderState>()?.dragging {
+                    ctx.set_handled();
+                }
+            }
+            UiEvent::PointerUp {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.is_pending() => {
+                ctx.state_mut::<SliderState>()?.dragging = false;
+                ctx.release_pointer();
+                ctx.set_handled();
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
+            UiEvent::KeyDown { .. } if self.enabled && self.is_pending() => {
+                ctx.set_handled();
+            }
             UiEvent::HoverChanged(hovered) => {
                 ctx.state_mut::<SliderState>()?.hovered.retarget(
                     now,
@@ -306,7 +371,7 @@ impl Widget for Slider {
                 position,
                 button: PointerButton::Primary,
                 ..
-            } if self.enabled => {
+            } if self.interactive() => {
                 ctx.state_mut::<SliderState>()?.dragging = true;
                 self.apply_pointer(ctx.rect(), position.x);
                 ctx.request_focus();
@@ -314,7 +379,7 @@ impl Widget for Slider {
                 ctx.set_handled();
                 ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
             }
-            UiEvent::PointerMoved { position } if self.enabled => {
+            UiEvent::PointerMoved { position } if self.interactive() => {
                 if ctx.state_mut::<SliderState>()?.dragging {
                     self.apply_pointer(ctx.rect(), position.x);
                     ctx.set_handled();
@@ -325,7 +390,7 @@ impl Widget for Slider {
                 position,
                 button: PointerButton::Primary,
                 ..
-            } if self.enabled => {
+            } if self.interactive() => {
                 let dragging = ctx.state_mut::<SliderState>()?.dragging;
                 if dragging {
                     self.apply_pointer(ctx.rect(), position.x);
@@ -340,7 +405,7 @@ impl Widget for Slider {
                 ctx.release_pointer();
                 ctx.invalidate(Invalidation::PAINT);
             }
-            UiEvent::KeyDown { key, modifiers, .. } if self.enabled => {
+            UiEvent::KeyDown { key, modifiers, .. } if self.interactive() => {
                 let current = self.value.get();
                 let delta = self.keyboard_delta(*modifiers);
                 let next = match key {
@@ -365,11 +430,19 @@ impl Widget for Slider {
 
     fn semantics(&self, ctx: &mut SemanticsCtx<'_>) -> Semantics {
         let value = self.quantize(ctx.watch(&self.value, Invalidation::SEMANTICS));
+        let effective = self.effective_value.as_ref().map_or(value, |effective| {
+            self.quantize(ctx.watch(effective, Invalidation::SEMANTICS))
+        });
+        let pending = self.pending || (effective - value).abs() > f32::EPSILON;
         Semantics {
             role: SemanticRole::Slider,
             label: Some(self.label.clone()),
-            value: Some(format!("{value}")),
-            enabled: self.enabled,
+            value: Some(if pending {
+                format!("{value}; pending; effective {effective}")
+            } else {
+                format!("{value}")
+            }),
+            enabled: self.enabled && !pending,
             focusable: self.enabled,
         }
     }

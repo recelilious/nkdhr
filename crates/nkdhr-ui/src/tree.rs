@@ -1748,6 +1748,29 @@ impl PaintCtx<'_> {
         self.paint_child_translated(index, 0.0, 0.0)
     }
 
+    /// Paint one overlay child through an additional target-space clip while
+    /// leaving sibling material and shadows untouched. Drawer/popup containers
+    /// use this to reveal only the visible portion of a child entering from
+    /// outside their arranged body.
+    pub fn paint_child_clipped(&mut self, index: usize, clip: Rect) -> UiResult<()> {
+        validate_rect(clip)?;
+        let child = *self
+            .children
+            .get(index)
+            .ok_or(UiError::UnexpectedChildCount {
+                expected_maximum: self.children.len(),
+                actual: index + 1,
+            })?;
+        let child_clip = self.child_clip.intersect(clip);
+        let result = self.builder.with_clip(clip, |builder| {
+            Ok(self.root.paint_node(child, builder, child_clip))
+        })?;
+        if result.is_ok() {
+            self.painted_children[index] = true;
+        }
+        result
+    }
+
     /// Paint one child with a visual-only translation. Layout and hit geometry
     /// stay rigid; Scroll uses this for bounded elastic feedback.
     pub fn paint_child_translated(

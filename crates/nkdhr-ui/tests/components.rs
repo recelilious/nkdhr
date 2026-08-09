@@ -217,6 +217,125 @@ fn standard_toggle_emits_temporary_fluid_bridge_only_during_transfer() {
 }
 
 #[test]
+fn pending_controls_keep_requested_geometry_visible_and_block_duplicate_input() {
+    let clock = ManualClock::default();
+    let activations = Rc::new(Cell::new(0));
+    let callback_count = Rc::clone(&activations);
+    let mut button = UiRoot::with_clock_and_text(
+        Element::new(
+            Button::new("Apply", Arc::new(Theme::default()))
+                .pending(true)
+                .on_activate(move || callback_count.set(callback_count.get() + 1)),
+        ),
+        clock.clone(),
+        fixture_text_resources(),
+    )
+    .unwrap();
+    prepare(&mut button, Size::new(120.0, 44.0));
+    assert!(button.frame_requested());
+    let blocked = button
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(60.0, 22.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(blocked.handled);
+    let blocked = button
+        .dispatch(&UiEvent::PointerUp {
+            position: Point::new(60.0, 22.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(blocked.handled);
+    assert_eq!(activations.get(), 0);
+    assert_eq!(
+        button.semantic_tree()[0].semantics.value.as_deref(),
+        Some("pending")
+    );
+
+    let requested_toggle = Reactive::new(true);
+    let effective_toggle = Reactive::new(false);
+    let mut toggle = UiRoot::with_clock(
+        Element::new(
+            Toggle::new("Blur", requested_toggle.clone(), Arc::new(Theme::default()))
+                .effective_value(effective_toggle),
+        ),
+        clock.clone(),
+    )
+    .unwrap();
+    prepare(&mut toggle, Size::new(44.0, 44.0));
+    assert!(toggle.frame_requested());
+    primary_click(&mut toggle, Point::new(22.0, 22.0), Modifiers::default());
+    assert!(
+        requested_toggle.get(),
+        "pending Toggle ignores duplicate input"
+    );
+    assert_eq!(
+        toggle.semantic_tree()[0].semantics.value.as_deref(),
+        Some("on; pending; effective off")
+    );
+
+    let requested_slider = Reactive::new(70.0);
+    let effective_slider = Reactive::new(60.0);
+    let slider = Slider::new(
+        "Opacity",
+        requested_slider.clone(),
+        0.0,
+        100.0,
+        Arc::new(Theme::default()),
+    )
+    .unwrap()
+    .effective_value(effective_slider);
+    let mut slider = UiRoot::with_clock(Element::new(slider), clock).unwrap();
+    prepare(&mut slider, Size::new(200.0, 44.0));
+    assert!(slider.frame_requested());
+    primary_click(&mut slider, Point::new(180.0, 22.0), Modifiers::default());
+    assert_eq!(requested_slider.get(), 70.0);
+    assert_eq!(
+        slider.semantic_tree()[0].semantics.value.as_deref(),
+        Some("70; pending; effective 60")
+    );
+
+    let requested_slider = Reactive::new(70.0);
+    let effective_slider = Reactive::new(70.0);
+    let slider = Slider::new(
+        "Live opacity",
+        requested_slider.clone(),
+        0.0,
+        100.0,
+        Arc::new(Theme::default()),
+    )
+    .unwrap()
+    .effective_value(effective_slider);
+    let mut slider = UiRoot::new(Element::new(slider)).unwrap();
+    prepare(&mut slider, Size::new(200.0, 44.0));
+    slider
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(180.0, 22.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(slider.pointer_capture().is_some());
+    assert_ne!(requested_slider.get(), 70.0);
+    let release = slider
+        .dispatch(&UiEvent::PointerUp {
+            position: Point::new(180.0, 22.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(release.handled);
+    assert!(slider.pointer_capture().is_none());
+}
+
+#[test]
 fn slider_keeps_exact_value_node_and_supports_normal_coarse_and_fine_steps() {
     let value = Reactive::new(0.0);
     let slider = Slider::new(

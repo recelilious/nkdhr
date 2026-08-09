@@ -14,6 +14,7 @@ use super::surface::{SurfaceState, paint_surface};
 pub struct Toggle {
     label: String,
     value: Reactive<bool>,
+    effective_value: Option<Reactive<bool>>,
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
     enabled: bool,
@@ -26,6 +27,7 @@ impl Toggle {
         Self {
             label: label.into(),
             value,
+            effective_value: None,
             theme,
             capabilities: MaterialCapabilities::default(),
             enabled: true,
@@ -44,6 +46,14 @@ impl Toggle {
         self
     }
 
+    /// Supply the last backend-confirmed value. A difference from the
+    /// requested `value` is presented as pending without moving the requested
+    /// node away from its exact destination.
+    pub fn effective_value(mut self, value: Reactive<bool>) -> Self {
+        self.effective_value = Some(value);
+        self
+    }
+
     pub fn capabilities(mut self, capabilities: MaterialCapabilities) -> Self {
         self.capabilities = capabilities;
         self
@@ -55,7 +65,15 @@ impl Toggle {
     }
 
     fn interactive(&self) -> bool {
-        self.enabled && !self.pending
+        self.enabled && !self.is_pending()
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending
+            || self
+                .effective_value
+                .as_ref()
+                .is_some_and(|effective| effective.get() != self.value.get())
     }
 
     fn toggle(&self) {
@@ -116,6 +134,10 @@ impl Widget for Toggle {
 
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
         let value = ctx.watch(&self.value, Invalidation::PAINT | Invalidation::SEMANTICS);
+        let effective = self.effective_value.as_ref().map_or(value, |effective| {
+            ctx.watch(effective, Invalidation::PAINT | Invalidation::SEMANTICS)
+        });
+        let pending = self.pending || effective != value;
         let now = ctx.now();
         let spatial = self.theme.motion.spatial_motion_enabled();
         let (position, hovered, pressed, focused, active) = {
@@ -220,12 +242,61 @@ impl Widget for Toggle {
             1.0,
             with_alpha(self.theme.palette.edge, 0.34),
         )?;
+        if pending {
+            let width = (track.width * 0.22).clamp(5.0, 9.0).min(track.width);
+            let travel = (track.width - width).max(0.0);
+            let progress = if spatial {
+                let phase = (now.as_secs_f64() % 0.8) / 0.8;
+                if phase <= 0.5 {
+                    (phase * 2.0) as f32
+                } else {
+                    ((1.0 - phase) * 2.0) as f32
+                }
+            } else {
+                0.5
+            };
+            ctx.builder().rounded_rect(
+                Rect::new(track.x + travel * progress, track.y - 1.0, width, 2.0),
+                CornerRadii::all(1.0),
+                with_alpha(self.theme.palette.accent_secondary, 0.92),
+            )?;
+            if spatial {
+                ctx.request_animation_frame();
+            }
+        }
         Ok(())
     }
 
     fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
         let now = ctx.now();
         match event {
+            UiEvent::PointerDown {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.is_pending() => {
+                ctx.set_handled();
+            }
+            UiEvent::PointerUp {
+                button: PointerButton::Primary,
+                ..
+            } if self.enabled && self.is_pending() => {
+                let state = ctx.state_mut::<ToggleState>()?;
+                state.pointer_pressed = false;
+                state.armed = false;
+                state.pressed.settle(0.0);
+                ctx.release_pointer();
+                ctx.set_handled();
+            }
+            UiEvent::KeyDown {
+                key: Key::Space | Key::Enter,
+                ..
+            }
+            | UiEvent::KeyUp {
+                key: Key::Space | Key::Enter,
+                ..
+            } if self.enabled && self.is_pending() => {
+                ctx.set_handled();
+            }
             UiEvent::HoverChanged(hovered) => {
                 let state = ctx.state_mut::<ToggleState>()?;
                 state.hovered.retarget(
@@ -360,11 +431,28 @@ impl Widget for Toggle {
 
     fn semantics(&self, ctx: &mut SemanticsCtx<'_>) -> Semantics {
         let value = ctx.watch(&self.value, Invalidation::SEMANTICS);
+        let effective = self
+            .effective_value
+            .as_ref()
+            .map(|effective| ctx.watch(effective, Invalidation::SEMANTICS));
+        let pending = self.pending || effective.is_some_and(|effective| effective != value);
+        let requested = if value { "on" } else { "off" };
         Semantics {
             role: SemanticRole::Toggle,
             label: Some(self.label.clone()),
-            value: Some(if value { "on" } else { "off" }.to_owned()),
-            enabled: self.enabled && !self.pending,
+            value: Some(if pending {
+                format!(
+                    "{requested}; pending; effective {}",
+                    if effective.unwrap_or(value) {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                )
+            } else {
+                requested.to_owned()
+            }),
+            enabled: self.enabled && !pending,
             focusable: self.enabled,
         }
     }

@@ -4,15 +4,24 @@
 //! from this crate-level view model. Both hosts reconcile the same element
 //! tree and provide their material capabilities at the frame boundary.
 
-use std::{cell::RefCell, error::Error, fmt, rc::Rc, sync::Arc};
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    rc::Rc,
+    sync::Arc,
+};
 
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
 use nkdhr_ui::{
-    Align, Alignment, ArrangeCtx, Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment,
-    Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry, ListItem,
-    MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, Padding, PaintCtx, Reactive,
-    Scroll, ScrollOffset, SemanticRole, Semantics, SemanticsCtx, Size, Slider, Text, TextInput,
-    TextInputStatus, TextRole, Theme, Toggle, UiError, UpdateCtx, Widget,
+    Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, Constraints,
+    CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
+    ListItem, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, MotionFamily,
+    Padding, PaintCtx, Reactive, ScalarMotion, Scroll, ScrollOffset, SemanticRole, Semantics,
+    SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme, Toggle, UiError,
+    UpdateCtx, Widget,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -84,7 +93,7 @@ impl SettingsLayoutSpec {
             SettingsLayoutMode::CompactNavigation => COMPACT_NAVIGATION_WIDTH.min(inner),
             SettingsLayoutMode::SingleColumn => 0.0,
         };
-        let inspector_is_drawer = professional_mode && mode != SettingsLayoutMode::ThreeColumn;
+        let inspector_is_drawer = mode != SettingsLayoutMode::ThreeColumn;
         let persistent_inspector = if professional_mode && mode == SettingsLayoutMode::ThreeColumn {
             INSPECTOR_WIDTH.min(inner)
         } else {
@@ -294,6 +303,37 @@ pub enum ComponentDensity {
     Relaxed,
 }
 
+/// Stable identity shared by local controls and a future configuration host.
+/// UI-4 will map these presentation identities onto atomic config mutations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AppearanceSetting {
+    Scheme,
+    WallpaperAdaptive,
+    BackgroundBlur,
+    ContentOpacity,
+    OpacityOverride,
+    Motion,
+    MotionSpeed,
+    FontFamily,
+    Density,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsFeedbackKind {
+    Informational,
+    Pending,
+    Success,
+    Error,
+}
+
+/// Generation-ordered handle for one downstream apply request. Completing an
+/// older token after a newer request is deliberately ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsApplyToken {
+    generation: u64,
+    setting: AppearanceSetting,
+}
+
 impl ComponentDensity {
     fn label(self) -> &'static str {
         match self {
@@ -319,6 +359,9 @@ pub struct AppearanceSnapshot {
     pub font_family: String,
     pub density: ComponentDensity,
     pub has_local_opacity_override: bool,
+    pub feedback: SettingsFeedbackKind,
+    pub feedback_setting: Option<AppearanceSetting>,
+    pub pending_settings: Vec<AppearanceSetting>,
     pub status: String,
 }
 
@@ -351,11 +394,15 @@ struct AppearanceState {
     density: Reactive<ComponentDensity>,
     opacity_override: Reactive<bool>,
     status: Reactive<String>,
+    feedback: Reactive<SettingsFeedbackKind>,
+    feedback_setting: Reactive<Option<AppearanceSetting>>,
     content_scroll: Reactive<ScrollOffset>,
     navigation_scroll: Reactive<ScrollOffset>,
     navigation_selection: Reactive<Option<u64>>,
     mobile_navigation_open: Reactive<bool>,
     composition_revision: Reactive<u64>,
+    next_apply_generation: Cell<u64>,
+    pending_apply: RefCell<BTreeMap<AppearanceSetting, SettingsApplyToken>>,
     undo: RefCell<Option<UndoAction>>,
     opacity_tracker: RefCell<f32>,
     speed_tracker: RefCell<f32>,
@@ -393,11 +440,15 @@ impl AppearanceSettings {
                 density: Reactive::new(ComponentDensity::Standard),
                 opacity_override: Reactive::new(false),
                 status: Reactive::new("所有修改都会实时预览".to_owned()),
+                feedback: Reactive::new(SettingsFeedbackKind::Success),
+                feedback_setting: Reactive::new(None),
                 content_scroll: Reactive::new(ScrollOffset::ZERO),
                 navigation_scroll: Reactive::new(ScrollOffset::ZERO),
                 navigation_selection: Reactive::new(Some(SettingsPage::Appearance.identity())),
                 mobile_navigation_open: Reactive::new(false),
                 composition_revision: Reactive::new(1),
+                next_apply_generation: Cell::new(1),
+                pending_apply: RefCell::new(BTreeMap::new()),
                 undo: RefCell::new(None),
                 opacity_tracker: RefCell::new(86.0),
                 speed_tracker: RefCell::new(100.0),
@@ -432,6 +483,12 @@ impl AppearanceSettings {
         }
     }
 
+    pub fn set_motion_preference(&self, preference: MotionPreference) {
+        if self.state.motion.set_if_changed(preference) {
+            self.request_reconcile();
+        }
+    }
+
     pub fn snapshot(&self) -> AppearanceSnapshot {
         AppearanceSnapshot {
             professional_mode: self.state.professional_mode.get(),
@@ -447,8 +504,81 @@ impl AppearanceSettings {
             font_family: self.state.font_family.get(),
             density: self.state.density.get(),
             has_local_opacity_override: self.state.opacity_override.get(),
+            feedback: self.state.feedback.get(),
+            feedback_setting: self.state.feedback_setting.get(),
+            pending_settings: self.state.pending_apply.borrow().keys().copied().collect(),
             status: self.state.status.get(),
         }
+    }
+
+    /// Mark one live preview as awaiting confirmation from its downstream
+    /// service. This is intentionally host-independent: a Settings host owns
+    /// transport, while this model owns generation ordering and visible state.
+    pub fn begin_apply(
+        &self,
+        setting: AppearanceSetting,
+        status: impl Into<String>,
+    ) -> SettingsApplyToken {
+        let generation = self.state.next_apply_generation.get();
+        self.state
+            .next_apply_generation
+            .set(generation.wrapping_add(1).max(1));
+        let token = SettingsApplyToken {
+            generation,
+            setting,
+        };
+        self.state.pending_apply.borrow_mut().insert(setting, token);
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.state.feedback_setting.set(Some(setting));
+        self.state.status.set(status.into());
+        if setting == AppearanceSetting::FontFamily {
+            self.state.font_status.set(TextInputStatus::Pending);
+        }
+        self.request_reconcile();
+        token
+    }
+
+    /// Resolve only the latest request. `Ok` and `Err` carry the durable
+    /// product-facing message supplied by the downstream service.
+    pub fn complete_apply(
+        &self,
+        token: SettingsApplyToken,
+        result: Result<String, String>,
+    ) -> bool {
+        let is_latest = self
+            .state
+            .pending_apply
+            .borrow()
+            .get(&token.setting)
+            .is_some_and(|pending| *pending == token);
+        if !is_latest {
+            return false;
+        }
+        self.state.pending_apply.borrow_mut().remove(&token.setting);
+        match result {
+            Ok(status) => {
+                self.state.feedback.set(SettingsFeedbackKind::Success);
+                self.state.status.set(status);
+                if token.setting == AppearanceSetting::FontFamily {
+                    self.state.font_status.set(TextInputStatus::Valid);
+                }
+            }
+            Err(status) => {
+                self.state.feedback.set(SettingsFeedbackKind::Error);
+                self.state.status.set(status.clone());
+                if token.setting == AppearanceSetting::FontFamily {
+                    self.state
+                        .font_status
+                        .set(TextInputStatus::BackendError(status));
+                }
+            }
+        }
+        self.request_reconcile();
+        true
+    }
+
+    fn is_pending(&self, setting: AppearanceSetting) -> bool {
+        self.state.pending_apply.borrow().contains_key(&setting)
     }
 
     pub fn element(
@@ -475,6 +605,9 @@ impl AppearanceSettings {
             MotionPreference::Expressive => nkdhr_ui::MotionMode::Expressive,
             MotionPreference::Off => nkdhr_ui::MotionMode::Off,
         };
+        resolved_theme.motion = resolved_theme
+            .motion
+            .with_speed_multiplier(self.state.motion_speed.get() / 100.0)?;
         let font_family = self.state.font_family.get();
         if !font_family.trim().is_empty() {
             resolved_theme
@@ -504,6 +637,7 @@ impl AppearanceSettings {
                 spec,
                 professional_mode,
                 mobile_navigation_open: self.state.mobile_navigation_open.get(),
+                theme: Arc::clone(&theme),
             })
             .child(navigation)
             .child(content)
@@ -966,6 +1100,7 @@ impl AppearanceSettings {
                         self.state.wallpaper_adaptive.clone(),
                         Arc::clone(&theme),
                     )
+                    .pending(self.is_pending(AppearanceSetting::WallpaperAdaptive))
                     .capabilities(capabilities)
                     .on_change({
                         let model = self.clone();
@@ -1016,6 +1151,7 @@ impl AppearanceSettings {
             )?
             .step(1.0)?
             .ideal_width(150.0)?
+            .pending(self.is_pending(AppearanceSetting::ContentOpacity))
             .capabilities(capabilities)
             .on_change({
                 let model = self.clone();
@@ -1047,6 +1183,7 @@ impl AppearanceSettings {
                         self.state.background_blur.clone(),
                         Arc::clone(&theme),
                     )
+                    .pending(self.is_pending(AppearanceSetting::BackgroundBlur))
                     .capabilities(capabilities)
                     .on_change({
                         let model = self.clone();
@@ -1088,6 +1225,7 @@ impl AppearanceSettings {
                         },
                         Arc::clone(&theme),
                     )
+                    .pending(self.is_pending(AppearanceSetting::OpacityOverride))
                     .capabilities(capabilities)
                     .on_activate(move || {
                         let previous = model.state.opacity_override.get();
@@ -1140,6 +1278,7 @@ impl AppearanceSettings {
             )?
             .step(1.0)?
             .ideal_width(150.0)?
+            .pending(self.is_pending(AppearanceSetting::MotionSpeed))
             .capabilities(capabilities)
             .on_change({
                 let model = self.clone();
@@ -1165,6 +1304,7 @@ impl AppearanceSettings {
                 "无障碍减少动画始终拥有最高优先级。",
                 Element::new(
                     Button::new(motion.label(), Arc::clone(&theme))
+                        .pending(self.is_pending(AppearanceSetting::Motion))
                         .capabilities(capabilities)
                         .on_activate(move || {
                             let previous = model.state.motion.get();
@@ -1264,6 +1404,7 @@ impl AppearanceSettings {
                         } else {
                             ButtonVariant::Quiet
                         })
+                        .pending(self.is_pending(AppearanceSetting::Density))
                         .capabilities(capabilities)
                         .on_activate(move || {
                             let previous = model.state.density.get();
@@ -1337,6 +1478,7 @@ impl AppearanceSettings {
                     } else {
                         ButtonVariant::Quiet
                     })
+                    .pending(self.is_pending(AppearanceSetting::Scheme))
                     .capabilities(capabilities)
                     .on_activate(move || {
                         let previous = model.state.scheme.get();
@@ -1487,7 +1629,15 @@ impl AppearanceSettings {
     }
 
     fn status_bar(&self, theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
-        let has_undo = self.state.undo.borrow().is_some();
+        let feedback = self.state.feedback.get();
+        let has_undo =
+            self.state.undo.borrow().is_some() && self.state.pending_apply.borrow().is_empty();
+        let (glyph, glyph_color) = match feedback {
+            SettingsFeedbackKind::Informational => ("•", theme.palette.text_muted),
+            SettingsFeedbackKind::Pending => ("…", theme.palette.accent_secondary),
+            SettingsFeedbackKind::Success => ("✓", theme.palette.success),
+            SettingsFeedbackKind::Error => ("!", theme.palette.error),
+        };
         let model = self.clone();
         Element::new(Padding {
             insets: Insets::symmetric(16.0, 6.0),
@@ -1499,7 +1649,7 @@ impl AppearanceSettings {
                 main_alignment: MainAxisAlignment::Start,
                 cross_alignment: CrossAxisAlignment::Center,
             })
-            .child(text("✓", TextRole::Label, theme.palette.success, &theme))
+            .child(text(glyph, TextRole::Label, glyph_color, &theme))
             .child(
                 Element::new(Text::bound(
                     self.state.status.clone(),
@@ -1520,12 +1670,20 @@ impl AppearanceSettings {
 
     fn record(&self, undo: UndoAction, status: impl Into<String>) {
         self.state.undo.replace(Some(undo));
-        self.state.status.set(status.into());
+        if self.state.pending_apply.borrow().is_empty() {
+            self.state.status.set(status.into());
+            self.state.feedback.set(SettingsFeedbackKind::Success);
+            self.state.feedback_setting.set(None);
+        }
         self.request_reconcile();
     }
 
     fn set_status(&self, status: impl Into<String>) {
-        self.state.status.set(status.into());
+        if self.state.pending_apply.borrow().is_empty() {
+            self.state.status.set(status.into());
+            self.state.feedback.set(SettingsFeedbackKind::Informational);
+            self.state.feedback_setting.set(None);
+        }
     }
 
     fn request_reconcile(&self) {
@@ -1559,6 +1717,8 @@ impl AppearanceSettings {
             UndoAction::OpacityOverride(value) => self.state.opacity_override.set(value),
         }
         self.state.status.set("已撤销上一项修改".to_owned());
+        self.state.feedback.set(SettingsFeedbackKind::Success);
+        self.state.feedback_setting.set(None);
         self.request_reconcile();
     }
 }
@@ -1720,6 +1880,7 @@ pub enum SettingsViewError {
     Scroll(nkdhr_ui::ScrollError),
     List(nkdhr_ui::ListError),
     Slider(nkdhr_ui::SliderError),
+    Motion(nkdhr_ui::MotionError),
 }
 
 impl fmt::Display for SettingsViewError {
@@ -1729,6 +1890,7 @@ impl fmt::Display for SettingsViewError {
             Self::Scroll(error) => error.fmt(formatter),
             Self::List(error) => error.fmt(formatter),
             Self::Slider(error) => error.fmt(formatter),
+            Self::Motion(error) => error.fmt(formatter),
         }
     }
 }
@@ -1750,6 +1912,12 @@ impl From<nkdhr_ui::ListError> for SettingsViewError {
 impl From<nkdhr_ui::SliderError> for SettingsViewError {
     fn from(value: nkdhr_ui::SliderError) -> Self {
         Self::Slider(value)
+    }
+}
+
+impl From<nkdhr_ui::MotionError> for SettingsViewError {
+    fn from(value: nkdhr_ui::MotionError) -> Self {
+        Self::Motion(value)
     }
 }
 
@@ -1825,21 +1993,23 @@ impl Widget for SettingsShellLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SettingsBodyLayout {
     spec: SettingsLayoutSpec,
     professional_mode: bool,
     mobile_navigation_open: bool,
+    theme: Arc<Theme>,
 }
 
 impl SettingsBodyLayout {
-    fn child_rects(self, rect: Rect) -> [Rect; 3] {
+    fn child_rects(&self, rect: Rect, inspector_openness: f32) -> [Rect; 3] {
+        let inspector_openness = inspector_openness.clamp(0.0, 1.0);
         let nav = match self.spec.mode {
             SettingsLayoutMode::SingleColumn if self.mobile_navigation_open => rect,
             SettingsLayoutMode::SingleColumn => Rect::new(rect.x, rect.y, 0.0, 0.0),
             _ => Rect::new(rect.x, rect.y, self.spec.navigation_width, rect.height),
         };
-        let content = match self.spec.mode {
+        let mut content = match self.spec.mode {
             SettingsLayoutMode::SingleColumn if self.mobile_navigation_open => {
                 Rect::new(rect.x, rect.y, 0.0, 0.0)
             }
@@ -1851,24 +2021,91 @@ impl SettingsBodyLayout {
                 rect.height,
             ),
         };
-        let inspector = if !self.professional_mode {
-            Rect::new(rect.right(), rect.y, 0.0, 0.0)
-        } else if self.spec.inspector_is_drawer {
+        if self.spec.mode == SettingsLayoutMode::ThreeColumn {
+            let first_gap = if self.spec.navigation_width > 0.0 {
+                LAYOUT_GAP
+            } else {
+                0.0
+            };
+            let inspector_occupancy = (INSPECTOR_WIDTH + LAYOUT_GAP) * inspector_openness;
+            content.width =
+                (rect.width - self.spec.navigation_width - first_gap - inspector_occupancy)
+                    .clamp(0.0, CONTENT_IDEAL_MAX_WIDTH);
+        }
+        let inspector = if self.spec.inspector_is_drawer {
             let width = INSPECTOR_WIDTH.min(rect.width);
-            Rect::new(rect.right() - width, rect.y, width, rect.height)
-        } else {
             Rect::new(
-                content.right() + LAYOUT_GAP,
+                rect.right() - width * inspector_openness,
                 rect.y,
-                INSPECTOR_WIDTH.min(rect.width),
+                width,
+                rect.height,
+            )
+        } else {
+            let width = INSPECTOR_WIDTH.min(rect.width);
+            let target_x = content.right() + LAYOUT_GAP;
+            Rect::new(
+                rect.right() + (target_x - rect.right()) * inspector_openness,
+                rect.y,
+                width,
                 rect.height,
             )
         };
         [nav, content, inspector]
     }
+
+    fn target_openness(&self) -> f32 {
+        if self.professional_mode { 1.0 } else { 0.0 }
+    }
+
+    fn transition_family(&self, opening: bool) -> MotionFamily {
+        match (self.spec.inspector_is_drawer, opening) {
+            (true, true) => MotionFamily::DrawerEnter,
+            (true, false) => MotionFamily::DrawerExit,
+            (false, true) => MotionFamily::PanelEnter,
+            (false, false) => MotionFamily::PanelExit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsBodyLayoutState {
+    inspector_openness: ScalarMotion,
 }
 
 impl Widget for SettingsBodyLayout {
+    fn create_state(&self) -> Box<dyn Any> {
+        Box::new(SettingsBodyLayoutState {
+            inspector_openness: ScalarMotion::settled(self.target_openness()),
+        })
+    }
+
+    fn update(&self, previous: &dyn Any, ctx: &mut UpdateCtx<'_>) {
+        let previous = previous
+            .downcast_ref::<Self>()
+            .expect("widget type is reconciled");
+        let target = self.target_openness();
+        let now = ctx.now();
+        let state = ctx
+            .state_mut::<SettingsBodyLayoutState>()
+            .expect("SettingsBodyLayout owns SettingsBodyLayoutState");
+        if !self.theme.motion.spatial_motion_enabled() {
+            state.inspector_openness.settle(target);
+        } else if previous.professional_mode != self.professional_mode {
+            state.inspector_openness.retarget(
+                now,
+                target,
+                self.theme
+                    .motion
+                    .spec(self.transition_family(self.professional_mode)),
+            );
+        }
+        let active = state.inspector_openness.is_active(now);
+        ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
+        if active {
+            ctx.request_animation_frame();
+        }
+    }
+
     fn measure(&self, ctx: &mut MeasureCtx<'_>, constraints: Constraints) -> Result<Size, UiError> {
         if ctx.child_count() != 3 {
             return Err(UiError::ChildCountMismatch {
@@ -1877,7 +2114,11 @@ impl Widget for SettingsBodyLayout {
             });
         }
         let size = constraints.max();
-        let rects = self.child_rects(Rect::new(0.0, 0.0, size.width, size.height));
+        let openness = ctx
+            .state_mut::<SettingsBodyLayoutState>()?
+            .inspector_openness
+            .value(ctx.now());
+        let rects = self.child_rects(Rect::new(0.0, 0.0, size.width, size.height), openness);
         for (index, rect) in rects.into_iter().enumerate() {
             ctx.measure_child(
                 index,
@@ -1888,13 +2129,28 @@ impl Widget for SettingsBodyLayout {
     }
 
     fn arrange(&self, ctx: &mut ArrangeCtx<'_>, rect: Rect) -> Result<(), UiError> {
-        for (index, child) in self.child_rects(rect).into_iter().enumerate() {
+        let openness = ctx
+            .state_mut::<SettingsBodyLayoutState>()?
+            .inspector_openness
+            .value(ctx.now());
+        for (index, child) in self.child_rects(rect, openness).into_iter().enumerate() {
             ctx.arrange_child(index, child)?;
         }
         Ok(())
     }
 
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+        let now = ctx.now();
+        let (openness, active) = {
+            let state = ctx.state_mut::<SettingsBodyLayoutState>()?;
+            (
+                state.inspector_openness.value(now).clamp(0.0, 1.0),
+                state.inspector_openness.is_active(now),
+            )
+        };
+        if active {
+            ctx.request_animation_frame();
+        }
         match self.spec.mode {
             SettingsLayoutMode::SingleColumn if self.mobile_navigation_open => {
                 ctx.paint_child(0)?
@@ -1905,10 +2161,23 @@ impl Widget for SettingsBodyLayout {
                 ctx.paint_child(1)?;
             }
         }
-        if self.professional_mode {
+        if openness >= 1.0 - f32::EPSILON {
             ctx.paint_child(2)?;
+        } else if openness > f32::EPSILON {
+            ctx.paint_child_clipped(2, ctx.rect())?;
         }
         Ok(())
+    }
+
+    fn animation(&self, ctx: &mut AnimationCtx<'_>) {
+        let now = ctx.now();
+        let active = ctx
+            .state_mut::<SettingsBodyLayoutState>()
+            .is_ok_and(|state| state.inspector_openness.is_active(now));
+        if active {
+            ctx.invalidate(Invalidation::LAYOUT | Invalidation::PAINT);
+            ctx.request_animation_frame();
+        }
     }
 }
 
