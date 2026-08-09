@@ -42,9 +42,13 @@ through the same texture store. `Scroll` now adds overlay thumb dragging and
 track paging, Shift-wheel and Vim-key navigation, host-clocked interruptible
 inertia, bounded elastic feedback, opt-in snapping, exact nested-delta handoff,
 revisioned anchoring/minimal reveal and conditional tail following; reduced
-motion removes its spatial effects. UI-3 remains open while advanced List and
-TextInput behavior, real compositor backdrop blur and the accepted Settings
-composition are wired and visually accepted.
+motion removes its spatial effects. `List` now adds stable-identity multi-
+selection with range/discontiguous input, real-focus keyboard/typeahead
+navigation, tree disclosure, explicit-handle pointer and keyboard reorder,
+virtual leading/trailing extent, loading rows, object double-click and context
+actions. UI-3 remains open while advanced TextInput behavior, real compositor
+backdrop blur and the accepted Settings composition are wired and visually
+accepted.
 
 ## Documentation
 

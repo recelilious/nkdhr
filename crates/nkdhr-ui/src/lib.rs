@@ -34,7 +34,8 @@ pub use tree::{
     PaintCtx, SemanticsCtx, UiError, UiResult, UiRoot, UpdateCtx, Widget, WidgetId, WidgetKey,
 };
 pub use widgets::{
-    Button, ButtonVariant, GlassSurface, List, ListError, ListItem, ListItemBehavior, Scroll,
+    Button, ButtonVariant, GlassSurface, List, ListEntry, ListError, ListItem, ListItemBehavior,
+    ListMultiSelection, ListReorder, ListSelection, ListTreeToggle, ListVirtualWindow, Scroll,
     ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy, Slider,
     SliderError, SurfaceState, Text, TextInput, TextInputError, TextInputStatus, Toggle,
 };

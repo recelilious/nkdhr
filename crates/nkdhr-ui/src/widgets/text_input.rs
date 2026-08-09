@@ -403,6 +403,7 @@ impl Widget for TextInput {
             UiEvent::PointerDown {
                 button: PointerButton::Primary,
                 position,
+                ..
             } if self.enabled => {
                 let state = ctx.state_mut::<TextInputState>()?;
                 state.pointer_pressed = true;
@@ -417,6 +418,7 @@ impl Widget for TextInput {
             UiEvent::PointerUp {
                 button: PointerButton::Primary,
                 position,
+                ..
             } => {
                 if ctx.state_mut::<TextInputState>()?.pointer_pressed {
                     let state = ctx.state_mut::<TextInputState>()?;

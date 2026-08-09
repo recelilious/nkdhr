@@ -657,6 +657,7 @@ impl Widget for Scroll {
             UiEvent::PointerDown {
                 position,
                 button: PointerButton::Primary,
+                ..
             } if self.enabled => {
                 if handle_pointer_down(self, ctx, *position, rect, viewport)? {
                     return Ok(());

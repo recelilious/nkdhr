@@ -305,6 +305,7 @@ impl Widget for Slider {
             UiEvent::PointerDown {
                 position,
                 button: PointerButton::Primary,
+                ..
             } if self.enabled => {
                 ctx.state_mut::<SliderState>()?.dragging = true;
                 self.apply_pointer(ctx.rect(), position.x);
@@ -323,6 +324,7 @@ impl Widget for Slider {
             UiEvent::PointerUp {
                 position,
                 button: PointerButton::Primary,
+                ..
             } if self.enabled => {
                 let dragging = ctx.state_mut::<SliderState>()?.dragging;
                 if dragging {

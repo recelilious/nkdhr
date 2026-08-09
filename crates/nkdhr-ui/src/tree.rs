@@ -36,9 +36,16 @@ pub enum UiError {
     DuplicateKey(WidgetKey),
     WidgetCapacityExceeded,
     MissingWidget(WidgetId),
+    MissingChild {
+        index: usize,
+    },
     StateTypeMismatch(&'static str),
     UnexpectedChildCount {
         expected_maximum: usize,
+        actual: usize,
+    },
+    ChildCountMismatch {
+        expected: usize,
         actual: usize,
     },
     TextResourcesRequired,
@@ -74,6 +81,7 @@ impl fmt::Display for UiError {
             Self::DuplicateKey(key) => write!(formatter, "duplicate sibling widget key {key:?}"),
             Self::WidgetCapacityExceeded => formatter.write_str("widget arena capacity exceeded"),
             Self::MissingWidget(id) => write!(formatter, "widget {id:?} is no longer alive"),
+            Self::MissingChild { index } => write!(formatter, "child index {index} is absent"),
             Self::StateTypeMismatch(expected) => {
                 write!(formatter, "widget retained state is not {expected}")
             }
@@ -84,6 +92,12 @@ impl fmt::Display for UiError {
                 formatter,
                 "widget accepts at most {expected_maximum} child(ren), received {actual}"
             ),
+            Self::ChildCountMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "widget requires {expected} child(ren), received {actual}"
+                )
+            }
             Self::TextResourcesRequired => {
                 formatter.write_str("this widget requires text resources on its UI root")
             }
@@ -465,6 +479,7 @@ enum CaptureRequest {
 #[derive(Debug, Default)]
 struct EventRequests {
     handled: bool,
+    continue_bubbling: bool,
     focus: Option<WidgetId>,
     capture: Option<CaptureRequest>,
     scroll_remainder: Option<(f32, f32)>,
@@ -712,7 +727,7 @@ impl UiRoot {
                     bubbling_event = with_scroll_delta(&bubbling_event, delta_x, delta_y);
                     continue;
                 }
-                if current.handled {
+                if current.handled && !current.continue_bubbling {
                     boundary = None;
                     break;
                 }
@@ -1199,6 +1214,7 @@ impl UiRoot {
         let mut ctx = EventCtx {
             id,
             rect: node.rect,
+            children: &node.children,
             state: node.state.as_mut(),
             subscriptions: &mut node.subscriptions,
             reactivity,
@@ -1233,6 +1249,7 @@ impl UiRoot {
         let mut ctx = EventCtx {
             id,
             rect: node.rect,
+            children: &node.children,
             state: node.state.as_mut(),
             subscriptions: &mut node.subscriptions,
             reactivity,
@@ -1408,6 +1425,12 @@ fn validate_event(event: &UiEvent) -> UiResult<()> {
         .pointer_position()
         .is_some_and(|point| !point.x.is_finite() || !point.y.is_finite())
     {
+        return Err(UiError::InvalidEvent);
+    }
+    if matches!(
+        event,
+        UiEvent::PointerDown { click_count: 0, .. } | UiEvent::PointerUp { click_count: 0, .. }
+    ) {
         return Err(UiError::InvalidEvent);
     }
     match event {
@@ -1781,6 +1804,7 @@ impl AnimationCtx<'_> {
 pub struct EventCtx<'a> {
     id: WidgetId,
     rect: Rect,
+    children: &'a [WidgetId],
     state: &'a mut dyn Any,
     subscriptions: &'a mut Vec<SubscriptionToken>,
     reactivity: Rc<RootReactivity>,
@@ -1820,6 +1844,15 @@ impl EventCtx<'_> {
 
     pub fn set_handled(&mut self) {
         self.requests.handled = true;
+        self.requests.continue_bubbling = false;
+        self.requests.scroll_remainder = None;
+    }
+
+    /// Mark this event handled while allowing a composite ancestor to observe
+    /// the same transaction. Ordinary handlers should use `set_handled`.
+    pub fn set_handled_and_continue(&mut self) {
+        self.requests.handled = true;
+        self.requests.continue_bubbling = true;
         self.requests.scroll_remainder = None;
     }
 
@@ -1836,6 +1869,16 @@ impl EventCtx<'_> {
 
     pub fn request_focus(&mut self) {
         self.requests.focus = Some(self.id);
+    }
+
+    /// Move focus to one direct child after the current event callback exits.
+    pub fn request_child_focus(&mut self, index: usize) -> UiResult<()> {
+        let child = *self
+            .children
+            .get(index)
+            .ok_or(UiError::MissingChild { index })?;
+        self.requests.focus = Some(child);
+        Ok(())
     }
 
     pub fn capture_pointer(&mut self) {

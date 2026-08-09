@@ -7,7 +7,8 @@ use nkdhr_render::{
 use nkdhr_ui::text::{TextConfig, TextResources, TextSystem};
 use nkdhr_ui::{
     Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment, Density, Element, Flex,
-    GlassSurface, Insets, Key, List, ListItem, MainAxisAlignment, ManualClock, MaterialTier,
+    GlassSurface, Insets, Key, List, ListEntry, ListItem, ListItemBehavior, ListMultiSelection,
+    ListReorder, ListTreeToggle, ListVirtualWindow, MainAxisAlignment, ManualClock, MaterialTier,
     Modifiers, MotionMode, Padding, PointerButton, Reactive, Scroll, ScrollAnchor, ScrollAxis,
     ScrollOffset, ScrollPhase, ScrollReveal, SemanticRole, Size, Slider, Text, TextInput, TextRole,
     Theme, Toggle, UiEvent, UiRoot, Widget,
@@ -18,6 +19,27 @@ fn prepare(root: &mut UiRoot, size: Size) -> nkdhr_render::DisplayList {
     let mut builder = DisplayListBuilder::new();
     root.paint(&mut builder).unwrap();
     builder.finish()
+}
+
+fn primary_click(root: &mut UiRoot, position: Point, modifiers: Modifiers) {
+    primary_click_count(root, position, modifiers, 1);
+}
+
+fn primary_click_count(root: &mut UiRoot, position: Point, modifiers: Modifiers, click_count: u8) {
+    root.dispatch(&UiEvent::PointerDown {
+        position,
+        button: PointerButton::Primary,
+        modifiers,
+        click_count,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::PointerUp {
+        position,
+        button: PointerButton::Primary,
+        modifiers,
+        click_count,
+    })
+    .unwrap();
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -63,6 +85,8 @@ fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(20.0, 20.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerMoved {
@@ -72,6 +96,8 @@ fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(200.0, 20.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert_eq!(activations.get(), 0);
@@ -79,11 +105,15 @@ fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(20.0, 20.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(20.0, 20.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert_eq!(activations.get(), 1);
@@ -127,11 +157,15 @@ fn toggle_updates_bound_value_and_reduced_motion_settles_without_spatial_frames(
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(22.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(22.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert!(value.get());
@@ -196,11 +230,15 @@ fn slider_keeps_exact_value_node_and_supports_normal_coarse_and_fine_steps() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(100.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(100.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert_eq!(value.get(), 50.0);
@@ -377,11 +415,15 @@ fn list_items_share_selection_and_navigation_activation() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(80.0, 72.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(80.0, 72.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert_eq!(selection.get(), Some(101));
@@ -421,6 +463,425 @@ fn list_items_share_selection_and_navigation_activation() {
         })
         .unwrap();
     assert_eq!(selected.semantics.label.as_deref(), Some("Item 1"));
+}
+
+#[test]
+fn multi_list_pointer_selection_supports_ranges_and_discontiguous_toggles() {
+    let selection = Reactive::new(ListMultiSelection::default());
+    let theme = Arc::new(Theme::default());
+    let entries = (10..15)
+        .map(|identity| ListEntry::new(identity, format!("Item {identity}")))
+        .collect::<Vec<_>>();
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            Element::new(ListItem::with_selection(
+                entry.identity(),
+                entry.label(),
+                selection.clone(),
+                Arc::clone(&theme),
+            ))
+            .keyed(entry.identity())
+            .child(Element::new(LabelBlock))
+        })
+        .collect::<Vec<_>>();
+    let list =
+        List::from_entries("Objects", selection.clone(), entries, Arc::clone(&theme)).unwrap();
+    let mut root = UiRoot::new(Element::new(list).children(rows)).unwrap();
+    prepare(&mut root, Size::new(240.0, 240.0));
+
+    primary_click(&mut root, Point::new(80.0, 72.0), Modifiers::default());
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![11]);
+
+    primary_click(
+        &mut root,
+        Point::new(80.0, 168.0),
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![11, 13]);
+
+    primary_click(
+        &mut root,
+        Point::new(80.0, 216.0),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![13, 14]);
+
+    primary_click(
+        &mut root,
+        Point::new(80.0, 24.0),
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(
+        selection.get().selected().collect::<Vec<_>>(),
+        vec![10, 13, 14]
+    );
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Space,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![13, 14]);
+}
+
+#[test]
+fn list_keyboard_navigation_moves_real_focus_and_typeahead_uses_labels() {
+    let selection = Reactive::new(ListMultiSelection::default());
+    let theme = Arc::new(Theme::default());
+    let activated = Rc::new(Cell::new(None));
+    let entries = [(1, "Alpha"), (2, "Beta"), (3, "Gamma")]
+        .into_iter()
+        .map(|(identity, label)| ListEntry::new(identity, label))
+        .collect::<Vec<_>>();
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            let activated = Rc::clone(&activated);
+            let identity = entry.identity();
+            Element::new(
+                ListItem::with_selection(
+                    identity,
+                    entry.label(),
+                    selection.clone(),
+                    Arc::clone(&theme),
+                )
+                .behavior(ListItemBehavior::Object)
+                .on_activate(move || activated.set(Some(identity))),
+            )
+            .keyed(identity)
+            .child(Element::new(LabelBlock))
+        })
+        .collect::<Vec<_>>();
+    let list =
+        List::from_entries("Objects", selection.clone(), entries, Arc::clone(&theme)).unwrap();
+    let mut root = UiRoot::new(Element::new(list).children(rows)).unwrap();
+    prepare(&mut root, Size::new(240.0, 144.0));
+
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Tab,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowDown,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get().cursor(), Some(2));
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Enter,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(activated.get(), Some(2), "Enter follows the moved focus");
+
+    root.dispatch(&UiEvent::TextInput("g".to_owned())).unwrap();
+    assert_eq!(selection.get().cursor(), Some(3));
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Enter,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(activated.get(), Some(3));
+
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowUp,
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![2, 3]);
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowUp,
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get().cursor(), Some(1));
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![2, 3]);
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Space,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(
+        selection.get().selected().collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
+fn tree_list_disclosure_and_left_right_navigation_use_stable_entries() {
+    let selection = Reactive::new(Some(1_u64));
+    let theme = Arc::new(Theme::default());
+    let toggle = Rc::new(Cell::new(None));
+    let entries = vec![
+        ListEntry::new(1, "Root").tree(0, true),
+        ListEntry::new(2, "Child").depth(1),
+        ListEntry::new(3, "Sibling"),
+    ];
+    let rows = [
+        (1, "Root", 0, true),
+        (2, "Child", 1, false),
+        (3, "Sibling", 0, false),
+    ]
+    .into_iter()
+    .map(|(identity, label, depth, disclosure)| {
+        Element::new(
+            ListItem::new(identity, label, selection.clone(), Arc::clone(&theme))
+                .tree(depth, disclosure),
+        )
+        .keyed(identity)
+        .child(Element::new(LabelBlock))
+    });
+    let toggle_callback = Rc::clone(&toggle);
+    let list = List::from_entries("Tree", selection.clone(), entries, Arc::clone(&theme))
+        .unwrap()
+        .on_tree_toggle(move |event| toggle_callback.set(Some(event)));
+    let mut root = UiRoot::new(Element::new(list).children(rows)).unwrap();
+    prepare(&mut root, Size::new(240.0, 144.0));
+
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Tab,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowRight,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get(), Some(2));
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowLeft,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(selection.get(), Some(1));
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowLeft,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(
+        toggle.get(),
+        Some(ListTreeToggle {
+            identity: 1,
+            expanded: false
+        })
+    );
+
+    toggle.set(None);
+    primary_click(&mut root, Point::new(18.0, 24.0), Modifiers::default());
+    assert_eq!(
+        toggle.get(),
+        Some(ListTreeToggle {
+            identity: 1,
+            expanded: false
+        })
+    );
+}
+
+#[test]
+fn list_reorder_drag_uses_placeholder_motion_and_stable_before_identity() {
+    let selection = Reactive::new(Some(2_u64));
+    let theme = Arc::new(Theme::default());
+    let reorder = Rc::new(Cell::new(None));
+    let entries = [1_u64, 2, 3]
+        .into_iter()
+        .map(|identity| ListEntry::new(identity, format!("Item {identity}")))
+        .collect::<Vec<_>>();
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            Element::new(ListItem::new(
+                entry.identity(),
+                entry.label(),
+                selection.clone(),
+                Arc::clone(&theme),
+            ))
+            .keyed(entry.identity())
+            .child(Element::new(LabelBlock))
+        })
+        .collect::<Vec<_>>();
+    let reorder_callback = Rc::clone(&reorder);
+    let list = List::from_entries("Reorder", selection.clone(), entries, Arc::clone(&theme))
+        .unwrap()
+        .on_reorder(move |event| reorder_callback.set(Some(event)));
+    let mut root = UiRoot::new(Element::new(list).children(rows)).unwrap();
+    prepare(&mut root, Size::new(240.0, 144.0));
+
+    let down = root
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(222.0, 72.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(down.pointer_capture.is_some());
+    root.dispatch(&UiEvent::PointerMoved {
+        position: Point::new(222.0, 140.0),
+    })
+    .unwrap();
+    let dragging = prepare(&mut root, Size::new(240.0, 144.0));
+    assert!(
+        dragging
+            .primitives()
+            .iter()
+            .any(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform != nkdhr_render::Transform::IDENTITY,
+            })
+    );
+    root.dispatch(&UiEvent::PointerUp {
+        position: Point::new(222.0, 140.0),
+        button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    })
+    .unwrap();
+    assert_eq!(
+        reorder.get(),
+        Some(ListReorder {
+            identity: 2,
+            before: None
+        })
+    );
+
+    reorder.set(None);
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowUp,
+        modifiers: Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(
+        reorder.get(),
+        Some(ListReorder {
+            identity: 2,
+            before: Some(1)
+        })
+    );
+}
+
+#[test]
+fn virtual_list_preserves_extent_hidden_selection_and_loading_row_geometry() {
+    let selection = Reactive::new(ListMultiSelection::new([99]));
+    let theme = Arc::new(Theme::default());
+    let entries = vec![
+        ListEntry::new(1, "Visible"),
+        ListEntry::new(2, "Loading").loading(true),
+    ];
+    let list = List::from_entries("Virtual", selection.clone(), entries, Arc::clone(&theme))
+        .unwrap()
+        .virtual_window(ListVirtualWindow::new(100.0, 200.0).unwrap());
+    let rows = [
+        Element::new(ListItem::with_selection(
+            1,
+            "Visible",
+            selection.clone(),
+            Arc::clone(&theme),
+        ))
+        .keyed(1)
+        .child(Element::new(LabelBlock)),
+        Element::new(
+            ListItem::with_selection(2, "Loading", selection.clone(), Arc::clone(&theme))
+                .loading(true),
+        )
+        .keyed(2),
+    ];
+    let mut root = UiRoot::new(Element::new(list).children(rows)).unwrap();
+    prepare(&mut root, Size::new(240.0, 396.0));
+
+    let items = root
+        .semantic_tree()
+        .into_iter()
+        .filter(|node| node.semantics.role == SemanticRole::ListItem)
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].bounds.y, 100.0);
+    assert_eq!(items[1].bounds.y, 148.0);
+    assert_eq!(items[1].semantics.value.as_deref(), Some("loading"));
+    assert_eq!(selection.get().selected().collect::<Vec<_>>(), vec![99]);
+}
+
+#[test]
+fn object_list_double_clicks_to_activate_and_exposes_context_action() {
+    let selection = Reactive::new(None);
+    let theme = Arc::new(Theme::default());
+    let activations = Rc::new(Cell::new(0));
+    let context = Rc::new(Cell::new(None));
+    let activation_callback = Rc::clone(&activations);
+    let context_callback = Rc::clone(&context);
+    let item = ListItem::new(1, "Object", selection.clone(), Arc::clone(&theme))
+        .behavior(ListItemBehavior::Object)
+        .on_activate(move || activation_callback.set(activation_callback.get() + 1))
+        .on_context_menu(move |point| context_callback.set(Some(point)));
+    let list = List::from_entries(
+        "Objects",
+        selection.clone(),
+        [ListEntry::new(1, "Object")],
+        theme,
+    )
+    .unwrap();
+    let mut root =
+        UiRoot::new(Element::new(list).child(Element::new(item).child(Element::new(LabelBlock))))
+            .unwrap();
+    prepare(&mut root, Size::new(240.0, 48.0));
+
+    primary_click(&mut root, Point::new(80.0, 24.0), Modifiers::default());
+    assert_eq!(activations.get(), 0);
+    primary_click_count(&mut root, Point::new(80.0, 24.0), Modifiers::default(), 2);
+    assert_eq!(activations.get(), 1);
+
+    root.dispatch(&UiEvent::PointerDown {
+        position: Point::new(90.0, 24.0),
+        button: PointerButton::Secondary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    })
+    .unwrap();
+    assert_eq!(context.get(), Some(Point::new(90.0, 24.0)));
+
+    context.set(None);
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Named("ContextMenu".to_owned()),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(context.get(), Some(Point::new(120.0, 24.0)));
 }
 
 #[test]
@@ -479,6 +940,8 @@ fn scrollbar_overlay_supports_exact_thumb_drag_and_track_paging() {
         .dispatch(&UiEvent::PointerDown {
             position: Point::new(95.0, 12.0),
             button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
         })
         .unwrap();
     assert!(down.handled);
@@ -492,6 +955,8 @@ fn scrollbar_overlay_supports_exact_thumb_drag_and_track_paging() {
         .dispatch(&UiEvent::PointerUp {
             position: Point::new(95.0, 72.0),
             button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
         })
         .unwrap();
     assert!(up.pointer_capture.is_none());
@@ -501,6 +966,8 @@ fn scrollbar_overlay_supports_exact_thumb_drag_and_track_paging() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(95.0, 80.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     assert_eq!(offset.get().y, 100.0);
@@ -628,6 +1095,8 @@ fn captured_thumb_drag_never_transfers_scroll_to_an_ancestor() {
         .dispatch(&UiEvent::PointerDown {
             position: Point::new(75.0, 20.0),
             button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
         })
         .unwrap();
     assert!(down.pointer_capture.is_some());
@@ -945,11 +1414,15 @@ fn text_input_edits_graphemes_and_password_semantics_never_expose_content() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(40.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(40.0, 22.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::TextInput("a\u{301}🙂".to_owned()))
@@ -1010,11 +1483,15 @@ fn retained_text_and_text_input_use_shared_glyph_geometry() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(12.0, 50.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerUp {
         position: Point::new(12.0, 50.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::TextInput("X".to_owned())).unwrap();

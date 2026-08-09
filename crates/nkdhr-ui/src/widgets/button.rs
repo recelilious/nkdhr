@@ -302,6 +302,7 @@ impl Widget for Button {
             UiEvent::PointerUp {
                 position,
                 button: PointerButton::Primary,
+                ..
             } => {
                 let rect = ctx.rect();
                 let activate = {

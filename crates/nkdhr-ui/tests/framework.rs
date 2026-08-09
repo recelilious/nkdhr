@@ -307,6 +307,8 @@ fn keyed_reconciliation_preserves_state_and_generation_rejects_stale_ids() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(20.0, 10.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     let captured = root.pointer_capture().unwrap();
@@ -449,6 +451,8 @@ fn pointer_events_bubble_and_capture_while_tab_uses_semantic_tree_order() {
         .dispatch(&UiEvent::PointerDown {
             position: Point::new(10.0, 10.0),
             button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
         })
         .unwrap();
     assert!(!result.handled);
@@ -514,6 +518,8 @@ fn pointer_hover_tracks_hit_order_independently_from_capture() {
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(10.0, 10.0),
         button: PointerButton::Primary,
+        modifiers: Modifiers::default(),
+        click_count: 1,
     })
     .unwrap();
     root.dispatch(&UiEvent::PointerMoved {
@@ -682,6 +688,15 @@ fn invalid_declarative_inputs_fail_before_mutating_the_tree() {
         input.dispatch(&UiEvent::ImePreedit {
             text: "你好".to_owned(),
             selection: Some((1, 3)),
+        }),
+        Err(UiError::InvalidEvent)
+    );
+    assert_eq!(
+        input.dispatch(&UiEvent::PointerDown {
+            position: Point::new(0.0, 0.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 0,
         }),
         Err(UiError::InvalidEvent)
     );

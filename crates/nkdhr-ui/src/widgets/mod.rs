@@ -10,7 +10,10 @@ mod text_input;
 mod toggle;
 
 pub use button::{Button, ButtonVariant};
-pub use list::{List, ListError, ListItem, ListItemBehavior};
+pub use list::{
+    List, ListEntry, ListError, ListItem, ListItemBehavior, ListMultiSelection, ListReorder,
+    ListSelection, ListTreeToggle, ListVirtualWindow,
+};
 pub use scroll::{
     Scroll, ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy,
 };

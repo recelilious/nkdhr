@@ -59,10 +59,16 @@ pub enum UiEvent {
     PointerDown {
         position: Point,
         button: PointerButton,
+        modifiers: Modifiers,
+        /// Host-normalized click sequence count, beginning at one.
+        click_count: u8,
     },
     PointerUp {
         position: Point,
         button: PointerButton,
+        modifiers: Modifiers,
+        /// Same click sequence count as the corresponding press.
+        click_count: u8,
     },
     PointerScroll {
         position: Point,

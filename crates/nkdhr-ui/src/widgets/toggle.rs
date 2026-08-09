@@ -281,6 +281,7 @@ impl Widget for Toggle {
             UiEvent::PointerUp {
                 position,
                 button: PointerButton::Primary,
+                ..
             } => {
                 let rect = ctx.rect();
                 let activate = {
