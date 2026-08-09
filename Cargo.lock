@@ -1517,6 +1517,11 @@ version = "0.1.0"
 [[package]]
 name = "nkdhr-settings"
 version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "nkdhr-render",
+ "nkdhr-ui",
+]
 
 [[package]]
 name = "nkdhr-tasks"

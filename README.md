@@ -55,8 +55,15 @@ and Smithay GLES path share rounded masks, transforms, clips and separable blur
 semantics, while prepared lists expose dependency-expanded compositor damage
 instead of recursively sampling prior glass pixels. `GlassSurface` emits that
 pass only for a capable host and retains the approved compensated fallback.
-UI-3 remains open while the accepted Settings composition is wired and its
-actual static-glass and transition output is visually accepted.
+The accepted Appearance & Interaction composition now lives in
+`nkdhr-settings` as a host-independent production view model rather than a
+test-only gallery. It implements the exact four responsive frames, independent
+navigation/content scrolling, grouped setting surfaces, professional inspector
+drawer, live reactive controls and undo/status feedback. Only the outer window
+requests backdrop blur; a deterministic full-CJK software golden and all four
+width oracles guard the result. The standalone/in-compositor window hosts still
+belong to later milestones. UI-3 remains open for owner review of the real
+static-glass frame, compact navigation icons and transition output.
 
 ## Documentation
 
