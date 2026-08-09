@@ -1,7 +1,8 @@
 use std::{any::Any, rc::Rc, sync::Arc};
 
-use nkdhr_render::{CornerRadii, Rect};
+use nkdhr_render::{CornerRadii, Point, Rect};
 
+use crate::text::{TextLayout, TextWrap};
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
     MeasureCtx, MotionFamily, PaintCtx, PointerButton, ScalarMotion, SemanticRole, Semantics,
@@ -81,7 +82,7 @@ impl Button {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ButtonState {
     hovered: ScalarMotion,
     pressed: ScalarMotion,
@@ -89,6 +90,7 @@ struct ButtonState {
     pointer_pressed: bool,
     armed: bool,
     keyboard_pressed: bool,
+    label_layout: Option<Arc<TextLayout>>,
 }
 
 impl Default for ButtonState {
@@ -100,6 +102,7 @@ impl Default for ButtonState {
             pointer_pressed: false,
             armed: false,
             keyboard_pressed: false,
+            label_layout: None,
         }
     }
 }
@@ -113,7 +116,10 @@ impl Widget for Button {
         let previous = previous
             .downcast_ref::<Self>()
             .expect("widget type is reconciled");
-        if previous.theme.density != self.theme.density || previous.label != self.label {
+        if previous.theme.density != self.theme.density
+            || previous.theme.typography != self.theme.typography
+            || previous.label != self.label
+        {
             ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
         } else {
             ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
@@ -143,7 +149,12 @@ impl Widget for Button {
                 constraints.deflate(crate::Insets::symmetric(horizontal, 0.0))?,
             )?
         } else {
-            Size::ZERO
+            let mut style = self.theme.text_style(crate::TextRole::Label);
+            style.wrap = TextWrap::None;
+            let layout = ctx.layout_text(&self.label, &style, None)?;
+            let size = Size::new(layout.width(), layout.height());
+            ctx.state_mut::<ButtonState>()?.label_layout = Some(layout);
+            size
         };
         Ok(constraints.constrain(Size::new(
             (child.width + horizontal * 2.0).max(metrics.control_height),
@@ -169,13 +180,15 @@ impl Widget for Button {
 
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
         let now = ctx.now();
-        let (hovered, pressed, focused, active) = {
+        let draw_internal_label = ctx.child_count() == 0;
+        let (hovered, pressed, focused, active, label_layout) = {
             let state = ctx.state_mut::<ButtonState>()?;
             (
                 state.hovered.value(now),
                 state.pressed.value(now),
                 state.focused,
                 state.hovered.is_active(now) || state.pressed.is_active(now),
+                state.label_layout.clone(),
             )
         };
         if active {
@@ -211,6 +224,24 @@ impl Widget for Button {
                 destructive: matches!(self.variant, ButtonVariant::Destructive),
             },
         )?;
+        if draw_internal_label && let Some(layout) = label_layout {
+            let color = if !self.enabled {
+                self.theme.palette.text_muted
+            } else if matches!(self.variant, ButtonVariant::Primary) {
+                self.theme.palette.on_accent
+            } else {
+                self.theme.palette.text_primary
+            };
+            ctx.draw_text(
+                &layout,
+                Point::new(
+                    rect.x + (rect.width - layout.width()).max(0.0) * 0.5,
+                    rect.y + (rect.height - layout.height()).max(0.0) * 0.5,
+                ),
+                color,
+                Some(rect),
+            )?;
+        }
         ctx.paint_children()
     }
 

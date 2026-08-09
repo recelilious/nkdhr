@@ -1,7 +1,8 @@
 use std::{any::Any, collections::HashSet, fmt, rc::Rc, sync::Arc};
 
-use nkdhr_render::{CornerRadii, Rect};
+use nkdhr_render::{CornerRadii, Point, Rect};
 
+use crate::text::{TextLayout, TextWrap};
 use crate::theme::with_alpha;
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
@@ -330,12 +331,13 @@ impl ListItem {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ListItemState {
     hovered: ScalarMotion,
     focused: bool,
     pressed: bool,
     armed: bool,
+    label_layout: Option<Arc<TextLayout>>,
 }
 
 impl Default for ListItemState {
@@ -345,6 +347,7 @@ impl Default for ListItemState {
             focused: false,
             pressed: false,
             armed: false,
+            label_layout: None,
         }
     }
 }
@@ -368,7 +371,12 @@ impl Widget for ListItem {
                 Constraints::new(Size::ZERO, Size::new(constraints.max().width, height))?,
             )?
         } else {
-            Size::ZERO
+            let mut style = self.theme.text_style(crate::TextRole::Body);
+            style.wrap = TextWrap::None;
+            let layout = ctx.layout_text(&self.label, &style, None)?;
+            let size = Size::new(layout.width() + 32.0, layout.height());
+            ctx.state_mut::<ListItemState>()?.label_layout = Some(layout);
+            size
         };
         Ok(constraints.constrain(Size::new(child.width, height.max(child.height))))
     }
@@ -392,13 +400,15 @@ impl Widget for ListItem {
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
         let selected = ctx.watch(&self.selection, Invalidation::PAINT) == Some(self.identity);
         let now = ctx.now();
-        let (hovered, focused, pressed, active) = {
+        let draw_internal_label = ctx.child_count() == 0;
+        let (hovered, focused, pressed, active, label_layout) = {
             let state = ctx.state_mut::<ListItemState>()?;
             (
                 state.hovered.value(now),
                 state.focused,
                 state.pressed,
                 state.hovered.is_active(now),
+                state.label_layout.clone(),
             )
         };
         if active {
@@ -425,6 +435,21 @@ impl Widget for ListItem {
                 CornerRadii::all(self.theme.radii.control),
                 2.0,
                 with_alpha(self.theme.palette.accent_secondary, 0.80),
+            )?;
+        }
+        if draw_internal_label && let Some(layout) = label_layout {
+            ctx.draw_text(
+                &layout,
+                Point::new(
+                    ctx.rect().x + 16.0,
+                    ctx.rect().y + (ctx.rect().height - layout.height()).max(0.0) * 0.5,
+                ),
+                if self.enabled {
+                    self.theme.palette.text_primary
+                } else {
+                    self.theme.palette.text_muted
+                },
+                Some(ctx.rect()),
             )?;
         }
         ctx.paint_children()

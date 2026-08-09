@@ -35,6 +35,6 @@ pub use tree::{
 };
 pub use widgets::{
     Button, ButtonVariant, GlassSurface, List, ListError, ListItem, ListItemBehavior, Scroll,
-    ScrollError, ScrollOffset, Slider, SliderError, SurfaceState, TextInput, TextInputError,
+    ScrollError, ScrollOffset, Slider, SliderError, SurfaceState, Text, TextInput, TextInputError,
     TextInputStatus, Toggle,
 };

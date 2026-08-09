@@ -11,7 +11,7 @@ use nkdhr_render::{
 };
 
 pub use atlas::{AtlasConfig, AtlasStats};
-pub use layout::{FontSlant, TextAlign, TextLayout, TextStyle, TextWrap};
+pub use layout::{FontSlant, TextAlign, TextCaret, TextHit, TextLayout, TextStyle, TextWrap};
 
 use self::{atlas::GlyphAtlas, layout::LayoutCache};
 
@@ -163,8 +163,102 @@ impl TextSystem {
     /// Begin one submission frame. Pages referenced through the returned
     /// guard cannot be evicted until the guard is dropped.
     pub fn begin_frame(&mut self) -> TextFrame<'_> {
-        self.frame = self.frame.wrapping_add(1).max(1);
+        self.advance_frame();
         TextFrame { system: self }
+    }
+
+    pub(crate) fn advance_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1).max(1);
+    }
+
+    pub(crate) fn draw_in_current_frame(
+        &mut self,
+        builder: &mut DisplayListBuilder,
+        textures: &mut TextureStore,
+        layout: &TextLayout,
+        origin: Point,
+        color: Color,
+        clip: Option<Rect>,
+    ) -> Result<TextDrawStats, TextError> {
+        let scale = layout.scale();
+        if !origin.x.is_finite()
+            || !origin.y.is_finite()
+            || !(origin.x * scale).is_finite()
+            || !(origin.y * scale).is_finite()
+        {
+            return Err(TextError::InvalidOrigin);
+        }
+        if clip.is_some_and(|clip| !clip.is_finite()) {
+            return Err(TextError::InvalidBounds);
+        }
+
+        let before = self.atlas.stats();
+        let mut commands = Vec::new();
+        let mut visible_glyphs = 0;
+        let glyph_range = clip.map_or(0..layout.glyphs.len(), |clip| {
+            layout.visible_glyph_range(origin.y, clip.y, clip.bottom())
+        });
+        for positioned in &layout.glyphs[glyph_range] {
+            if clip.is_some_and(|clip| !estimated_visible(positioned, origin, clip)) {
+                continue;
+            }
+            visible_glyphs += 1;
+            let physical = positioned.glyph.physical(
+                (origin.x * scale, (origin.y + positioned.line_y) * scale),
+                scale,
+            );
+            let Some(resident) = self.atlas.resolve(
+                &mut self.font_system,
+                &mut self.rasterizer,
+                textures,
+                physical.cache_key,
+                self.frame,
+            )?
+            else {
+                continue;
+            };
+            let destination = Rect::new(
+                (physical.x + resident.left) as f32 / scale,
+                (physical.y - resident.top) as f32 / scale,
+                resident.width as f32 / scale,
+                resident.height as f32 / scale,
+            );
+            commands.push((
+                destination,
+                resident.texture,
+                resident.source,
+                if resident.color { Color::WHITE } else { color },
+            ));
+        }
+        self.atlas.flush(textures)?;
+
+        let record = |builder: &mut DisplayListBuilder| -> Result<(), BuildError> {
+            for (destination, texture, source, tint) in &commands {
+                builder.tinted_texture(
+                    *destination,
+                    *texture,
+                    Some(*source),
+                    *tint,
+                    1.0,
+                    Sampling::Nearest,
+                )?;
+            }
+            Ok(())
+        };
+        match clip {
+            Some(clip) => builder.with_clip(clip, record)?,
+            None => record(builder)?,
+        }
+
+        let after = self.atlas.stats();
+        Ok(TextDrawStats {
+            visible_glyphs,
+            recorded_glyphs: commands.len(),
+            cache_hits: after.cache_hits - before.cache_hits,
+            rasterized_glyphs: after.rasterized_glyphs - before.rasterized_glyphs,
+            atlas_uploads: after.uploads - before.uploads,
+            atlas_evictions: after.evictions - before.evictions,
+        })
     }
 
     pub fn atlas_stats(&self) -> AtlasStats {
@@ -213,85 +307,97 @@ impl TextFrame<'_> {
         color: Color,
         clip: Option<Rect>,
     ) -> Result<TextDrawStats, TextError> {
-        let scale = layout.scale();
-        if !origin.x.is_finite()
-            || !origin.y.is_finite()
-            || !(origin.x * scale).is_finite()
-            || !(origin.y * scale).is_finite()
-        {
-            return Err(TextError::InvalidOrigin);
-        }
-        if clip.is_some_and(|clip| !clip.is_finite()) {
-            return Err(TextError::InvalidBounds);
-        }
+        self.system
+            .draw_in_current_frame(builder, textures, layout, origin, color, clip)
+    }
+}
 
-        let before = self.system.atlas.stats();
-        let mut commands = Vec::new();
-        let mut visible_glyphs = 0;
-        let glyph_range = clip.map_or(0..layout.glyphs.len(), |clip| {
-            layout.visible_glyph_range(origin.y, clip.y, clip.bottom())
-        });
-        for positioned in &layout.glyphs[glyph_range] {
-            if clip.is_some_and(|clip| !estimated_visible(positioned, origin, clip)) {
-                continue;
-            }
-            visible_glyphs += 1;
-            let physical = positioned.glyph.physical(
-                (origin.x * scale, (origin.y + positioned.line_y) * scale),
-                scale,
-            );
-            let Some(resident) = self.system.atlas.resolve(
-                &mut self.system.font_system,
-                &mut self.system.rasterizer,
-                textures,
-                physical.cache_key,
-                self.system.frame,
-            )?
-            else {
-                continue;
-            };
-            let destination = Rect::new(
-                (physical.x + resident.left) as f32 / scale,
-                (physical.y - resident.top) as f32 / scale,
-                resident.width as f32 / scale,
-                resident.height as f32 / scale,
-            );
-            commands.push((
-                destination,
-                resident.texture,
-                resident.source,
-                if resident.color { Color::WHITE } else { color },
-            ));
-        }
-        self.system.atlas.flush(textures)?;
+/// Text shaping and atlas resources owned by one retained UI root.
+///
+/// The host reads [`Self::textures`] after paint when submitting the display
+/// list. Keeping the store beside the text system prevents glyph texture IDs
+/// from crossing resource owners.
+#[derive(Debug)]
+pub struct TextResources {
+    system: TextSystem,
+    textures: TextureStore,
+    output_scale: f32,
+}
 
-        let record = |builder: &mut DisplayListBuilder| -> Result<(), BuildError> {
-            for (destination, texture, source, tint) in &commands {
-                builder.tinted_texture(
-                    *destination,
-                    *texture,
-                    Some(*source),
-                    *tint,
-                    1.0,
-                    Sampling::Nearest,
-                )?;
-            }
-            Ok(())
-        };
-        match clip {
-            Some(clip) => builder.with_clip(clip, record)?,
-            None => record(builder)?,
-        }
-
-        let after = self.system.atlas.stats();
-        Ok(TextDrawStats {
-            visible_glyphs,
-            recorded_glyphs: commands.len(),
-            cache_hits: after.cache_hits - before.cache_hits,
-            rasterized_glyphs: after.rasterized_glyphs - before.rasterized_glyphs,
-            atlas_uploads: after.uploads - before.uploads,
-            atlas_evictions: after.evictions - before.evictions,
+impl TextResources {
+    pub fn new(
+        system: TextSystem,
+        textures: TextureStore,
+        output_scale: f32,
+    ) -> Result<Self, TextError> {
+        validate_scale(output_scale)?;
+        Ok(Self {
+            system,
+            textures,
+            output_scale,
         })
+    }
+
+    /// Load installed fonts and create the default retained text resources.
+    pub fn from_config(config: TextConfig, output_scale: f32) -> Result<Self, TextError> {
+        Self::new(TextSystem::new(config)?, TextureStore::new(), output_scale)
+    }
+
+    pub fn output_scale(&self) -> f32 {
+        self.output_scale
+    }
+
+    pub fn set_output_scale(&mut self, output_scale: f32) -> Result<(), TextError> {
+        validate_scale(output_scale)?;
+        self.output_scale = output_scale;
+        Ok(())
+    }
+
+    pub fn text_system(&self) -> &TextSystem {
+        &self.system
+    }
+
+    pub fn textures(&self) -> &TextureStore {
+        &self.textures
+    }
+
+    /// Mutable access for non-text UI assets that must share the same texture
+    /// identifier namespace as glyph atlas pages.
+    pub fn textures_mut(&mut self) -> &mut TextureStore {
+        &mut self.textures
+    }
+
+    pub(crate) fn begin_frame(&mut self) {
+        self.system.advance_frame();
+    }
+
+    pub(crate) fn layout(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        width: Option<f32>,
+    ) -> Result<Arc<TextLayout>, TextError> {
+        self.system.layout(text, style, width, self.output_scale)
+    }
+
+    pub(crate) fn draw(
+        &mut self,
+        builder: &mut DisplayListBuilder,
+        layout: &TextLayout,
+        origin: Point,
+        color: Color,
+        clip: Option<Rect>,
+    ) -> Result<TextDrawStats, TextError> {
+        self.system
+            .draw_in_current_frame(builder, &mut self.textures, layout, origin, color, clip)
+    }
+}
+
+fn validate_scale(scale: f32) -> Result<(), TextError> {
+    if scale.is_finite() && scale > 0.0 {
+        Ok(())
+    } else {
+        Err(TextError::InvalidScale)
     }
 }
 

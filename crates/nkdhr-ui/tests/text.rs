@@ -3,6 +3,7 @@ use std::{fs, path::PathBuf, sync::Arc};
 use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{Color, DisplayList, DisplayListBuilder, Point, Rect, TextureStore};
 use nkdhr_ui::text::{AtlasConfig, TextConfig, TextStyle, TextSystem, TextWrap};
+use unicode_segmentation::UnicodeSegmentation;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 104;
@@ -60,6 +61,50 @@ fn advanced_shaping_marks_bidirectional_runs() {
         .unwrap();
     assert!(layout.has_right_to_left_glyphs());
     assert!(layout.glyph_count() > 10);
+}
+
+#[test]
+fn layout_hit_testing_and_carets_stay_on_grapheme_boundaries() {
+    let mut text = fixture_system(TextConfig::default());
+    let source = "a\u{301}中🙂";
+    let layout = text.layout(source, &fixture_style(), None, 1.0).unwrap();
+    let boundaries = source
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .chain(std::iter::once(source.len()))
+        .collect::<Vec<_>>();
+
+    for boundary in boundaries {
+        let caret = layout.caret(boundary);
+        let hit = layout.hit_test(Point::new(caret.x, caret.y + caret.height * 0.5));
+        assert!(source.is_char_boundary(hit.byte_index));
+        assert!(
+            source
+                .grapheme_indices(true)
+                .map(|(index, _)| index)
+                .chain(std::iter::once(source.len()))
+                .any(|index| index == hit.byte_index),
+            "hit {} was not a grapheme boundary",
+            hit.byte_index
+        );
+    }
+}
+
+#[test]
+fn multiline_caret_uses_global_source_offsets_and_visual_line_geometry() {
+    let mut text = fixture_system(TextConfig::default());
+    let layout = text
+        .layout("ab\n中🙂", &fixture_style(), Some(280.0), 1.0)
+        .unwrap();
+    let second_line = layout.caret("ab\n".len());
+    assert_eq!(second_line.byte_index, 3);
+    assert_eq!(second_line.line_index, 1);
+    assert!(second_line.y > layout.caret(0).y);
+    let hit = layout.hit_test(Point::new(
+        second_line.x,
+        second_line.y + second_line.height * 0.5,
+    ));
+    assert_eq!(hit.byte_index, 3);
 }
 
 #[test]

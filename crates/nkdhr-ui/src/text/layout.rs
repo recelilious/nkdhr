@@ -7,6 +7,8 @@ use std::{
 use cosmic_text::{
     Align, Attrs, Buffer, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
+use nkdhr_render::Point;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::TextError;
 
@@ -95,6 +97,8 @@ impl TextStyle {
 #[derive(Debug, Clone)]
 pub(crate) struct LayoutGlyph {
     pub glyph: cosmic_text::LayoutGlyph,
+    pub byte_start: usize,
+    pub byte_end: usize,
     pub line_y: f32,
     pub line_top: f32,
     pub line_height: f32,
@@ -103,13 +107,32 @@ pub(crate) struct LayoutGlyph {
 #[derive(Debug, Clone)]
 struct LayoutLineRange {
     glyphs: Range<usize>,
+    bytes: Range<usize>,
     top: f32,
     bottom: f32,
+}
+
+/// Nearest editable byte boundary returned by text hit testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextHit {
+    pub byte_index: usize,
+    pub line_index: usize,
+}
+
+/// Logical caret geometry relative to the text layout origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextCaret {
+    pub byte_index: usize,
+    pub line_index: usize,
+    pub x: f32,
+    pub y: f32,
+    pub height: f32,
 }
 
 /// Immutable shaped text, independent from glyph-atlas residency and color.
 #[derive(Debug)]
 pub struct TextLayout {
+    text: Arc<str>,
     pub(crate) glyphs: Vec<LayoutGlyph>,
     pub(crate) font_ids: HashSet<cosmic_text::fontdb::ID>,
     lines: Vec<LayoutLineRange>,
@@ -149,6 +172,124 @@ impl TextLayout {
         self.scale
     }
 
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Find the nearest grapheme-safe byte boundary for a local point.
+    pub fn hit_test(&self, point: Point) -> TextHit {
+        let line_index = self.line_for_y(point.y);
+        let Some(line) = self.lines.get(line_index) else {
+            return TextHit {
+                byte_index: 0,
+                line_index: 0,
+            };
+        };
+        let glyphs = &self.glyphs[line.glyphs.clone()];
+        if glyphs.is_empty() {
+            return TextHit {
+                byte_index: line.bytes.start.min(self.text.len()),
+                line_index,
+            };
+        }
+
+        for positioned in glyphs {
+            let glyph = &positioned.glyph;
+            if point.x >= glyph.x && point.x <= glyph.x + glyph.w {
+                return TextHit {
+                    byte_index: hit_glyph(&self.text, positioned, point.x),
+                    line_index,
+                };
+            }
+        }
+
+        let mut nearest = (f32::INFINITY, line.bytes.end.min(self.text.len()));
+        for positioned in glyphs {
+            let glyph = &positioned.glyph;
+            let edges = if glyph.level.is_rtl() {
+                [
+                    (glyph.x, positioned.byte_end),
+                    (glyph.x + glyph.w, positioned.byte_start),
+                ]
+            } else {
+                [
+                    (glyph.x, positioned.byte_start),
+                    (glyph.x + glyph.w, positioned.byte_end),
+                ]
+            };
+            for (x, byte_index) in edges {
+                let distance = (point.x - x).abs();
+                if distance < nearest.0 {
+                    nearest = (distance, byte_index);
+                }
+            }
+        }
+        TextHit {
+            byte_index: nearest.1,
+            line_index,
+        }
+    }
+
+    /// Resolve a grapheme-safe source byte boundary to local caret geometry.
+    pub fn caret(&self, byte_index: usize) -> TextCaret {
+        let byte_index = floor_grapheme_boundary(&self.text, byte_index.min(self.text.len()));
+        let mut fallback = TextCaret {
+            byte_index,
+            line_index: self.lines.len().saturating_sub(1),
+            x: self.width,
+            y: self.lines.last().map_or(0.0, |line| line.top),
+            height: self.lines.last().map_or(0.0, |line| line.bottom - line.top),
+        };
+
+        // Prefer a cluster start. At wrapped or explicit line boundaries this
+        // places the caret on the following visual line.
+        for (line_index, line) in self.lines.iter().enumerate() {
+            for positioned in &self.glyphs[line.glyphs.clone()] {
+                if byte_index == positioned.byte_start {
+                    return caret_at_edge(positioned, byte_index, line_index, true);
+                }
+            }
+        }
+        for (line_index, line) in self.lines.iter().enumerate() {
+            for positioned in &self.glyphs[line.glyphs.clone()] {
+                if byte_index > positioned.byte_start && byte_index < positioned.byte_end {
+                    let cluster = &self.text[positioned.byte_start..positioned.byte_end];
+                    let before = cluster
+                        .grapheme_indices(true)
+                        .filter(|(index, _)| positioned.byte_start + index < byte_index)
+                        .count();
+                    let total = cluster.graphemes(true).count().max(1);
+                    let fraction = before as f32 / total as f32;
+                    let x = if positioned.glyph.level.is_rtl() {
+                        positioned.glyph.x + positioned.glyph.w * (1.0 - fraction)
+                    } else {
+                        positioned.glyph.x + positioned.glyph.w * fraction
+                    };
+                    return TextCaret {
+                        byte_index,
+                        line_index,
+                        x,
+                        y: positioned.line_top,
+                        height: positioned.line_height,
+                    };
+                }
+                if byte_index == positioned.byte_end {
+                    fallback = caret_at_edge(positioned, byte_index, line_index, false);
+                }
+            }
+            if line.glyphs.is_empty() && line.bytes.contains(&byte_index) {
+                return TextCaret {
+                    byte_index,
+                    line_index,
+                    x: 0.0,
+                    y: line.top,
+                    height: line.bottom - line.top,
+                };
+            }
+        }
+        fallback
+    }
+
     pub(crate) fn visible_glyph_range(
         &self,
         origin_y: f32,
@@ -171,6 +312,74 @@ impl TextLayout {
             _ => 0..0,
         }
     }
+
+    fn line_for_y(&self, y: f32) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        if y < self.lines[0].top {
+            return 0;
+        }
+        self.lines
+            .iter()
+            .position(|line| y >= line.top && y < line.bottom)
+            .unwrap_or(self.lines.len() - 1)
+    }
+}
+
+fn hit_glyph(text: &str, positioned: &LayoutGlyph, x: f32) -> usize {
+    let glyph = &positioned.glyph;
+    let cluster = &text[positioned.byte_start..positioned.byte_end];
+    let graphemes = cluster.grapheme_indices(true).collect::<Vec<_>>();
+    if graphemes.is_empty() || glyph.w <= 0.0 {
+        return positioned.byte_start;
+    }
+    let cell_width = glyph.w / graphemes.len() as f32;
+    let visual = ((x - glyph.x) / cell_width)
+        .floor()
+        .clamp(0.0, (graphemes.len() - 1) as f32) as usize;
+    let logical = if glyph.level.is_rtl() {
+        graphemes.len() - 1 - visual
+    } else {
+        visual
+    };
+    let (offset, grapheme) = graphemes[logical];
+    let cell_x = glyph.x + visual as f32 * cell_width;
+    let after_visual_half = x >= cell_x + cell_width * 0.5;
+    let after_logically = after_visual_half != glyph.level.is_rtl();
+    positioned.byte_start + offset + usize::from(after_logically) * grapheme.len()
+}
+
+fn caret_at_edge(
+    positioned: &LayoutGlyph,
+    byte_index: usize,
+    line_index: usize,
+    start: bool,
+) -> TextCaret {
+    let rtl = positioned.glyph.level.is_rtl();
+    let x = if start == rtl {
+        positioned.glyph.x + positioned.glyph.w
+    } else {
+        positioned.glyph.x
+    };
+    TextCaret {
+        byte_index,
+        line_index,
+        x,
+        y: positioned.line_top,
+        height: positioned.line_height,
+    }
+}
+
+fn floor_grapheme_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    text.grapheme_indices(true)
+        .map(|(boundary, _)| boundary)
+        .take_while(|boundary| *boundary <= index)
+        .last()
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -321,27 +530,38 @@ fn shape(
     let mut measured_width = 0.0_f32;
     let mut measured_height = 0.0_f32;
     let mut line_count = 0;
+    let line_starts = source_line_starts(text);
     for run in buffer.layout_runs() {
         line_count += 1;
         measured_width = measured_width.max(run.line_w);
         measured_height = measured_height.max(run.line_top + run.line_height);
         let start = glyphs.len();
+        let source_start = line_starts.get(run.line_i).copied().unwrap_or(0);
         for glyph in run.glyphs {
             font_ids.insert(glyph.font_id);
             glyphs.push(LayoutGlyph {
+                byte_start: source_start + glyph.start,
+                byte_end: source_start + glyph.end,
                 glyph: glyph.clone(),
                 line_y: run.line_y,
                 line_top: run.line_top,
                 line_height: run.line_height,
             });
         }
+        let bytes = glyphs[start..]
+            .iter()
+            .map(|glyph| glyph.byte_start..glyph.byte_end)
+            .reduce(|first, next| first.start.min(next.start)..first.end.max(next.end))
+            .unwrap_or(source_start..source_start + run.text.len());
         lines.push(LayoutLineRange {
             glyphs: start..glyphs.len(),
+            bytes,
             top: run.line_top,
             bottom: run.line_top + run.line_height,
         });
     }
     Ok(TextLayout {
+        text: Arc::from(text),
         glyphs,
         font_ids,
         lines,
@@ -351,6 +571,15 @@ fn shape(
         line_count,
         scale,
     })
+}
+
+fn source_line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(
+        text.char_indices()
+            .filter_map(|(index, character)| (character == '\n').then_some(index + 1)),
+    );
+    starts
 }
 
 fn select_family<'a>(font_system: &FontSystem, families: &'a [String]) -> Family<'a> {

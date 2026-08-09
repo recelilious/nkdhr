@@ -6,12 +6,14 @@ use std::{
     fmt,
     ops::{BitOr, BitOrAssign},
     rc::Rc,
+    sync::Arc,
     time::Duration,
 };
 
-use nkdhr_render::{BuildError, DisplayListBuilder, Point, Rect};
+use nkdhr_render::{BuildError, Color, DisplayListBuilder, Point, Rect, TextureStore};
 
 use crate::reactive::SubscriptionToken;
+use crate::text::{TextDrawStats, TextError, TextLayout, TextResources, TextStyle};
 use crate::{
     Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, SemanticNode, Semantics, Size,
     SystemClock, UiEvent,
@@ -39,6 +41,8 @@ pub enum UiError {
         expected_maximum: usize,
         actual: usize,
     },
+    TextResourcesRequired,
+    Text(String),
     DisplayList(BuildError),
 }
 
@@ -80,6 +84,10 @@ impl fmt::Display for UiError {
                 formatter,
                 "widget accepts at most {expected_maximum} child(ren), received {actual}"
             ),
+            Self::TextResourcesRequired => {
+                formatter.write_str("this widget requires text resources on its UI root")
+            }
+            Self::Text(error) => write!(formatter, "text operation failed: {error}"),
             Self::DisplayList(error) => error.fmt(formatter),
         }
     }
@@ -90,6 +98,12 @@ impl std::error::Error for UiError {}
 impl From<BuildError> for UiError {
     fn from(value: BuildError) -> Self {
         Self::DisplayList(value)
+    }
+}
+
+impl From<TextError> for UiError {
+    fn from(value: TextError) -> Self {
+        Self::Text(value.to_string())
     }
 }
 
@@ -447,6 +461,7 @@ pub struct UiRoot {
     root: Option<WidgetId>,
     reactivity: Rc<RootReactivity>,
     clock: Box<dyn Clock>,
+    text: Option<TextResources>,
     focus: Option<WidgetId>,
     pointer_capture: Option<WidgetId>,
     pointer_position: Option<Point>,
@@ -463,12 +478,33 @@ impl UiRoot {
     }
 
     pub fn with_clock(element: Element, clock: impl Clock) -> UiResult<Self> {
+        Self::with_optional_text(element, clock, None)
+    }
+
+    pub fn with_text(element: Element, text: TextResources) -> UiResult<Self> {
+        Self::with_clock_and_text(element, SystemClock::new(), text)
+    }
+
+    pub fn with_clock_and_text(
+        element: Element,
+        clock: impl Clock,
+        text: TextResources,
+    ) -> UiResult<Self> {
+        Self::with_optional_text(element, clock, Some(text))
+    }
+
+    fn with_optional_text(
+        element: Element,
+        clock: impl Clock,
+        text: Option<TextResources>,
+    ) -> UiResult<Self> {
         element.validate()?;
         let mut root = Self {
             arena: Arena::default(),
             root: None,
             reactivity: RootReactivity::new(),
             clock: Box::new(clock),
+            text,
             focus: None,
             pointer_capture: None,
             pointer_position: None,
@@ -481,6 +517,25 @@ impl UiRoot {
         let id = root.mount(element, None)?;
         root.root = Some(id);
         Ok(root)
+    }
+
+    pub fn text_resources(&self) -> Option<&TextResources> {
+        self.text.as_ref()
+    }
+
+    pub fn texture_store(&self) -> Option<&TextureStore> {
+        self.text.as_ref().map(TextResources::textures)
+    }
+
+    pub fn texture_store_mut(&mut self) -> Option<&mut TextureStore> {
+        self.text.as_mut().map(TextResources::textures_mut)
+    }
+
+    pub fn set_text_output_scale(&mut self, scale: f32) -> UiResult<()> {
+        let text = self.text.as_mut().ok_or(UiError::TextResourcesRequired)?;
+        text.set_output_scale(scale)?;
+        self.dirty |= Invalidation::LAYOUT | Invalidation::SEMANTICS;
+        Ok(())
     }
 
     pub fn root_id(&self) -> WidgetId {
@@ -565,6 +620,9 @@ impl UiRoot {
         self.flush_reactive();
         if self.dirty.contains(Invalidation::LAYOUT) {
             return Err(UiError::LayoutRequired);
+        }
+        if let Some(text) = &mut self.text {
+            text.begin_frame();
         }
         self.paint_order.clear();
         self.paint_node(self.root_id(), builder, EffectiveClip::Unbounded)?;
@@ -1334,6 +1392,20 @@ impl MeasureCtx<'_> {
         self.children.len()
     }
 
+    pub fn layout_text(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        width: Option<f32>,
+    ) -> UiResult<Arc<TextLayout>> {
+        self.root
+            .text
+            .as_mut()
+            .ok_or(UiError::TextResourcesRequired)?
+            .layout(text, style, width)
+            .map_err(Into::into)
+    }
+
     pub fn measure_child(&mut self, index: usize, constraints: Constraints) -> UiResult<Size> {
         let child = *self
             .children
@@ -1440,6 +1512,21 @@ impl PaintCtx<'_> {
 
     pub fn builder(&mut self) -> &mut DisplayListBuilder {
         self.builder
+    }
+
+    pub fn draw_text(
+        &mut self,
+        layout: &TextLayout,
+        origin: Point,
+        color: Color,
+        clip: Option<Rect>,
+    ) -> UiResult<TextDrawStats> {
+        self.root
+            .text
+            .as_mut()
+            .ok_or(UiError::TextResourcesRequired)?
+            .draw(self.builder, layout, origin, color, clip)
+            .map_err(Into::into)
     }
 
     /// Arranged child geometry for container-owned decoration such as a list

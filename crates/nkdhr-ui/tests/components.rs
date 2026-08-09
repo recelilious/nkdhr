@@ -1,13 +1,15 @@
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
+use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
     Color, DisplayListBuilder, Point, Primitive, TextureStore, software::SoftwareRenderer,
 };
+use nkdhr_ui::text::{TextConfig, TextResources, TextSystem};
 use nkdhr_ui::{
     Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment, Density, Element, Flex,
     GlassSurface, Insets, Key, List, ListItem, MainAxisAlignment, ManualClock, MaterialTier,
     Modifiers, MotionMode, PointerButton, Reactive, Scroll, ScrollOffset, SemanticRole, Size,
-    Slider, TextInput, Theme, Toggle, UiEvent, UiRoot, Widget,
+    Slider, Text, TextInput, TextRole, Theme, Toggle, UiEvent, UiRoot, Widget,
 };
 
 fn prepare(root: &mut UiRoot, size: Size) -> nkdhr_render::DisplayList {
@@ -23,16 +25,37 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+fn fixture_text_resources() -> TextResources {
+    let mut database = fontdb::Database::new();
+    for bytes in [
+        include_bytes!("fonts/NotoSansLatin.subset.ttf").as_slice(),
+        include_bytes!("fonts/NotoSansCJKsc.subset.otf").as_slice(),
+        include_bytes!("fonts/NotoColorEmoji.subset.ttf").as_slice(),
+    ] {
+        database.load_font_source(fontdb::Source::Binary(Arc::new(bytes.to_vec())));
+    }
+    database.set_sans_serif_family("Noto Sans");
+    let system = TextSystem::with_font_system(
+        FontSystem::new_with_locale_and_db("zh-CN".to_owned(), database),
+        TextConfig::default(),
+    )
+    .unwrap();
+    TextResources::new(system, TextureStore::new(), 1.0).unwrap()
+}
+
 #[test]
 fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
     let theme = Arc::new(Theme::default());
     let activations = Rc::new(Cell::new(0));
     let callback_count = Rc::clone(&activations);
-    let mut root = UiRoot::new(Element::new(
-        Button::new("Apply", theme)
-            .variant(ButtonVariant::Primary)
-            .on_activate(move || callback_count.set(callback_count.get() + 1)),
-    ))
+    let mut root = UiRoot::with_text(
+        Element::new(
+            Button::new("Apply", theme)
+                .variant(ButtonVariant::Primary)
+                .on_activate(move || callback_count.set(callback_count.get() + 1)),
+        ),
+        fixture_text_resources(),
+    )
     .unwrap();
     prepare(&mut root, Size::new(120.0, 44.0));
 
@@ -72,6 +95,19 @@ fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
     .unwrap();
     assert_eq!(activations.get(), 2);
     assert_eq!(root.semantic_tree()[0].semantics.role, SemanticRole::Button);
+}
+
+#[test]
+fn text_rendering_components_reject_a_root_without_text_resources() {
+    let mut root = UiRoot::new(Element::new(Button::new(
+        "Apply",
+        Arc::new(Theme::default()),
+    )))
+    .unwrap();
+    assert_eq!(
+        root.layout(Size::new(120.0, 44.0)),
+        Err(nkdhr_ui::UiError::TextResourcesRequired)
+    );
 }
 
 #[test]
@@ -224,14 +260,21 @@ impl Widget for LabelBlock {
     }
 }
 
-fn setting_row(control: Element) -> Element {
+fn setting_row(label: &str, control: Element, theme: &Theme) -> Element {
     Element::new(Flex {
         axis: Axis::Horizontal,
         gap: 16.0,
         main_alignment: MainAxisAlignment::SpaceBetween,
         cross_alignment: CrossAxisAlignment::Center,
     })
-    .child(Element::new(LabelBlock).flex(1.0))
+    .child(
+        Element::new(Text::new(
+            label,
+            theme.text_style(TextRole::Body),
+            theme.palette.text_primary,
+        ))
+        .flex(1.0),
+    )
     .child(control)
 }
 
@@ -244,17 +287,25 @@ fn settings_scene(theme: Arc<Theme>) -> Element {
         main_alignment: MainAxisAlignment::Start,
         cross_alignment: CrossAxisAlignment::Stretch,
     })
-    .child(setting_row(Element::new(Toggle::new(
-        "Background blur",
-        blur,
-        Arc::clone(&theme),
-    ))))
-    .child(setting_row(Element::new(
-        Slider::new("Content opacity", opacity, 60.0, 98.0, Arc::clone(&theme)).unwrap(),
-    )))
-    .child(setting_row(Element::new(
-        Button::new("Open curve editor", Arc::clone(&theme)).variant(ButtonVariant::Primary),
-    )));
+    .child(setting_row(
+        "Background blur 模糊",
+        Element::new(Toggle::new("Background blur", blur, Arc::clone(&theme))),
+        &theme,
+    ))
+    .child(setting_row(
+        "Content opacity",
+        Element::new(
+            Slider::new("Content opacity", opacity, 60.0, 98.0, Arc::clone(&theme)).unwrap(),
+        ),
+        &theme,
+    ))
+    .child(setting_row(
+        "Motion curve 🚀",
+        Element::new(
+            Button::new("Open curve editor", Arc::clone(&theme)).variant(ButtonVariant::Primary),
+        ),
+        &theme,
+    ));
 
     Element::new(
         GlassSurface::new(theme, MaterialTier::ContentSurface)
@@ -267,7 +318,8 @@ fn settings_scene(theme: Arc<Theme>) -> Element {
 #[test]
 fn settings_like_scene_composes_only_public_ui_api_at_two_widths() {
     let theme = Arc::new(Theme::default());
-    let mut root = UiRoot::new(settings_scene(Arc::clone(&theme))).unwrap();
+    let mut root =
+        UiRoot::with_text(settings_scene(Arc::clone(&theme)), fixture_text_resources()).unwrap();
     let wide = prepare(&mut root, Size::new(720.0, 260.0));
     assert!(
         wide.primitives()
@@ -276,8 +328,10 @@ fn settings_like_scene_composes_only_public_ui_api_at_two_widths() {
     );
     let mut renderer = SoftwareRenderer::new(720, 260).unwrap();
     renderer.clear(theme.palette.backdrop);
-    renderer.render(&wide, &TextureStore::new(), 1.0).unwrap();
-    assert_eq!(fnv1a(&renderer.rgba8()), 3_912_143_913_703_596_870);
+    renderer
+        .render(&wide, root.texture_store().unwrap(), 1.0)
+        .unwrap();
+    assert_eq!(fnv1a(&renderer.rgba8()), 17_414_112_130_380_794_923);
 
     let mut compact_theme = (*theme).clone();
     compact_theme.density = Density::Compact;
@@ -403,7 +457,7 @@ fn scroll_clamps_pointer_and_keyboard_updates_to_content_extent() {
 fn text_input_edits_graphemes_and_password_semantics_never_expose_content() {
     let value = Reactive::new(String::new());
     let input = TextInput::new("Secret", value.clone(), Arc::new(Theme::default())).password(true);
-    let mut root = UiRoot::new(Element::new(input)).unwrap();
+    let mut root = UiRoot::with_text(Element::new(input), fixture_text_resources()).unwrap();
     prepare(&mut root, Size::new(200.0, 44.0));
     root.dispatch(&UiEvent::PointerDown {
         position: Point::new(40.0, 22.0),
@@ -436,4 +490,50 @@ fn text_input_edits_graphemes_and_password_semantics_never_expose_content() {
     })
     .unwrap();
     assert!(value.get().is_empty());
+}
+
+#[test]
+fn retained_text_and_text_input_use_shared_glyph_geometry() {
+    let theme = Arc::new(Theme::default());
+    let value = Reactive::new("abc🙂".to_owned());
+    let scene = Element::new(Flex {
+        axis: Axis::Vertical,
+        gap: 8.0,
+        main_alignment: MainAxisAlignment::Start,
+        cross_alignment: CrossAxisAlignment::Stretch,
+    })
+    .child(Element::new(Text::new(
+        "nkdhr UI 你好 🚀",
+        theme.text_style(TextRole::Body),
+        theme.palette.text_primary,
+    )))
+    .child(Element::new(TextInput::new(
+        "Command",
+        value.clone(),
+        Arc::clone(&theme),
+    )));
+    let mut root = UiRoot::with_text(scene, fixture_text_resources()).unwrap();
+    let display_list = prepare(&mut root, Size::new(260.0, 90.0));
+    assert!(
+        display_list
+            .primitives()
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Texture(_)))
+    );
+    assert!(root.texture_store().is_some());
+
+    // The input begins on the second row. A click at its left text inset must
+    // place the caret at the first glyph, rather than the legacy shell-end fallback.
+    root.dispatch(&UiEvent::PointerDown {
+        position: Point::new(12.0, 50.0),
+        button: PointerButton::Primary,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::PointerUp {
+        position: Point::new(12.0, 50.0),
+        button: PointerButton::Primary,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::TextInput("X".to_owned())).unwrap();
+    assert_eq!(value.get(), "Xabc🙂");
 }

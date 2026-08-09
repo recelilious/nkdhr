@@ -5,6 +5,7 @@ use std::fmt;
 use nkdhr_render::Color;
 
 use crate::MotionProfile;
+use crate::text::TextStyle;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Density {
@@ -355,6 +356,23 @@ impl Default for Theme {
 impl Theme {
     pub fn density_metrics(&self) -> DensityMetrics {
         DensityMetrics::for_density(self.density)
+    }
+
+    /// Resolve one typography role into the shaping style consumed by retained
+    /// text widgets. Typography scale remains independent from component density.
+    pub fn text_style(&self, role: TextRole) -> TextStyle {
+        let token = self.typography.token(role);
+        TextStyle {
+            families: if role == TextRole::Mono {
+                self.typography.families.mono.clone()
+            } else {
+                self.typography.families.ui.clone()
+            },
+            weight: token.weight,
+            font_size: token.font_size,
+            line_height: token.line_height,
+            ..TextStyle::default()
+        }
     }
 
     pub fn material(&self, tier: MaterialTier) -> GlassMaterial {

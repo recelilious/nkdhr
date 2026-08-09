@@ -27,9 +27,11 @@ UI-2 已实现高级 Unicode 塑形、CJK/emoji 字体回退、彩色 emoji、�
 keyed 重建、有限约束布局、排队式响应状态、统一绘制/命中顺序、焦点域、
 指针捕获与 hover、语义树及宿主时钟动画。经过共同确认的产品层现已开始
 转入生产代码：类型化密度、间距、圆角、排版、玻璃材质和运动配置，以及首批
-公共 `GlassSurface`、`Button`、`Toggle`、`Slider`、`List`、`Scroll` 和
-`TextInput` 实现已经存在。UI-3 仍未完成；保留式文字呈现、完整高级组件行为、
-合成器真实背景模糊和已确认的设置界面仍需接入并完成视觉验收。
+公共 `GlassSurface`、`Button`、`Toggle`、`Slider`、`List`、`Scroll`、
+`Text` 和 `TextInput` 实现已经存在。保留式组件树现已拥有统一的文字塑形/字形图集
+资源边界：公共文字、组件标签与 TextInput 字形命中均通过同一个纹理仓库绘制真实
+Unicode/CJK/emoji。UI-3 仍未完成；完整高级组件行为、合成器真实背景模糊和
+已确认的设置界面仍需接入并完成视觉验收。
 
 ## 文档
 

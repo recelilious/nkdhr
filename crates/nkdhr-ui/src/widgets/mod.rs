@@ -5,6 +5,7 @@ mod list;
 mod scroll;
 mod slider;
 mod surface;
+mod text;
 mod text_input;
 mod toggle;
 
@@ -13,5 +14,6 @@ pub use list::{List, ListError, ListItem, ListItemBehavior};
 pub use scroll::{Scroll, ScrollError, ScrollOffset};
 pub use slider::{Slider, SliderError};
 pub use surface::{GlassSurface, SurfaceState};
+pub use text::Text;
 pub use text_input::{TextInput, TextInputError, TextInputStatus};
 pub use toggle::Toggle;

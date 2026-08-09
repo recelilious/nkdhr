@@ -1,8 +1,9 @@
 use std::{any::Any, fmt, ops::Range, rc::Rc, sync::Arc};
 
-use nkdhr_render::{CornerRadii, Rect};
+use nkdhr_render::{CornerRadii, Point, Rect};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::text::{TextLayout, TextWrap};
 use crate::theme::with_alpha;
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
@@ -121,6 +122,9 @@ struct TextInputState {
     observed_value: String,
     preedit: Option<(String, Option<(usize, usize)>)>,
     pointer_pressed: bool,
+    layout: Option<Arc<TextLayout>>,
+    display_boundaries: Vec<(usize, usize)>,
+    text_origin: Point,
 }
 
 impl Default for TextInputState {
@@ -133,6 +137,9 @@ impl Default for TextInputState {
             observed_value: String::new(),
             preedit: None,
             pointer_pressed: false,
+            layout: None,
+            display_boundaries: vec![(0, 0)],
+            text_origin: Point::new(0.0, 0.0),
         }
     }
 }
@@ -169,6 +176,8 @@ impl Widget for TextInput {
         if previous.multiline != self.multiline
             || previous.minimum_lines != self.minimum_lines
             || previous.theme.density != self.theme.density
+            || previous.theme.typography != self.theme.typography
+            || previous.password != self.password
         {
             ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
         } else {
@@ -195,6 +204,31 @@ impl Widget for TextInput {
         } else {
             self.theme.density_metrics().control_height
         };
+        let value = ctx.watch(&self.value, Invalidation::LAYOUT | Invalidation::SEMANTICS);
+        let (selection, preedit) = {
+            let state = ctx.state_mut::<TextInputState>()?;
+            state.synchronize(&value);
+            (state.selection(), state.preedit.clone())
+        };
+        let display = display_text(
+            &value,
+            self.password,
+            preedit.as_ref().map(|(text, _)| (selection, text.as_str())),
+        );
+        let mut style = self.theme.text_style(crate::TextRole::Body);
+        style.wrap = if self.multiline {
+            TextWrap::WordOrGlyph
+        } else {
+            TextWrap::None
+        };
+        let width = self
+            .multiline
+            .then_some((constraints.max().width - horizontal * 2.0).max(0.0));
+        let layout = ctx.layout_text(&display.text, &style, width)?;
+        let text_size = Size::new(layout.width(), layout.height());
+        let state = ctx.state_mut::<TextInputState>()?;
+        state.layout = Some(layout);
+        state.display_boundaries = display.boundaries;
         let child = if ctx.child_count() == 1 {
             ctx.measure_child(
                 0,
@@ -204,8 +238,8 @@ impl Widget for TextInput {
             Size::ZERO
         };
         Ok(constraints.constrain(Size::new(
-            (child.width + horizontal * 2.0).max(120.0),
-            (child.height + vertical * 2.0).max(minimum_height),
+            (child.width.max(text_size.width) + horizontal * 2.0).max(120.0),
+            (child.height.max(text_size.height) + vertical * 2.0).max(minimum_height),
         )))
     }
 
@@ -222,6 +256,19 @@ impl Widget for TextInput {
                 ),
             )?;
         }
+        let layout_height = ctx
+            .state_mut::<TextInputState>()?
+            .layout
+            .as_ref()
+            .map_or(0.0, |layout| layout.height());
+        ctx.state_mut::<TextInputState>()?.text_origin = Point::new(
+            rect.x + 12.0,
+            if self.multiline {
+                rect.y + 8.0
+            } else {
+                rect.y + (rect.height - layout_height).max(0.0) * 0.5
+            },
+        );
         Ok(())
     }
 
@@ -229,13 +276,18 @@ impl Widget for TextInput {
         let value = ctx.watch(&self.value, Invalidation::PAINT | Invalidation::SEMANTICS);
         let status = ctx.watch(&self.status, Invalidation::PAINT | Invalidation::SEMANTICS);
         let now = ctx.now();
-        let (focused, focus, active) = {
+        let (focused, focus, active, layout, origin, caret, selection, boundaries) = {
             let state = ctx.state_mut::<TextInputState>()?;
             state.synchronize(&value);
             (
                 state.focused,
                 state.focus_motion.value(now),
                 state.focus_motion.is_active(now),
+                state.layout.clone(),
+                state.text_origin,
+                state.caret,
+                state.selection(),
+                state.display_boundaries.clone(),
             )
         };
         if active {
@@ -284,6 +336,43 @@ impl Widget for TextInput {
             )?,
             TextInputStatus::Idle => {}
         }
+        if let Some(layout) = layout {
+            let clip = rect.inset(8.0);
+            if !selection.is_empty() {
+                let start = layout.caret(source_to_display(&boundaries, selection.start));
+                let end = layout.caret(source_to_display(&boundaries, selection.end));
+                if start.line_index == end.line_index {
+                    ctx.builder().rounded_rect(
+                        Rect::new(
+                            origin.x + start.x.min(end.x),
+                            origin.y + start.y,
+                            (start.x - end.x).abs().max(1.0),
+                            start.height.max(end.height),
+                        ),
+                        CornerRadii::all(2.0),
+                        with_alpha(self.theme.palette.accent, 0.28),
+                    )?;
+                }
+            }
+            ctx.draw_text(
+                &layout,
+                origin,
+                if self.enabled {
+                    self.theme.palette.text_primary
+                } else {
+                    self.theme.palette.text_muted
+                },
+                Some(clip),
+            )?;
+            if focused {
+                let caret = layout.caret(source_to_display(&boundaries, caret));
+                ctx.builder().rounded_rect(
+                    Rect::new(origin.x + caret.x, origin.y + caret.y, 1.5, caret.height),
+                    CornerRadii::all(0.75),
+                    self.theme.palette.accent_secondary,
+                )?;
+            }
+        }
         ctx.paint_children()
     }
 
@@ -303,22 +392,23 @@ impl Widget for TextInput {
                     if *focused { 1.0 } else { 0.0 },
                     self.theme.motion.spec(MotionFamily::TextInputFocus),
                 );
-                if !focused {
-                    state.preedit = None;
-                }
-                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                let cleared_preedit = !focused && state.preedit.take().is_some();
+                ctx.invalidate(if cleared_preedit {
+                    Invalidation::LAYOUT | Invalidation::SEMANTICS
+                } else {
+                    Invalidation::PAINT | Invalidation::SEMANTICS
+                });
                 ctx.request_animation_frame();
             }
             UiEvent::PointerDown {
                 button: PointerButton::Primary,
-                ..
+                position,
             } if self.enabled => {
                 let state = ctx.state_mut::<TextInputState>()?;
                 state.pointer_pressed = true;
-                // Exact glyph hit mapping belongs to the retained Text widget;
-                // until it is connected, a shell click positions at the end.
-                state.anchor = value.len();
-                state.caret = value.len();
+                let caret = hit_source_boundary(state, *position, value.len());
+                state.anchor = caret;
+                state.caret = caret;
                 ctx.request_focus();
                 ctx.capture_pointer();
                 ctx.set_handled();
@@ -326,12 +416,23 @@ impl Widget for TextInput {
             }
             UiEvent::PointerUp {
                 button: PointerButton::Primary,
-                ..
+                position,
             } => {
                 if ctx.state_mut::<TextInputState>()?.pointer_pressed {
-                    ctx.state_mut::<TextInputState>()?.pointer_pressed = false;
+                    let state = ctx.state_mut::<TextInputState>()?;
+                    state.caret = hit_source_boundary(state, *position, value.len());
+                    state.pointer_pressed = false;
                     ctx.release_pointer();
                     ctx.set_handled();
+                    ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                }
+            }
+            UiEvent::PointerMoved { position } => {
+                let state = ctx.state_mut::<TextInputState>()?;
+                if state.pointer_pressed {
+                    state.caret = hit_source_boundary(state, *position, value.len());
+                    ctx.set_handled();
+                    ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
                 }
             }
             UiEvent::PointerCancel => {
@@ -340,15 +441,17 @@ impl Widget for TextInput {
             }
             UiEvent::TextInput(text) if self.editable() => {
                 let text = normalize_insert(text, self.multiline);
-                replace_selection(ctx.state_mut::<TextInputState>()?, &mut value, &text);
+                let state = ctx.state_mut::<TextInputState>()?;
+                replace_selection(state, &mut value, &text);
+                state.preedit = None;
                 self.publish(value);
                 ctx.set_handled();
-                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
             }
             UiEvent::ImePreedit { text, selection } if self.editable() => {
                 ctx.state_mut::<TextInputState>()?.preedit = Some((text.clone(), *selection));
                 ctx.set_handled();
-                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
             }
             UiEvent::ImeCommit(text) if self.editable() => {
                 let text = normalize_insert(text, self.multiline);
@@ -357,7 +460,7 @@ impl Widget for TextInput {
                 state.preedit = None;
                 self.publish(value);
                 ctx.set_handled();
-                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                ctx.invalidate(Invalidation::LAYOUT | Invalidation::SEMANTICS);
             }
             UiEvent::KeyDown {
                 key,
@@ -366,6 +469,7 @@ impl Widget for TextInput {
             } if self.enabled => {
                 let editable = self.editable();
                 let mut changed = false;
+                let mut layout_changed = false;
                 let state = ctx.state_mut::<TextInputState>()?;
                 match key {
                     Key::ArrowLeft => move_caret(state, &value, false, modifiers.shift),
@@ -393,14 +497,18 @@ impl Widget for TextInput {
                             callback(&value);
                         }
                     }
-                    Key::Escape => state.preedit = None,
+                    Key::Escape => layout_changed = state.preedit.take().is_some(),
                     _ => return Ok(()),
                 }
                 if changed {
                     self.publish(value);
                 }
                 ctx.set_handled();
-                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                ctx.invalidate(if changed || layout_changed {
+                    Invalidation::LAYOUT | Invalidation::SEMANTICS
+                } else {
+                    Invalidation::PAINT | Invalidation::SEMANTICS
+                });
             }
             _ => {}
         }
@@ -440,6 +548,91 @@ impl Widget for TextInput {
     fn accepts_pointer(&self) -> bool {
         self.enabled
     }
+}
+
+struct DisplayText {
+    text: String,
+    /// `(display byte boundary, source byte boundary)` at every grapheme edge.
+    boundaries: Vec<(usize, usize)>,
+}
+
+fn display_text(value: &str, password: bool, preedit: Option<(Range<usize>, &str)>) -> DisplayText {
+    let mut text = String::new();
+    let mut boundaries = vec![(0, 0)];
+    if let Some((selection, preedit)) = preedit {
+        append_source_display(
+            &mut text,
+            &mut boundaries,
+            &value[..selection.start],
+            0,
+            password,
+        );
+        for grapheme in preedit.graphemes(true) {
+            if password {
+                text.push('•');
+            } else {
+                text.push_str(grapheme);
+            }
+            boundaries.push((text.len(), selection.start));
+        }
+        if let Some(last) = boundaries.last_mut() {
+            last.1 = selection.end;
+        }
+        append_source_display(
+            &mut text,
+            &mut boundaries,
+            &value[selection.end..],
+            selection.end,
+            password,
+        );
+    } else {
+        append_source_display(&mut text, &mut boundaries, value, 0, password);
+    }
+    DisplayText { text, boundaries }
+}
+
+fn append_source_display(
+    text: &mut String,
+    boundaries: &mut Vec<(usize, usize)>,
+    source: &str,
+    source_offset: usize,
+    password: bool,
+) {
+    for (source_start, grapheme) in source.grapheme_indices(true) {
+        if password {
+            text.push('•');
+        } else {
+            text.push_str(grapheme);
+        }
+        boundaries.push((text.len(), source_offset + source_start + grapheme.len()));
+    }
+}
+
+fn source_to_display(boundaries: &[(usize, usize)], source: usize) -> usize {
+    boundaries
+        .iter()
+        .rev()
+        .find_map(|(display, boundary)| (*boundary <= source).then_some(*display))
+        .unwrap_or(0)
+}
+
+fn display_to_source(boundaries: &[(usize, usize)], display: usize) -> usize {
+    boundaries
+        .iter()
+        .rev()
+        .find_map(|(boundary, source)| (*boundary <= display).then_some(*source))
+        .unwrap_or(0)
+}
+
+fn hit_source_boundary(state: &TextInputState, position: Point, fallback: usize) -> usize {
+    let Some(layout) = &state.layout else {
+        return fallback;
+    };
+    let hit = layout.hit_test(Point::new(
+        position.x - state.text_origin.x,
+        position.y - state.text_origin.y,
+    ));
+    display_to_source(&state.display_boundaries, hit.byte_index)
 }
 
 fn normalize_insert(text: &str, multiline: bool) -> String {
@@ -587,5 +780,20 @@ mod tests {
     fn single_line_insert_normalizes_line_breaks() {
         assert_eq!(normalize_insert("a\r\nb\nc", false), "a b c");
         assert_eq!(normalize_insert("a\r\nb", true), "a\nb");
+    }
+
+    #[test]
+    fn ime_preedit_replaces_the_selection_in_display_without_mutating_source() {
+        let display = display_text("ab", false, Some((1..2, "你好")));
+        assert_eq!(display.text, "a你好");
+        assert_eq!(display_to_source(&display.boundaries, "a你".len()), 1);
+        assert_eq!(
+            display_to_source(&display.boundaries, display.text.len()),
+            2
+        );
+
+        let password = display_text("ab", true, Some((1..2, "你好")));
+        assert_eq!(password.text, "•••");
+        assert!(!password.text.contains('你'));
     }
 }

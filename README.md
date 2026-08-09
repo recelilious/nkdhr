@@ -35,10 +35,12 @@ state, shared paint/hit order, focus scopes, pointer capture/hover, semantics
 and host-clocked animation. Its owner-reviewed product layer is now entering
 production translation: typed density/spacing/radius/typography, glass-material
 and motion profiles plus the first public `GlassSurface`, `Button`, `Toggle`,
-`Slider`, `List`, `Scroll` and `TextInput` implementations are present. UI-3
-remains open while retained text presentation, full advanced component behavior,
-real compositor backdrop blur and the accepted Settings composition are wired
-and visually accepted.
+`Slider`, `List`, `Scroll`, `Text` and `TextInput` implementations are present.
+The retained tree now owns a shared shaping/atlas resource boundary: public text,
+component labels and TextInput glyph hit testing render real Unicode/CJK/emoji
+through the same texture store. UI-3 remains open while full advanced component
+behavior, real compositor backdrop blur and the accepted Settings composition
+are wired and visually accepted.
 
 ## Documentation
 
