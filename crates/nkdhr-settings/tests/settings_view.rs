@@ -136,6 +136,10 @@ fn production_view_lays_out_at_every_accepted_width_mode() {
                 && node.semantics.label.as_deref() == Some("nkdhr 设置")
         }));
         assert!(semantics.iter().any(|node| {
+            node.semantics.role == SemanticRole::List
+                && node.semantics.label.as_deref() == Some("设置分类")
+        }));
+        assert!(semantics.iter().any(|node| {
             node.semantics.role == SemanticRole::Text
                 && node.semantics.label.as_deref() == Some("外观与交互")
         }));

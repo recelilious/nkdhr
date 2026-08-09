@@ -9,10 +9,10 @@ use std::{cell::RefCell, error::Error, fmt, rc::Rc, sync::Arc};
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
 use nkdhr_ui::{
     Align, Alignment, ArrangeCtx, Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment,
-    Element, Flex, GlassSurface, Insets, Invalidation, MainAxisAlignment, MaterialCapabilities,
-    MaterialTier, MeasureCtx, Padding, PaintCtx, Reactive, Scroll, ScrollOffset, SemanticRole,
-    Semantics, SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme,
-    Toggle, UiError, UpdateCtx, Widget,
+    Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry, ListItem,
+    MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, Padding, PaintCtx, Reactive,
+    Scroll, ScrollOffset, SemanticRole, Semantics, SemanticsCtx, Size, Slider, Text, TextInput,
+    TextInputStatus, TextRole, Theme, Toggle, UiError, UpdateCtx, Widget,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -353,6 +353,7 @@ struct AppearanceState {
     status: Reactive<String>,
     content_scroll: Reactive<ScrollOffset>,
     navigation_scroll: Reactive<ScrollOffset>,
+    navigation_selection: Reactive<Option<u64>>,
     mobile_navigation_open: Reactive<bool>,
     composition_revision: Reactive<u64>,
     undo: RefCell<Option<UndoAction>>,
@@ -394,6 +395,7 @@ impl AppearanceSettings {
                 status: Reactive::new("所有修改都会实时预览".to_owned()),
                 content_scroll: Reactive::new(ScrollOffset::ZERO),
                 navigation_scroll: Reactive::new(ScrollOffset::ZERO),
+                navigation_selection: Reactive::new(Some(SettingsPage::Appearance.identity())),
                 mobile_navigation_open: Reactive::new(false),
                 composition_revision: Reactive::new(1),
                 undo: RefCell::new(None),
@@ -711,15 +713,14 @@ impl AppearanceSettings {
                 &[SettingsPage::Plugins, SettingsPage::Accessibility][..],
             ),
         ];
-        let mut column = Element::new(Flex {
-            axis: Axis::Vertical,
-            gap: 4.0,
-            main_alignment: MainAxisAlignment::Start,
-            cross_alignment: CrossAxisAlignment::Stretch,
-        });
-        for (group, pages) in groups {
+        let selection = self.state.navigation_selection.clone();
+        let mut entries = Vec::new();
+        let mut children = Vec::new();
+        for (group_index, (group, pages)) in groups.into_iter().enumerate() {
             if !compact {
-                column = column.child(
+                let identity = 100 + group_index as u64;
+                entries.push(ListEntry::new(identity, group).enabled(false));
+                children.push(
                     Element::new(Padding {
                         insets: Insets::new(12.0, 12.0, 12.0, 4.0),
                     })
@@ -728,11 +729,12 @@ impl AppearanceSettings {
                         TextRole::Caption,
                         theme.palette.text_muted,
                         &theme,
-                    )),
+                    ))
+                    .keyed(identity),
                 );
             }
             for page in pages {
-                let selected = self.state.page.get() == *page;
+                entries.push(ListEntry::new(page.identity(), page.label()));
                 let model = self.clone();
                 let target = *page;
                 let icon = Element::new(Icon {
@@ -757,21 +759,24 @@ impl AppearanceSettings {
                         &theme,
                     ))
                 };
-                column = column.child(
+                children.push(
                     Element::new(
-                        Button::new(page.label(), Arc::clone(&theme))
-                            .variant(if selected {
-                                ButtonVariant::Selected
-                            } else {
-                                ButtonVariant::Quiet
-                            })
-                            .capabilities(capabilities)
-                            .on_activate(move || {
-                                model.state.page.set(target);
-                                model.state.mobile_navigation_open.set(false);
-                                model.set_status(format!("已打开{}", target.label()));
-                                model.request_reconcile();
-                            }),
+                        ListItem::new(
+                            page.identity(),
+                            page.label(),
+                            selection.clone(),
+                            Arc::clone(&theme),
+                        )
+                        .on_activate(move || {
+                            model.state.page.set(target);
+                            model
+                                .state
+                                .navigation_selection
+                                .set(Some(target.identity()));
+                            model.state.mobile_navigation_open.set(false);
+                            model.set_status(format!("已打开{}", target.label()));
+                            model.request_reconcile();
+                        }),
                     )
                     .child(content)
                     .keyed(page.identity()),
@@ -786,6 +791,9 @@ impl AppearanceSettings {
             },
             620.0,
         );
+        let list = List::from_entries("设置分类", selection, entries, Arc::clone(&theme))?
+            .material_tier(MaterialTier::Ghost)
+            .capabilities(capabilities);
         Ok(Element::new(
             Scroll::new(
                 "设置分类",
@@ -796,15 +804,7 @@ impl AppearanceSettings {
             .horizontal(false)
             .vertical(true),
         )
-        .child(
-            Element::new(
-                GlassSurface::new(theme, MaterialTier::Ghost)
-                    .capabilities(capabilities)
-                    .radius(18.0)
-                    .padding(Insets::all(6.0)),
-            )
-            .child(column),
-        ))
+        .child(Element::new(list).children(children)))
     }
 
     fn content(
@@ -1717,7 +1717,8 @@ fn alpha(color: Color, alpha: f32) -> Color {
 #[derive(Debug)]
 pub enum SettingsViewError {
     InvalidViewport,
-    List(nkdhr_ui::ScrollError),
+    Scroll(nkdhr_ui::ScrollError),
+    List(nkdhr_ui::ListError),
     Slider(nkdhr_ui::SliderError),
 }
 
@@ -1725,6 +1726,7 @@ impl fmt::Display for SettingsViewError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidViewport => formatter.write_str("Settings viewport must be finite"),
+            Self::Scroll(error) => error.fmt(formatter),
             Self::List(error) => error.fmt(formatter),
             Self::Slider(error) => error.fmt(formatter),
         }
@@ -1735,6 +1737,12 @@ impl Error for SettingsViewError {}
 
 impl From<nkdhr_ui::ScrollError> for SettingsViewError {
     fn from(value: nkdhr_ui::ScrollError) -> Self {
+        Self::Scroll(value)
+    }
+}
+
+impl From<nkdhr_ui::ListError> for SettingsViewError {
+    fn from(value: nkdhr_ui::ListError) -> Self {
         Self::List(value)
     }
 }

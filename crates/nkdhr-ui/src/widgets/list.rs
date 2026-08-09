@@ -389,6 +389,7 @@ pub struct List {
     selection: ListSelection,
     entries: Vec<ListEntry>,
     theme: Arc<Theme>,
+    material_tier: MaterialTier,
     capabilities: MaterialCapabilities,
     virtual_window: ListVirtualWindow,
     page_step: usize,
@@ -433,6 +434,7 @@ impl List {
             selection: selection.into(),
             entries,
             theme,
+            material_tier: MaterialTier::ContentSurface,
             capabilities: MaterialCapabilities::default(),
             virtual_window: ListVirtualWindow::default(),
             page_step: 5,
@@ -444,6 +446,14 @@ impl List {
 
     pub fn capabilities(mut self, capabilities: MaterialCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Shared panel material for this list family. Ordinary object lists keep
+    /// `ContentSurface`; embedded navigation may use `Ghost` without replacing
+    /// List's continuous selection, focus and keyboard behavior.
+    pub fn material_tier(mut self, tier: MaterialTier) -> Self {
+        self.material_tier = tier;
         self
     }
 
@@ -653,7 +663,7 @@ impl Widget for List {
             rect,
             CornerRadii::all(self.theme.radii.group),
             &self.theme,
-            MaterialTier::ContentSurface,
+            self.material_tier,
             self.capabilities,
             SurfaceState::default(),
         )?;
