@@ -1442,6 +1442,23 @@ impl PaintCtx<'_> {
         self.builder
     }
 
+    /// Arranged child geometry for container-owned decoration such as a list
+    /// selection mass or shared group separators.
+    pub fn child_rect(&self, index: usize) -> UiResult<Rect> {
+        let child = *self
+            .children
+            .get(index)
+            .ok_or(UiError::UnexpectedChildCount {
+                expected_maximum: self.children.len(),
+                actual: index + 1,
+            })?;
+        self.root
+            .arena
+            .get(child)
+            .map(|node| node.rect)
+            .ok_or(UiError::MissingWidget(child))
+    }
+
     pub fn rect(&self) -> Rect {
         self.rect
     }

@@ -1529,6 +1529,7 @@ dependencies = [
  "cosmic-text",
  "nkdhr-render",
  "oxitext-raster",
+ "unicode-segmentation",
 ]
 
 [[package]]

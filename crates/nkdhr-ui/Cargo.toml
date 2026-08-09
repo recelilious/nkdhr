@@ -14,3 +14,4 @@ workspace = true
 cosmic-text = { version = "0.19.0", features = ["shape-run-cache"] }
 nkdhr-render = { version = "0.1.0", path = "../nkdhr-render" }
 oxitext-raster = "0.2.2"
+unicode-segmentation = "1.13.3"

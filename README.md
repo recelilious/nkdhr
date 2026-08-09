@@ -32,8 +32,13 @@ paragraph layout and bounded mask/color glyph atlases. Its 5,000-line,
 UI-3's style-neutral framework core is now implemented: retained generational
 identity, keyed reconciliation, finite constraint layout, queued reactive
 state, shared paint/hit order, focus scopes, pointer capture/hover, semantics
-and host-clocked animation. UI-3 remains open; standard component appearance
-and interaction design will be specified collaboratively before implementation.
+and host-clocked animation. Its owner-reviewed product layer is now entering
+production translation: typed density/spacing/radius/typography, glass-material
+and motion profiles plus the first public `GlassSurface`, `Button`, `Toggle`,
+`Slider`, `List`, `Scroll` and `TextInput` implementations are present. UI-3
+remains open while retained text presentation, full advanced component behavior,
+real compositor backdrop blur and the accepted Settings composition are wired
+and visually accepted.
 
 ## Documentation
 
