@@ -765,6 +765,8 @@ fn list_reorder_drag_uses_placeholder_motion_and_stable_before_identity() {
                 Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
                 Primitive::Texture(texture) =>
                     texture.transform != nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform != nkdhr_render::Transform::IDENTITY,
             })
     );
     root.dispatch(&UiEvent::PointerUp {
@@ -1315,6 +1317,8 @@ fn elastic_boundary_motion_translates_content_but_reduced_motion_does_not() {
                 Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
                 Primitive::Texture(texture) =>
                     texture.transform != nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform != nkdhr_render::Transform::IDENTITY,
             })
     );
     let reduced = boundary_display_list(MotionMode::Reduced);
@@ -1326,6 +1330,8 @@ fn elastic_boundary_motion_translates_content_but_reduced_motion_does_not() {
                 Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
                 Primitive::Texture(texture) =>
                     texture.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform == nkdhr_render::Transform::IDENTITY,
             })
     );
 }
@@ -1361,6 +1367,7 @@ fn switching_to_reduced_motion_settles_active_scroll_spatial_state_immediately()
     assert!(moving.primitives().iter().any(|primitive| match primitive {
         Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
         Primitive::Texture(texture) => texture.transform != nkdhr_render::Transform::IDENTITY,
+        Primitive::BackdropBlur(blur) => blur.transform != nkdhr_render::Transform::IDENTITY,
     }));
 
     root.reconcile(scene(MotionMode::Reduced)).unwrap();
@@ -1373,6 +1380,8 @@ fn switching_to_reduced_motion_settles_active_scroll_spatial_state_immediately()
                 Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
                 Primitive::Texture(texture) =>
                     texture.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform == nkdhr_render::Transform::IDENTITY,
             })
     );
 }

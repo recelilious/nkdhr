@@ -12,8 +12,8 @@ pub mod software;
 mod texture;
 
 pub use display_list::{
-    BuildError, DisplayList, DisplayListBuilder, Primitive, Shadow, ShapePrimitive, ShapeStyle,
-    TexturePrimitive,
+    BackdropBlurPrimitive, BuildError, DisplayList, DisplayListBuilder, Primitive, Shadow,
+    ShapePrimitive, ShapeStyle, TexturePrimitive,
 };
 pub use geometry::{Color, CornerRadii, Point, Rect, Transform};
 pub use texture::{

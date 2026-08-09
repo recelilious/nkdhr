@@ -50,8 +50,13 @@ actions. `TextInput` now adds multiline/BiDi visual selection fragments, IME
 composition selection, multi-click/drag and visual/word/line navigation,
 targeted host clipboard requests, non-sensitive undo/redo, explicit formatter
 selection mapping and generation-ordered change/blur/submit validation. UI-3
-remains open while real compositor backdrop blur and the accepted Settings
-composition are wired and visually accepted.
+now also has a real painter-order backdrop-filter primitive: the scalar oracle
+and Smithay GLES path share rounded masks, transforms, clips and separable blur
+semantics, while prepared lists expose dependency-expanded compositor damage
+instead of recursively sampling prior glass pixels. `GlassSurface` emits that
+pass only for a capable host and retains the approved compensated fallback.
+UI-3 remains open while the accepted Settings composition is wired and its
+actual static-glass and transition output is visually accepted.
 
 ## Documentation
 

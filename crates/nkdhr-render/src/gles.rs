@@ -17,15 +17,19 @@ use smithay::{
 };
 
 use crate::{
-    AlphaMode, CornerRadii, DisplayList, Point, Primitive, Rect, Sampling, ShapePrimitive,
-    ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId, TexturePrimitive,
-    TextureStore,
+    AlphaMode, BackdropBlurPrimitive, CornerRadii, DisplayList, Point, Primitive, Rect, Sampling,
+    ShapePrimitive, ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId,
+    TexturePrimitive, TextureStore,
 };
 
 const SHAPE_VERTEX_SHADER: &str = include_str!("shaders/shape.vert");
 const SHAPE_FRAGMENT_SHADER: &str = include_str!("shaders/shape.frag");
 const TEXTURE_VERTEX_SHADER: &str = include_str!("shaders/texture.vert");
 const TEXTURE_FRAGMENT_SHADER: &str = include_str!("shaders/texture.frag");
+const BLUR_VERTEX_SHADER: &str = include_str!("shaders/blur.vert");
+const BLUR_FRAGMENT_SHADER: &str = include_str!("shaders/blur.frag");
+const BACKDROP_VERTEX_SHADER: &str = include_str!("shaders/backdrop.vert");
+const BACKDROP_FRAGMENT_SHADER: &str = include_str!("shaders/backdrop.frag");
 
 #[derive(Debug)]
 pub enum GlesBackendError {
@@ -143,6 +147,27 @@ impl Scissor {
             height: bottom - top,
         })
     }
+
+    fn expand(self, amount: i32, target: Size<i32, Physical>) -> Self {
+        let left = (self.x - amount).max(0);
+        let top = (self.y - amount).max(0);
+        let right = (self.x + self.width + amount).min(target.w);
+        let bottom = (self.y + self.height + amount).min(target.h);
+        Self {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        }
+    }
+
+    fn intersects(self, other: Self) -> bool {
+        self.intersect(other).is_some()
+    }
+
+    fn rectangle(self) -> Rectangle<i32, Physical> {
+        Rectangle::new((self.x, self.y).into(), (self.width, self.height).into())
+    }
 }
 
 #[repr(C)]
@@ -165,6 +190,13 @@ struct TextureVertex {
     opacity: f32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct BlurVertex {
+    position: [f32; 2],
+    local: [f32; 2],
+}
+
 #[derive(Debug)]
 enum Batch {
     Shapes {
@@ -181,12 +213,25 @@ enum Batch {
         buffer_offset: usize,
         vertices: Vec<TextureVertex>,
     },
+    BackdropBlur {
+        clip: Scissor,
+        output: Scissor,
+        dependency: Scissor,
+        buffer_offset: usize,
+        vertices: Box<[BlurVertex; 12]>,
+        rect: [f32; 4],
+        radii: [f32; 4],
+        radius: f32,
+        effective_scale: f32,
+    },
 }
 
 impl Batch {
     fn clip(&self) -> Scissor {
         match self {
-            Self::Shapes { clip, .. } | Self::Texture { clip, .. } => *clip,
+            Self::Shapes { clip, .. }
+            | Self::Texture { clip, .. }
+            | Self::BackdropBlur { clip, .. } => *clip,
         }
     }
 }
@@ -207,6 +252,45 @@ impl PreparedDisplayList {
 
     pub fn primitive_count(&self) -> usize {
         self.primitive_count
+    }
+
+    /// Whether drawing this list reads pixels already present in the target.
+    pub fn has_backdrop_blur(&self) -> bool {
+        self.batches
+            .iter()
+            .any(|batch| matches!(batch, Batch::BackdropBlur { .. }))
+    }
+
+    /// Expand incremental damage to include backdrop-filter dependencies.
+    ///
+    /// The returned rectangles must be used when repainting compositor layers
+    /// below this display list and then passed to [`GlesBackend::draw`]. This
+    /// prevents a partial update from sampling this list's pixels left over
+    /// from the previous frame instead of a freshly painted backdrop.
+    pub fn expand_damage(
+        &self,
+        damage: &[Rectangle<i32, Physical>],
+    ) -> Vec<Rectangle<i32, Physical>> {
+        let mut expanded: Vec<Scissor> = damage
+            .iter()
+            .filter_map(|damage| Scissor::from_damage(*damage, self.target))
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for batch in &self.batches {
+                let Batch::BackdropBlur { dependency, .. } = batch else {
+                    continue;
+                };
+                if expanded.iter().any(|damage| damage.intersects(*dependency))
+                    && !expanded.contains(dependency)
+                {
+                    expanded.push(*dependency);
+                    changed = true;
+                }
+            }
+        }
+        expanded.into_iter().map(Scissor::rectangle).collect()
     }
 }
 
@@ -236,9 +320,45 @@ struct TextureProgram {
 }
 
 #[derive(Debug)]
+struct BlurProgram {
+    id: u32,
+    projection: i32,
+    source: i32,
+    target_size: i32,
+    radius: i32,
+    position: u32,
+}
+
+#[derive(Debug)]
+struct BackdropProgram {
+    id: u32,
+    projection: i32,
+    original: i32,
+    horizontal: i32,
+    target_size: i32,
+    radius: i32,
+    effective_scale: i32,
+    rect: i32,
+    radii: i32,
+    position: u32,
+    local: u32,
+}
+
+#[derive(Debug)]
+struct BlurTargets {
+    snapshot: u32,
+    horizontal: u32,
+    framebuffer: u32,
+    size: Size<i32, Physical>,
+}
+
+#[derive(Debug)]
 struct Resources {
     shape: ShapeProgram,
     texture: TextureProgram,
+    blur: BlurProgram,
+    backdrop: BackdropProgram,
+    blur_targets: Option<BlurTargets>,
     vertex_buffer: u32,
     index_buffer: u32,
     reset_attribute_divisors: bool,
@@ -306,7 +426,7 @@ impl GlesBackend {
         prepared: &PreparedDisplayList,
         damage: &[Rectangle<i32, Physical>],
     ) -> Result<(), GlesBackendError> {
-        let resources = self.resources.as_ref().ok_or(GlesBackendError::Destroyed)?;
+        let resources = self.resources.as_mut().ok_or(GlesBackendError::Destroyed)?;
         if damage.is_empty() {
             return Ok(());
         }
@@ -346,7 +466,7 @@ impl GlesBackend {
             .iter()
             .filter_map(|primitive| match primitive {
                 Primitive::Texture(texture) => Some(texture.texture),
-                Primitive::Shape(_) => None,
+                Primitive::Shape(_) | Primitive::BackdropBlur(_) => None,
             })
             .collect();
         for id in &needed {
@@ -457,6 +577,37 @@ fn compile_batches(
                     }),
                 }
             }
+            Primitive::BackdropBlur(blur) => {
+                let clip = match blur.clip {
+                    Some(clip) => {
+                        let Some(clip) = Scissor::from_logical(clip, scale, target) else {
+                            continue;
+                        };
+                        clip
+                    }
+                    None => Scissor::full(target),
+                };
+                let bounds = blur.transform.map_rect_bounds(blur.rect);
+                let Some(output) = Scissor::from_logical(bounds, scale, target)
+                    .and_then(|bounds| bounds.intersect(clip))
+                else {
+                    continue;
+                };
+                let effective_scale = (scale * blur.transform.minimum_scale()).max(f32::EPSILON);
+                let radius = blur.radius * effective_scale;
+                let dependency = output.expand(radius.ceil() as i32, target);
+                batches.push(Batch::BackdropBlur {
+                    clip,
+                    output,
+                    dependency,
+                    buffer_offset: 0,
+                    vertices: Box::new(backdrop_vertices(*blur, target, scale)),
+                    rect: [blur.rect.x, blur.rect.y, blur.rect.width, blur.rect.height],
+                    radii: blur.radii.as_array(),
+                    radius,
+                    effective_scale,
+                });
+            }
         }
     }
     Ok(PreparedDisplayList {
@@ -464,6 +615,33 @@ fn compile_batches(
         batches,
         primitive_count: display_list.len(),
         generation: 0,
+    })
+}
+
+fn backdrop_vertices(
+    primitive: BackdropBlurPrimitive,
+    target: Size<i32, Physical>,
+    scale: f32,
+) -> [BlurVertex; 12] {
+    let pass = quad_points(Rect::new(0.0, 0.0, target.w as f32, target.h as f32)).map(|point| {
+        BlurVertex {
+            position: [point.x, point.y],
+            local: [0.0, 0.0],
+        }
+    });
+    let composite = quad_points(primitive.rect).map(|local| {
+        let target = primitive.transform.map_point(local);
+        BlurVertex {
+            position: [target.x * scale, target.y * scale],
+            local: [local.x, local.y],
+        }
+    });
+    std::array::from_fn(|index| {
+        if index < 6 {
+            pass[index]
+        } else {
+            composite[index - 6]
+        }
     })
 }
 
@@ -651,15 +829,30 @@ fn create_resources(
     gl: &Gles2,
     reset_attribute_divisors: bool,
 ) -> Result<Resources, GlesBackendError> {
-    let shape_id = unsafe { link_program(gl, SHAPE_VERTEX_SHADER, SHAPE_FRAGMENT_SHADER) }?;
-    let texture_id =
-        match unsafe { link_program(gl, TEXTURE_VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER) } {
-            Ok(program) => program,
-            Err(error) => {
-                unsafe { gl.DeleteProgram(shape_id) };
-                return Err(error.into());
+    let mut program_ids = Vec::new();
+    let linked = (|| -> Result<[u32; 4], GlesBackendError> {
+        let shape = unsafe { link_program(gl, SHAPE_VERTEX_SHADER, SHAPE_FRAGMENT_SHADER) }?;
+        program_ids.push(shape);
+        let texture = unsafe { link_program(gl, TEXTURE_VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER) }?;
+        program_ids.push(texture);
+        let blur = unsafe { link_program(gl, BLUR_VERTEX_SHADER, BLUR_FRAGMENT_SHADER) }?;
+        program_ids.push(blur);
+        let backdrop =
+            unsafe { link_program(gl, BACKDROP_VERTEX_SHADER, BACKDROP_FRAGMENT_SHADER) }?;
+        program_ids.push(backdrop);
+        Ok([shape, texture, blur, backdrop])
+    })();
+    let [shape_id, texture_id, blur_id, backdrop_id] = match linked {
+        Ok(ids) => ids,
+        Err(error) => {
+            unsafe {
+                for program in program_ids {
+                    gl.DeleteProgram(program);
+                }
             }
-        };
+            return Err(error);
+        }
+    };
     let resources = (|| {
         let shape = ShapeProgram {
             id: shape_id,
@@ -682,6 +875,27 @@ fn create_resources(
             tint: attribute(gl, texture_id, "a_tint")?,
             opacity: attribute(gl, texture_id, "a_opacity")?,
         };
+        let blur = BlurProgram {
+            id: blur_id,
+            projection: uniform(gl, blur_id, "u_projection")?,
+            source: uniform(gl, blur_id, "u_source")?,
+            target_size: uniform(gl, blur_id, "u_target_size")?,
+            radius: uniform(gl, blur_id, "u_radius")?,
+            position: attribute(gl, blur_id, "a_position")?,
+        };
+        let backdrop = BackdropProgram {
+            id: backdrop_id,
+            projection: uniform(gl, backdrop_id, "u_projection")?,
+            original: uniform(gl, backdrop_id, "u_original")?,
+            horizontal: uniform(gl, backdrop_id, "u_horizontal")?,
+            target_size: uniform(gl, backdrop_id, "u_target_size")?,
+            radius: uniform(gl, backdrop_id, "u_radius")?,
+            effective_scale: uniform(gl, backdrop_id, "u_effective_scale")?,
+            rect: uniform(gl, backdrop_id, "u_rect")?,
+            radii: uniform(gl, backdrop_id, "u_radii")?,
+            position: attribute(gl, backdrop_id, "a_position")?,
+            local: attribute(gl, backdrop_id, "a_local")?,
+        };
         let mut buffers = [0; 2];
         unsafe { gl.GenBuffers(buffers.len() as i32, buffers.as_mut_ptr()) };
         if buffers.contains(&0) {
@@ -691,6 +905,9 @@ fn create_resources(
         Ok(Resources {
             shape,
             texture,
+            blur,
+            backdrop,
+            blur_targets: None,
             vertex_buffer: buffers[0],
             index_buffer: buffers[1],
             reset_attribute_divisors,
@@ -698,8 +915,9 @@ fn create_resources(
     })();
     if resources.is_err() {
         unsafe {
-            gl.DeleteProgram(shape_id);
-            gl.DeleteProgram(texture_id);
+            for program in [shape_id, texture_id, blur_id, backdrop_id] {
+                gl.DeleteProgram(program);
+            }
         }
     }
     resources
@@ -791,7 +1009,7 @@ fn upload_prepared(
                 ..
             } => {
                 *buffer_offset = bytes.len();
-                bytes.extend_from_slice(vertex_bytes(vertices));
+                bytes.extend_from_slice(vertex_bytes(vertices.as_ref()));
             }
             Batch::Texture {
                 buffer_offset,
@@ -801,6 +1019,14 @@ fn upload_prepared(
                 *buffer_offset = bytes.len();
                 bytes.extend_from_slice(vertex_bytes(vertices));
                 maximum_texture_quads = maximum_texture_quads.max(vertices.len() / 4);
+            }
+            Batch::BackdropBlur {
+                buffer_offset,
+                vertices,
+                ..
+            } => {
+                *buffer_offset = bytes.len();
+                bytes.extend_from_slice(vertex_bytes(vertices.as_ref()));
             }
         }
     }
@@ -855,9 +1081,113 @@ fn vertex_bytes<T>(vertices: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(vertices.as_ptr().cast(), length) }
 }
 
+fn ensure_blur_targets(
+    gl: &Gles2,
+    resources: &mut Resources,
+    target: Size<i32, Physical>,
+) -> Result<(), GlesBackendError> {
+    if resources
+        .blur_targets
+        .as_ref()
+        .is_some_and(|targets| targets.size == target)
+    {
+        return Ok(());
+    }
+    if let Some(old) = resources.blur_targets.take() {
+        destroy_blur_targets(gl, &old);
+    }
+
+    let mut textures = [0_u32; 2];
+    let mut framebuffer = 0_u32;
+    let mut previous_framebuffer = 0_i32;
+    unsafe {
+        while gl.GetError() != ffi::NO_ERROR {}
+        gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut previous_framebuffer);
+        gl.GenTextures(2, textures.as_mut_ptr());
+        for texture in textures {
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                target.w,
+                target.h,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
+        }
+        gl.GenFramebuffers(1, &mut framebuffer);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, framebuffer);
+        gl.FramebufferTexture2D(
+            ffi::FRAMEBUFFER,
+            ffi::COLOR_ATTACHMENT0,
+            ffi::TEXTURE_2D,
+            textures[1],
+            0,
+        );
+    }
+    let framebuffer_status = unsafe { gl.CheckFramebufferStatus(ffi::FRAMEBUFFER) };
+    unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, previous_framebuffer as u32);
+        gl.BindTexture(ffi::TEXTURE_2D, 0);
+    }
+    let error = unsafe { gl.GetError() };
+    if textures.contains(&0)
+        || framebuffer == 0
+        || framebuffer_status != ffi::FRAMEBUFFER_COMPLETE
+        || error != ffi::NO_ERROR
+    {
+        let failed = BlurTargets {
+            snapshot: textures[0],
+            horizontal: textures[1],
+            framebuffer,
+            size: target,
+        };
+        destroy_blur_targets(gl, &failed);
+        return Err(GlesBackendError::GlOperation(if error != ffi::NO_ERROR {
+            error
+        } else if framebuffer_status != ffi::FRAMEBUFFER_COMPLETE {
+            framebuffer_status
+        } else {
+            ffi::OUT_OF_MEMORY
+        }));
+    }
+    resources.blur_targets = Some(BlurTargets {
+        snapshot: textures[0],
+        horizontal: textures[1],
+        framebuffer,
+        size: target,
+    });
+    Ok(())
+}
+
+fn destroy_blur_targets(gl: &Gles2, targets: &BlurTargets) {
+    unsafe {
+        if targets.framebuffer != 0 {
+            gl.DeleteFramebuffers(1, &targets.framebuffer);
+        }
+        let textures = [targets.snapshot, targets.horizontal];
+        gl.DeleteTextures(textures.len() as i32, textures.as_ptr());
+    }
+}
+
 fn draw_batches(
     gl: &Gles2,
-    resources: &Resources,
+    resources: &mut Resources,
     textures: &HashMap<TextureId, UploadedTexture>,
     prepared: &PreparedDisplayList,
     damage: &[Rectangle<i32, Physical>],
@@ -877,40 +1207,67 @@ fn draw_batches(
         .filter_map(|damage| Scissor::from_damage(*damage, prepared.target))
         .collect();
     for batch in &prepared.batches {
-        for scissor in damage
-            .iter()
-            .filter_map(|damage| batch.clip().intersect(*damage))
-        {
-            set_scissor(gl, scissor);
-            match batch {
-                Batch::Shapes {
-                    buffer_offset,
-                    vertices,
-                    ..
-                } => draw_shape_batch(gl, resources, *buffer_offset, vertices.len(), projection),
-                Batch::Texture {
-                    texture,
-                    sampling,
-                    alpha_mode,
-                    format,
-                    buffer_offset,
-                    vertices,
-                    ..
-                } => {
-                    let texture = textures
-                        .get(texture)
-                        .ok_or(TextureError::UnknownTexture(*texture))?;
-                    draw_texture_batch(
+        match batch {
+            Batch::BackdropBlur { output, .. } => {
+                let scissors: Vec<Scissor> = damage
+                    .iter()
+                    .filter_map(|damage| output.intersect(*damage))
+                    .collect();
+                if !scissors.is_empty() {
+                    draw_backdrop_batch(
                         gl,
                         resources,
-                        texture.id,
-                        *sampling,
-                        *alpha_mode,
-                        *format,
-                        *buffer_offset,
-                        vertices.len(),
+                        batch,
+                        &scissors,
+                        prepared.target,
                         projection,
-                    );
+                    )?;
+                }
+            }
+            Batch::Shapes { .. } | Batch::Texture { .. } => {
+                for scissor in damage
+                    .iter()
+                    .filter_map(|damage| batch.clip().intersect(*damage))
+                {
+                    set_scissor(gl, scissor);
+                    match batch {
+                        Batch::Shapes {
+                            buffer_offset,
+                            vertices,
+                            ..
+                        } => draw_shape_batch(
+                            gl,
+                            resources,
+                            *buffer_offset,
+                            vertices.len(),
+                            projection,
+                        ),
+                        Batch::Texture {
+                            texture,
+                            sampling,
+                            alpha_mode,
+                            format,
+                            buffer_offset,
+                            vertices,
+                            ..
+                        } => {
+                            let texture = textures
+                                .get(texture)
+                                .ok_or(TextureError::UnknownTexture(*texture))?;
+                            draw_texture_batch(
+                                gl,
+                                resources,
+                                texture.id,
+                                *sampling,
+                                *alpha_mode,
+                                *format,
+                                *buffer_offset,
+                                vertices.len(),
+                                projection,
+                            );
+                        }
+                        Batch::BackdropBlur { .. } => unreachable!(),
+                    }
                 }
             }
         }
@@ -922,6 +1279,171 @@ fn draw_batches(
         Ok(())
     } else {
         Err(GlesBackendError::GlOperation(error))
+    }
+}
+
+fn draw_backdrop_batch(
+    gl: &Gles2,
+    resources: &mut Resources,
+    batch: &Batch,
+    damage: &[Scissor],
+    target: Size<i32, Physical>,
+    projection: &[f32; 9],
+) -> Result<(), GlesBackendError> {
+    let Batch::BackdropBlur {
+        dependency,
+        buffer_offset,
+        rect,
+        radii,
+        radius,
+        effective_scale,
+        ..
+    } = batch
+    else {
+        unreachable!()
+    };
+    ensure_blur_targets(gl, resources, target)?;
+    let targets = resources
+        .blur_targets
+        .as_ref()
+        .expect("blur targets were just allocated");
+
+    let mut original_framebuffer = 0_i32;
+    unsafe {
+        gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut original_framebuffer);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindTexture(ffi::TEXTURE_2D, targets.snapshot);
+        gl.CopyTexSubImage2D(
+            ffi::TEXTURE_2D,
+            0,
+            dependency.x,
+            dependency.y,
+            dependency.x,
+            dependency.y,
+            dependency.width,
+            dependency.height,
+        );
+
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, targets.framebuffer);
+        gl.Viewport(0, 0, target.w, target.h);
+        gl.Disable(ffi::BLEND);
+    }
+    set_scissor(gl, *dependency);
+    draw_horizontal_blur(
+        gl,
+        resources,
+        targets.snapshot,
+        *radius,
+        *buffer_offset,
+        target,
+        projection,
+    );
+
+    unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, original_framebuffer as u32);
+        gl.Viewport(0, 0, target.w, target.h);
+    }
+    for scissor in damage {
+        set_scissor(gl, *scissor);
+        draw_backdrop_composite(
+            gl,
+            resources,
+            targets.snapshot,
+            targets.horizontal,
+            *radius,
+            *effective_scale,
+            *rect,
+            *radii,
+            *buffer_offset + 6 * size_of::<BlurVertex>(),
+            target,
+            projection,
+        );
+    }
+    unsafe {
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+    }
+    Ok(())
+}
+
+fn draw_horizontal_blur(
+    gl: &Gles2,
+    resources: &Resources,
+    source: u32,
+    radius: f32,
+    buffer_offset: usize,
+    target: Size<i32, Physical>,
+    projection: &[f32; 9],
+) {
+    let program = &resources.blur;
+    unsafe {
+        gl.UseProgram(program.id);
+        gl.UniformMatrix3fv(program.projection, 1, ffi::FALSE, projection.as_ptr());
+        gl.Uniform1i(program.source, 0);
+        gl.Uniform2f(program.target_size, target.w as f32, target.h as f32);
+        gl.Uniform1f(program.radius, radius);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindTexture(ffi::TEXTURE_2D, source);
+        enable_attribute::<BlurVertex>(
+            gl,
+            resources.reset_attribute_divisors,
+            program.position,
+            2,
+            buffer_offset + offset_of!(BlurVertex, position),
+        );
+        gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+        gl.DisableVertexAttribArray(program.position);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_backdrop_composite(
+    gl: &Gles2,
+    resources: &Resources,
+    original: u32,
+    horizontal: u32,
+    radius: f32,
+    effective_scale: f32,
+    rect: [f32; 4],
+    radii: [f32; 4],
+    buffer_offset: usize,
+    target: Size<i32, Physical>,
+    projection: &[f32; 9],
+) {
+    let program = &resources.backdrop;
+    unsafe {
+        gl.Disable(ffi::BLEND);
+        gl.UseProgram(program.id);
+        gl.UniformMatrix3fv(program.projection, 1, ffi::FALSE, projection.as_ptr());
+        gl.Uniform1i(program.original, 0);
+        gl.Uniform1i(program.horizontal, 1);
+        gl.Uniform2f(program.target_size, target.w as f32, target.h as f32);
+        gl.Uniform1f(program.radius, radius);
+        gl.Uniform1f(program.effective_scale, effective_scale);
+        gl.Uniform4f(program.rect, rect[0], rect[1], rect[2], rect[3]);
+        gl.Uniform4f(program.radii, radii[0], radii[1], radii[2], radii[3]);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindTexture(ffi::TEXTURE_2D, original);
+        gl.ActiveTexture(ffi::TEXTURE1);
+        gl.BindTexture(ffi::TEXTURE_2D, horizontal);
+        enable_attribute::<BlurVertex>(
+            gl,
+            resources.reset_attribute_divisors,
+            program.position,
+            2,
+            buffer_offset + offset_of!(BlurVertex, position),
+        );
+        enable_attribute::<BlurVertex>(
+            gl,
+            resources.reset_attribute_divisors,
+            program.local,
+            2,
+            buffer_offset + offset_of!(BlurVertex, local),
+        );
+        gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+        gl.DisableVertexAttribArray(program.position);
+        gl.DisableVertexAttribArray(program.local);
+        gl.ActiveTexture(ffi::TEXTURE0);
     }
 }
 
@@ -1101,6 +1623,8 @@ fn reset_state(gl: &Gles2, target: Size<i32, Physical>) {
     unsafe {
         gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
         gl.BindBuffer(ffi::ELEMENT_ARRAY_BUFFER, 0);
+        gl.ActiveTexture(ffi::TEXTURE1);
+        gl.BindTexture(ffi::TEXTURE_2D, 0);
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, 0);
         gl.UseProgram(0);
@@ -1115,11 +1639,16 @@ fn destroy_resources(gl: &Gles2, resources: &Resources, textures: &[u32]) {
     unsafe {
         gl.DeleteProgram(resources.shape.id);
         gl.DeleteProgram(resources.texture.id);
+        gl.DeleteProgram(resources.blur.id);
+        gl.DeleteProgram(resources.backdrop.id);
         gl.DeleteBuffers(1, &resources.vertex_buffer);
         gl.DeleteBuffers(1, &resources.index_buffer);
         if !textures.is_empty() {
             gl.DeleteTextures(textures.len() as i32, textures.as_ptr());
         }
+    }
+    if let Some(targets) = &resources.blur_targets {
+        destroy_blur_targets(gl, targets);
     }
 }
 
@@ -1199,5 +1728,40 @@ mod tests {
             .unwrap();
         let prepared = compile_batches(&builder.finish(), &textures, target(), 1.0).unwrap();
         assert_eq!(prepared.batch_count(), 3);
+    }
+
+    #[test]
+    fn backdrop_blur_is_a_batch_barrier_and_expands_damage_dependencies() {
+        let mut builder = DisplayListBuilder::new();
+        builder
+            .rect(
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                Color::from_srgba8(1, 2, 3, 255),
+            )
+            .unwrap();
+        builder
+            .backdrop_blur(
+                Rect::new(40.0, 40.0, 20.0, 20.0),
+                CornerRadii::all(4.0),
+                8.0,
+            )
+            .unwrap();
+        builder
+            .rect(
+                Rect::new(0.0, 0.0, 10.0, 10.0),
+                Color::from_srgba8(4, 5, 6, 255),
+            )
+            .unwrap();
+        let prepared =
+            compile_batches(&builder.finish(), &TextureStore::new(), target(), 1.0).unwrap();
+        assert_eq!(prepared.batch_count(), 3);
+        assert!(prepared.has_backdrop_blur());
+
+        let damage = [Rectangle::new((50, 50).into(), (1, 1).into())];
+        let expanded = prepared.expand_damage(&damage);
+        assert!(expanded.contains(&Rectangle::new((32, 32).into(), (36, 36).into())));
+
+        let unrelated = [Rectangle::new((0, 0).into(), (1, 1).into())];
+        assert_eq!(prepared.expand_damage(&unrelated), unrelated);
     }
 }

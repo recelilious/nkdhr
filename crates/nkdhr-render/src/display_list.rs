@@ -59,10 +59,25 @@ pub struct TexturePrimitive {
     pub clip: Option<Rect>,
 }
 
+/// A screen-space blur of pixels painted before this primitive.
+///
+/// The rounded rectangle, transform, and clip define where the filtered
+/// backdrop is written. The radius is expressed in logical pixels and is
+/// scaled with the primitive before filtering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackdropBlurPrimitive {
+    pub rect: Rect,
+    pub radii: CornerRadii,
+    pub radius: f32,
+    pub transform: Transform,
+    pub clip: Option<Rect>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Primitive {
     Shape(ShapePrimitive),
     Texture(TexturePrimitive),
+    BackdropBlur(BackdropBlurPrimitive),
 }
 
 /// Immutable renderer-independent commands in painter's order.
@@ -92,6 +107,7 @@ pub enum BuildError {
     InvalidRadius,
     InvalidBorderWidth,
     InvalidShadow,
+    InvalidBlurRadius,
     InvalidOpacity,
     SingularTransform,
     NonAxisAlignedClip,
@@ -107,6 +123,7 @@ impl fmt::Display for BuildError {
             Self::InvalidShadow => {
                 "shadow offset, blur and spread must be finite; blur must be non-negative"
             }
+            Self::InvalidBlurRadius => "backdrop blur radius must be finite and non-negative",
             Self::InvalidOpacity => "opacity must be finite and between zero and one",
             Self::SingularTransform => "transform must be invertible",
             Self::NonAxisAlignedClip => "clips may only be translated or scaled",
@@ -164,6 +181,38 @@ impl DisplayListBuilder {
             return Err(BuildError::InvalidBorderWidth);
         }
         self.shape(rect, radii, ShapeStyle::Border { width, color })
+    }
+
+    /// Blur the backdrop already painted behind a rounded rectangle.
+    ///
+    /// A zero radius records no primitive. Hosts using incremental damage must
+    /// expand it through the prepared backend list before repainting lower
+    /// compositor layers.
+    pub fn backdrop_blur(
+        &mut self,
+        rect: Rect,
+        radii: CornerRadii,
+        radius: f32,
+    ) -> Result<(), BuildError> {
+        validate_rect(rect)?;
+        if !radii.is_valid() {
+            return Err(BuildError::InvalidRadius);
+        }
+        if !radius.is_finite() || radius < 0.0 {
+            return Err(BuildError::InvalidBlurRadius);
+        }
+        if rect.is_empty() || radius == 0.0 {
+            return Ok(());
+        }
+        self.primitives
+            .push(Primitive::BackdropBlur(BackdropBlurPrimitive {
+                rect,
+                radii: radii.normalized(rect),
+                radius,
+                transform: self.current_transform(),
+                clip: self.current_clip(),
+            }));
+        Ok(())
     }
 
     pub fn shadow(
@@ -412,5 +461,28 @@ mod tests {
             ),
             Err(BuildError::InvalidShadow)
         );
+    }
+
+    #[test]
+    fn backdrop_blur_is_validated_and_keeps_recording_state() {
+        let mut builder = DisplayListBuilder::new();
+        assert_eq!(
+            builder.backdrop_blur(
+                Rect::new(0.0, 0.0, 20.0, 10.0),
+                CornerRadii::all(3.0),
+                f32::NAN,
+            ),
+            Err(BuildError::InvalidBlurRadius)
+        );
+        builder
+            .with_transform(Transform::translation(4.0, 5.0), |builder| {
+                builder.backdrop_blur(Rect::new(0.0, 0.0, 20.0, 10.0), CornerRadii::all(3.0), 6.0)
+            })
+            .unwrap();
+        let Primitive::BackdropBlur(blur) = builder.finish().primitives()[0] else {
+            panic!("expected backdrop blur");
+        };
+        assert_eq!(blur.radius, 6.0);
+        assert_eq!(blur.transform, Transform::translation(4.0, 5.0));
     }
 }

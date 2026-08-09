@@ -41,8 +41,9 @@ fn main() {
         })
         .expect("failed to query GLES renderer");
 
-    let display_list = benchmark_scene();
-    assert_eq!(display_list.len(), 1_000);
+    let backdrop = std::env::var_os("NKDHR_RENDER_BENCHMARK_BLUR").is_some();
+    let display_list = benchmark_scene(backdrop);
+    assert_eq!(display_list.len(), if backdrop { 1_002 } else { 1_000 });
     let textures = TextureStore::new();
     let target_size = (WIDTH, HEIGHT).into();
     let mut backend = GlesBackend::new(&mut renderer).expect("failed to create nkdhr GLES backend");
@@ -86,6 +87,14 @@ fn main() {
         .expect("failed to destroy nkdhr GLES resources");
 
     println!("renderer: {renderer_name}");
+    println!(
+        "backdrop filter: {}",
+        if backdrop {
+            "1160x760 at 36 px"
+        } else {
+            "disabled"
+        }
+    );
     let batch_count = prepared.batch_count();
     let batch_label = if batch_count == 1 { "batch" } else { "batches" };
     println!(
@@ -123,7 +132,7 @@ fn select_device(path: &Path) -> EGLDevice {
         .unwrap_or_else(|| panic!("no EGL device matches {}", path.display()))
 }
 
-fn benchmark_scene() -> DisplayList {
+fn benchmark_scene(backdrop: bool) -> DisplayList {
     let mut builder = DisplayListBuilder::new();
     for index in 0..250 {
         let column = index % 25;
@@ -158,6 +167,19 @@ fn benchmark_scene() -> DisplayList {
             .rect(
                 Rect::new(x + 8.0, y + 12.0, 46.0, 6.0),
                 Color::from_srgba8(91, 182, 255, 220),
+            )
+            .unwrap();
+    }
+    if backdrop {
+        let panel = Rect::new(700.0, 420.0, 1160.0, 760.0);
+        builder
+            .backdrop_blur(panel, CornerRadii::all(28.0), 36.0)
+            .unwrap();
+        builder
+            .rounded_rect(
+                panel,
+                CornerRadii::all(28.0),
+                Color::from_srgba8(36, 40, 59, 219),
             )
             .unwrap();
     }

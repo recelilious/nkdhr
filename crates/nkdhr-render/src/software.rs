@@ -6,10 +6,18 @@
 use std::fmt;
 
 use crate::{
-    AlphaMode, Color, CornerRadii, DisplayList, Point, Primitive, Rect, Sampling, ShapePrimitive,
-    ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId, TexturePrimitive,
-    TextureStore,
+    AlphaMode, BackdropBlurPrimitive, Color, CornerRadii, DisplayList, Point, Primitive, Rect,
+    Sampling, ShapePrimitive, ShapeStyle, TextureAsset, TextureError, TextureFormat, TextureId,
+    TexturePrimitive, TextureStore,
 };
+
+const BLUR_WEIGHTS: [f32; 5] = [
+    0.227_027_03,
+    0.194_594_59,
+    0.121_621_62,
+    0.054_054_055,
+    0.016_216_217,
+];
 
 #[derive(Debug)]
 pub enum SoftwareRenderError {
@@ -86,6 +94,7 @@ impl SoftwareRenderer {
             match primitive {
                 Primitive::Shape(shape) => self.draw_shape(*shape, scale),
                 Primitive::Texture(texture) => self.draw_texture(*texture, textures, scale)?,
+                Primitive::BackdropBlur(blur) => self.draw_backdrop_blur(*blur, scale),
             }
         }
         Ok(())
@@ -230,6 +239,57 @@ impl SoftwareRenderer {
         Ok(())
     }
 
+    fn draw_backdrop_blur(&mut self, primitive: BackdropBlurPrimitive, scale: f32) {
+        let radius = primitive.radius * scale * primitive.transform.minimum_scale();
+        if radius <= f32::EPSILON {
+            return;
+        }
+
+        // Filtering always reads the painter-order snapshot from immediately
+        // before this primitive. Keeping the intermediate separate prevents a
+        // blur from feeding its own output back into later samples.
+        let source = self.pixels.clone();
+        let horizontal = blur_horizontal(&source, self.width, self.height, radius);
+        let inverse = primitive
+            .transform
+            .inverse()
+            .expect("display-list transforms are validated");
+        let bounds = primitive.transform.map_rect_bounds(primitive.rect);
+        let Some((left, top, right, bottom)) =
+            pixel_bounds(bounds, primitive.clip, scale, self.width, self.height)
+        else {
+            return;
+        };
+        let effective_scale = (scale * primitive.transform.minimum_scale()).max(f32::EPSILON);
+        for y in top..bottom {
+            for x in left..right {
+                let target = Point::new((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
+                if primitive.clip.is_some_and(|clip| !clip.contains(target)) {
+                    continue;
+                }
+                let local = inverse.map_point(target);
+                let coverage = edge_coverage(
+                    rounded_distance(local, primitive.rect, primitive.radii),
+                    effective_scale,
+                );
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let blurred = blur_sample(
+                    &horizontal,
+                    self.width,
+                    self.height,
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    radius,
+                    false,
+                );
+                let index = y as usize * self.width as usize + x as usize;
+                self.pixels[index] = mix(self.pixels[index], blurred, coverage.clamp(0.0, 1.0));
+            }
+        }
+    }
+
     fn for_each_pixel(
         &mut self,
         bounds: Rect,
@@ -237,21 +297,11 @@ impl SoftwareRenderer {
         scale: f32,
         mut shade: impl FnMut(Point) -> (Color, f32),
     ) {
-        let bounds = match clip {
-            Some(clip) => bounds.intersect(clip),
-            None => Some(bounds),
-        };
-        let Some(bounds) = bounds else {
+        let Some((left, top, right, bottom)) =
+            pixel_bounds(bounds, clip, scale, self.width, self.height)
+        else {
             return;
         };
-        let left = (bounds.x * scale).floor().max(0.0) as u32;
-        let top = (bounds.y * scale).floor().max(0.0) as u32;
-        let right = (bounds.right() * scale)
-            .ceil()
-            .clamp(0.0, self.width as f32) as u32;
-        let bottom = (bounds.bottom() * scale)
-            .ceil()
-            .clamp(0.0, self.height as f32) as u32;
         for y in top..bottom {
             for x in left..right {
                 let target = Point::new((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
@@ -266,6 +316,108 @@ impl SoftwareRenderer {
                 blend(&mut self.pixels[index], color, coverage.clamp(0.0, 1.0));
             }
         }
+    }
+}
+
+fn pixel_bounds(
+    bounds: Rect,
+    clip: Option<Rect>,
+    scale: f32,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let bounds = match clip {
+        Some(clip) => bounds.intersect(clip),
+        None => Some(bounds),
+    }?;
+    let left = (bounds.x * scale).floor().max(0.0) as u32;
+    let top = (bounds.y * scale).floor().max(0.0) as u32;
+    let right = (bounds.right() * scale).ceil().clamp(0.0, width as f32) as u32;
+    let bottom = (bounds.bottom() * scale).ceil().clamp(0.0, height as f32) as u32;
+    (right > left && bottom > top).then_some((left, top, right, bottom))
+}
+
+fn blur_horizontal(source: &[[f32; 4]], width: u32, height: u32, radius: f32) -> Vec<[f32; 4]> {
+    let mut output = vec![[0.0; 4]; source.len()];
+    for y in 0..height {
+        for x in 0..width {
+            output[y as usize * width as usize + x as usize] = blur_sample(
+                source,
+                width,
+                height,
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                radius,
+                true,
+            );
+        }
+    }
+    output
+}
+
+fn blur_sample(
+    pixels: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    radius: f32,
+    horizontal: bool,
+) -> [f32; 4] {
+    let mut result = multiply(sample_pixels(pixels, width, height, x, y), BLUR_WEIGHTS[0]);
+    let step = radius / 4.0;
+    for (index, weight) in BLUR_WEIGHTS.iter().copied().enumerate().skip(1) {
+        let offset = step * index as f32;
+        let (negative_x, negative_y, positive_x, positive_y) = if horizontal {
+            (x - offset, y, x + offset, y)
+        } else {
+            (x, y - offset, x, y + offset)
+        };
+        add_scaled(
+            &mut result,
+            sample_pixels(pixels, width, height, negative_x, negative_y),
+            weight,
+        );
+        add_scaled(
+            &mut result,
+            sample_pixels(pixels, width, height, positive_x, positive_y),
+            weight,
+        );
+    }
+    result
+}
+
+fn sample_pixels(pixels: &[[f32; 4]], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
+    let pixel_x = x - 0.5;
+    let pixel_y = y - 0.5;
+    let x0_float = pixel_x.floor();
+    let y0_float = pixel_y.floor();
+    let tx = pixel_x - x0_float;
+    let ty = pixel_y - y0_float;
+    let clamp_x = |value: f32| value.clamp(0.0, width.saturating_sub(1) as f32) as u32;
+    let clamp_y = |value: f32| value.clamp(0.0, height.saturating_sub(1) as f32) as u32;
+    let x0 = clamp_x(x0_float);
+    let y0 = clamp_y(y0_float);
+    let x1 = clamp_x(x0_float + 1.0);
+    let y1 = clamp_y(y0_float + 1.0);
+    let at = |x: u32, y: u32| pixels[y as usize * width as usize + x as usize];
+    mix(
+        mix(at(x0, y0), at(x1, y0), tx),
+        mix(at(x0, y1), at(x1, y1), tx),
+        ty,
+    )
+}
+
+fn multiply(mut value: [f32; 4], factor: f32) -> [f32; 4] {
+    for channel in &mut value {
+        *channel *= factor;
+    }
+    value
+}
+
+fn add_scaled(target: &mut [f32; 4], value: [f32; 4], factor: f32) {
+    for (target, value) in target.iter_mut().zip(value) {
+        *target += value * factor;
     }
 }
 
@@ -502,5 +654,40 @@ mod tests {
         let mut renderer = SoftwareRenderer::new(2, 1).unwrap();
         renderer.render(&builder.finish(), &textures, 1.0).unwrap();
         assert_eq!(renderer.rgba8(), [255, 0, 0, 128, 0, 255, 0, 128]);
+    }
+
+    #[test]
+    fn backdrop_blur_filters_only_its_rounded_painter_order_region() {
+        let mut builder = DisplayListBuilder::new();
+        for x in 0..12 {
+            let color = if x % 2 == 0 {
+                Color::from_srgba8(255, 255, 255, 255)
+            } else {
+                Color::from_srgba8(0, 0, 0, 255)
+            };
+            builder
+                .rect(Rect::new(x as f32, 0.0, 1.0, 8.0), color)
+                .unwrap();
+        }
+        builder
+            .backdrop_blur(Rect::new(2.0, 1.0, 8.0, 6.0), CornerRadii::all(2.0), 2.0)
+            .unwrap();
+        builder
+            .rect(
+                Rect::new(5.0, 3.0, 2.0, 2.0),
+                Color::from_srgba8(255, 0, 0, 255),
+            )
+            .unwrap();
+
+        let mut renderer = SoftwareRenderer::new(12, 8).unwrap();
+        renderer
+            .render(&builder.finish(), &TextureStore::new(), 1.0)
+            .unwrap();
+        let pixels = renderer.rgba8();
+        let pixel = |x: usize, y: usize| &pixels[(y * 12 + x) * 4..(y * 12 + x + 1) * 4];
+        assert_eq!(pixel(0, 4), [255, 255, 255, 255]);
+        assert_eq!(pixel(1, 4), [0, 0, 0, 255]);
+        assert!(pixel(4, 4)[0] > 40 && pixel(4, 4)[0] < 215);
+        assert_eq!(pixel(5, 3), [255, 0, 0, 255]);
     }
 }

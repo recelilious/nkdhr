@@ -21,9 +21,9 @@ pub struct SurfaceState {
     pub destructive: bool,
 }
 
-/// A calm frosted-glass container. It records the compensated fill today and
-/// exposes the requested blur so the compositor backdrop pass can honor it
-/// without changing component code.
+/// A calm frosted-glass container. Capable hosts receive a real painter-order
+/// backdrop filter; reduced-transparency and incapable hosts receive the
+/// theme's compensated opaque fill instead.
 #[derive(Debug, Clone)]
 pub struct GlassSurface {
     theme: Arc<Theme>,
@@ -159,6 +159,10 @@ pub(crate) fn paint_surface(
         )?;
     }
 
+    if material.backdrop_blur > 0.0 {
+        builder.backdrop_blur(rect, radii, material.backdrop_blur)?;
+    }
+
     let base = if state.accented {
         mix(
             material.fill,
@@ -253,10 +257,22 @@ mod tests {
     use nkdhr_render::{DisplayListBuilder, Primitive, ShapeStyle};
 
     #[test]
-    fn glass_surface_exposes_blur_request_but_paints_a_valid_fallback() {
+    fn glass_surface_paints_blur_only_for_a_capable_host() {
         let theme = Arc::new(Theme::default());
         let surface = GlassSurface::new(Arc::clone(&theme), MaterialTier::ContentSurface);
         assert_eq!(surface.material_request().backdrop_blur, 0.0);
+
+        let mut root = UiRoot::new(Element::new(surface)).unwrap();
+        root.layout(Size::new(120.0, 80.0)).unwrap();
+        let mut builder = DisplayListBuilder::new();
+        root.paint(&mut builder).unwrap();
+        assert!(
+            !builder
+                .finish()
+                .primitives()
+                .iter()
+                .any(|primitive| matches!(primitive, Primitive::BackdropBlur(_)))
+        );
 
         let capable = GlassSurface::new(theme, MaterialTier::ContentSurface).capabilities(
             MaterialCapabilities {
@@ -270,9 +286,26 @@ mod tests {
         let mut builder = DisplayListBuilder::new();
         root.paint(&mut builder).unwrap();
         let list = builder.finish();
+        assert!(matches!(
+            list.primitives().first(),
+            Some(Primitive::Shape(shape)) if matches!(shape.style, ShapeStyle::Shadow(_))
+        ));
         assert!(list.primitives().iter().any(|primitive| matches!(
             primitive,
-            Primitive::Shape(shape) if matches!(shape.style, ShapeStyle::Fill(_))
+            Primitive::BackdropBlur(blur) if blur.radius == 36.0
         )));
+        let blur_index = list
+            .primitives()
+            .iter()
+            .position(|primitive| matches!(primitive, Primitive::BackdropBlur(_)))
+            .unwrap();
+        let fill_index = list
+            .primitives()
+            .iter()
+            .position(|primitive| {
+                matches!(primitive, Primitive::Shape(shape) if matches!(shape.style, ShapeStyle::Fill(_)))
+            })
+            .unwrap();
+        assert!(blur_index < fill_index);
     }
 }

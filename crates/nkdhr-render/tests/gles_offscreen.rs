@@ -54,6 +54,34 @@ fn offscreen_gles_matches_the_software_oracle() {
     );
 }
 
+#[test]
+fn backdrop_filter_matches_the_software_oracle() {
+    let Some(device) = render_device() else {
+        eprintln!("skipping GLES backdrop comparison: no EGL render device is available");
+        return;
+    };
+    let (display_list, textures) = backdrop_scene();
+    let expected = software_image(&display_list, &textures);
+    let actual = gles_image(device, &display_list, &textures);
+
+    let mut maximum_difference = 0_u8;
+    let mut total_difference = 0_u64;
+    let mut differences = Vec::with_capacity(actual.len());
+    for (actual, expected) in actual.iter().zip(&expected) {
+        let difference = actual.abs_diff(*expected);
+        maximum_difference = maximum_difference.max(difference);
+        total_difference += u64::from(difference);
+        differences.push(difference);
+    }
+    differences.sort_unstable();
+    let mean_difference = total_difference as f64 / actual.len() as f64;
+    let p95_difference = differences[(differences.len() as f32 * 0.95) as usize];
+    assert!(
+        maximum_difference <= 4 && mean_difference <= 0.5 && p95_difference <= 1,
+        "GLES backdrop differs from the scalar oracle: maximum channel difference {maximum_difference}, p95 {p95_difference}, mean {mean_difference:.4}"
+    );
+}
+
 fn write_ppm(path: &str, pixels: &[u8]) {
     let mut ppm = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
     for pixel in pixels.chunks_exact(4) {
@@ -176,6 +204,23 @@ fn scene() -> (DisplayList, TextureStore) {
         .unwrap();
 
     let mut builder = DisplayListBuilder::new();
+    for x in 0..16 {
+        let color = if x % 2 == 0 {
+            Color::from_srgba8(86, 156, 214, 255)
+        } else {
+            Color::from_srgba8(26, 31, 46, 255)
+        };
+        builder
+            .rect(Rect::new(x as f32 * 8.0, 0.0, 8.0, 96.0), color)
+            .unwrap();
+    }
+    builder
+        .backdrop_blur(
+            Rect::new(8.0, 7.0, 82.0, 66.0),
+            CornerRadii::new(14.0, 5.0, 18.0, 2.0),
+            7.0,
+        )
+        .unwrap();
     builder
         .shadow(
             Rect::new(12.0, 12.0, 72.0, 52.0),
@@ -227,4 +272,22 @@ fn scene() -> (DisplayList, TextureStore) {
         })
         .unwrap();
     (builder.finish(), textures)
+}
+
+fn backdrop_scene() -> (DisplayList, TextureStore) {
+    let mut builder = DisplayListBuilder::new();
+    for x in 0..16 {
+        let color = if x % 2 == 0 {
+            Color::from_srgba8(238, 242, 255, 255)
+        } else {
+            Color::from_srgba8(28, 33, 49, 255)
+        };
+        builder
+            .rect(Rect::new(x as f32 * 8.0, 0.0, 8.0, 96.0), color)
+            .unwrap();
+    }
+    builder
+        .backdrop_blur(Rect::new(16.0, 16.0, 96.0, 64.0), CornerRadii::ZERO, 7.0)
+        .unwrap();
+    (builder.finish(), TextureStore::new())
 }
