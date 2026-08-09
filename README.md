@@ -38,9 +38,13 @@ and motion profiles plus the first public `GlassSurface`, `Button`, `Toggle`,
 `Slider`, `List`, `Scroll`, `Text` and `TextInput` implementations are present.
 The retained tree now owns a shared shaping/atlas resource boundary: public text,
 component labels and TextInput glyph hit testing render real Unicode/CJK/emoji
-through the same texture store. UI-3 remains open while full advanced component
-behavior, real compositor backdrop blur and the accepted Settings composition
-are wired and visually accepted.
+through the same texture store. `Scroll` now adds overlay thumb dragging and
+track paging, Shift-wheel and Vim-key navigation, host-clocked interruptible
+inertia, bounded elastic feedback, opt-in snapping, exact nested-delta handoff,
+revisioned anchoring/minimal reveal and conditional tail following; reduced
+motion removes its spatial effects. UI-3 remains open while advanced List and
+TextInput behavior, real compositor backdrop blur and the accepted Settings
+composition are wired and visually accepted.
 
 ## Documentation
 

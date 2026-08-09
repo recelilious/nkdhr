@@ -10,13 +10,13 @@ use std::{
     time::Duration,
 };
 
-use nkdhr_render::{BuildError, Color, DisplayListBuilder, Point, Rect, TextureStore};
+use nkdhr_render::{BuildError, Color, DisplayListBuilder, Point, Rect, TextureStore, Transform};
 
 use crate::reactive::SubscriptionToken;
 use crate::text::{TextDrawStats, TextError, TextLayout, TextResources, TextStyle};
 use crate::{
-    Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, SemanticNode, Semantics, Size,
-    SystemClock, UiEvent,
+    Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, ScrollPhase, SemanticNode,
+    Semantics, Size, SystemClock, UiEvent,
 };
 
 pub type UiResult<T> = Result<T, UiError>;
@@ -223,7 +223,22 @@ pub trait Widget: AsAny + 'static {
         ctx.paint_children()
     }
 
+    /// Advance state that must change before the next layout pass. Paint-only
+    /// transitions can continue sampling time from `PaintCtx` instead.
+    fn animation(&self, _ctx: &mut AnimationCtx<'_>) {}
+
     fn event(&self, _ctx: &mut EventCtx<'_>, _event: &UiEvent) -> UiResult<()> {
+        Ok(())
+    }
+
+    /// Final unconsumed remainder after nested scroll bubbling reaches the
+    /// outer boundary. Scroll containers use this for visual elasticity.
+    fn scroll_boundary(
+        &self,
+        _ctx: &mut EventCtx<'_>,
+        _delta_x: f32,
+        _delta_y: f32,
+    ) -> UiResult<()> {
         Ok(())
     }
 
@@ -452,6 +467,7 @@ struct EventRequests {
     handled: bool,
     focus: Option<WidgetId>,
     capture: Option<CaptureRequest>,
+    scroll_remainder: Option<(f32, f32)>,
 }
 
 /// One retained UI tree. Hosts call `reconcile`, `layout`, `paint`, `dispatch`
@@ -672,8 +688,10 @@ impl UiRoot {
         };
         let mut requests = EventRequests::default();
         if let Some(target) = target {
+            let mut bubbling_event = event.clone();
+            let mut boundary = None;
             for id in self.path_to_root(target) {
-                let current = self.call_event(id, event)?;
+                let current = self.call_event(id, &bubbling_event)?;
                 requests.handled |= current.handled;
                 if current.focus.is_some() {
                     requests.focus = current.focus;
@@ -681,8 +699,32 @@ impl UiRoot {
                 if current.capture.is_some() {
                     requests.capture = current.capture;
                 }
-                if requests.handled {
+                if let Some((delta_x, delta_y)) = current.scroll_remainder {
+                    if delta_x.abs() <= f32::EPSILON && delta_y.abs() <= f32::EPSILON {
+                        boundary = None;
+                        if is_scroll_lifecycle(&bubbling_event) {
+                            bubbling_event = with_scroll_delta(&bubbling_event, 0.0, 0.0);
+                            continue;
+                        }
+                        break;
+                    }
+                    boundary = Some((id, delta_x, delta_y));
+                    bubbling_event = with_scroll_delta(&bubbling_event, delta_x, delta_y);
+                    continue;
+                }
+                if current.handled {
+                    boundary = None;
                     break;
+                }
+            }
+            if let Some((id, delta_x, delta_y)) = boundary {
+                let current = self.call_scroll_boundary(id, delta_x, delta_y)?;
+                requests.handled |= current.handled;
+                if current.focus.is_some() {
+                    requests.focus = current.focus;
+                }
+                if current.capture.is_some() {
+                    requests.capture = current.capture;
                 }
             }
         }
@@ -722,14 +764,15 @@ impl UiRoot {
     }
 
     /// Advance registered animations to the next explicit host frame.
-    /// Widgets re-register from paint while their own timeline remains active.
+    /// Widgets may update layout state here, then re-register from animation
+    /// or paint while their timeline remains active.
     pub fn tick(&mut self) -> bool {
         self.flush_reactive();
         let active = std::mem::take(&mut self.animations);
         self.frame_requested = false;
         let had_active = !active.is_empty();
         for id in active {
-            self.mark_dirty(id, Invalidation::PAINT);
+            self.call_animation(id);
         }
         had_active
     }
@@ -1119,6 +1162,35 @@ impl UiRoot {
         result
     }
 
+    fn call_animation(&mut self, id: WidgetId) {
+        if !self.is_alive(id) {
+            return;
+        }
+        let now = self.now();
+        let reactivity = Rc::clone(&self.reactivity);
+        let Ok(mut node) = self.arena.take(id) else {
+            return;
+        };
+        let mut ctx = AnimationCtx {
+            id,
+            rect: node.rect,
+            state: node.state.as_mut(),
+            subscriptions: &mut node.subscriptions,
+            reactivity,
+            now,
+            invalidation: Invalidation::PAINT,
+            animation_requested: false,
+        };
+        node.widget.animation(&mut ctx);
+        let requested = ctx.invalidation;
+        let animation_requested = ctx.animation_requested;
+        self.arena.restore(id, node);
+        self.mark_dirty(id, requested);
+        if animation_requested {
+            self.register_animation(id);
+        }
+    }
+
     fn call_event(&mut self, id: WidgetId, event: &UiEvent) -> UiResult<EventRequests> {
         let now = self.now();
         let is_focused = self.focus == Some(id);
@@ -1137,6 +1209,40 @@ impl UiRoot {
             is_focused,
         };
         let result = node.widget.event(&mut ctx, event);
+        let requested = ctx.invalidation;
+        let animation_requested = ctx.animation_requested;
+        let requests = ctx.requests;
+        self.arena.restore(id, node);
+        self.mark_dirty(id, requested);
+        if animation_requested {
+            self.register_animation(id);
+        }
+        result.map(|()| requests)
+    }
+
+    fn call_scroll_boundary(
+        &mut self,
+        id: WidgetId,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> UiResult<EventRequests> {
+        let now = self.now();
+        let is_focused = self.focus == Some(id);
+        let reactivity = Rc::clone(&self.reactivity);
+        let mut node = self.arena.take(id)?;
+        let mut ctx = EventCtx {
+            id,
+            rect: node.rect,
+            state: node.state.as_mut(),
+            subscriptions: &mut node.subscriptions,
+            reactivity,
+            now,
+            invalidation: Invalidation::NONE,
+            animation_requested: false,
+            requests: EventRequests::default(),
+            is_focused,
+        };
+        let result = node.widget.scroll_boundary(&mut ctx, delta_x, delta_y);
         let requested = ctx.invalidation;
         let animation_requested = ctx.animation_requested;
         let requests = ctx.requests;
@@ -1304,12 +1410,16 @@ fn validate_event(event: &UiEvent) -> UiResult<()> {
     {
         return Err(UiError::InvalidEvent);
     }
-    if let UiEvent::PointerScroll {
-        delta_x, delta_y, ..
-    } = event
-        && (!delta_x.is_finite() || !delta_y.is_finite())
-    {
-        return Err(UiError::InvalidEvent);
+    match event {
+        UiEvent::PointerScroll {
+            delta_x, delta_y, ..
+        }
+        | UiEvent::ScrollGesture {
+            delta_x, delta_y, ..
+        } if !delta_x.is_finite() || !delta_y.is_finite() => {
+            return Err(UiError::InvalidEvent);
+        }
+        _ => {}
     }
     if let UiEvent::ImePreedit {
         text,
@@ -1323,6 +1433,44 @@ fn validate_event(event: &UiEvent) -> UiResult<()> {
         return Err(UiError::InvalidEvent);
     }
     Ok(())
+}
+
+fn with_scroll_delta(event: &UiEvent, delta_x: f32, delta_y: f32) -> UiEvent {
+    match event {
+        UiEvent::PointerScroll {
+            position,
+            modifiers,
+            ..
+        } => UiEvent::PointerScroll {
+            position: *position,
+            delta_x,
+            delta_y,
+            modifiers: *modifiers,
+        },
+        UiEvent::ScrollGesture {
+            position,
+            phase,
+            modifiers,
+            ..
+        } => UiEvent::ScrollGesture {
+            position: *position,
+            delta_x,
+            delta_y,
+            phase: *phase,
+            modifiers: *modifiers,
+        },
+        _ => event.clone(),
+    }
+}
+
+fn is_scroll_lifecycle(event: &UiEvent) -> bool {
+    matches!(
+        event,
+        UiEvent::ScrollGesture {
+            phase: ScrollPhase::Begin | ScrollPhase::End | ScrollPhase::Cancel,
+            ..
+        }
+    )
 }
 
 macro_rules! common_context {
@@ -1550,7 +1698,34 @@ impl PaintCtx<'_> {
         self.rect
     }
 
+    /// Register a pointer region painted above this widget's children. This is
+    /// used by overlay controls such as scrollbar tracks without making the
+    /// container intercept its entire content area.
+    pub fn register_pointer_overlay(&mut self, rect: Rect) -> UiResult<()> {
+        validate_rect(rect)?;
+        if let Some(rect) = rect.intersect(self.rect) {
+            self.root.paint_order.push(PaintEntry {
+                id: self.id,
+                rect,
+                clip: self.child_clip,
+                accepts_pointer: true,
+            });
+        }
+        Ok(())
+    }
+
     pub fn paint_child(&mut self, index: usize) -> UiResult<()> {
+        self.paint_child_translated(index, 0.0, 0.0)
+    }
+
+    /// Paint one child with a visual-only translation. Layout and hit geometry
+    /// stay rigid; Scroll uses this for bounded elastic feedback.
+    pub fn paint_child_translated(
+        &mut self,
+        index: usize,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> UiResult<()> {
         let child = *self
             .children
             .get(index)
@@ -1558,12 +1733,17 @@ impl PaintCtx<'_> {
                 expected_maximum: self.children.len(),
                 actual: index + 1,
             })?;
+        let transform = Transform::translation(delta_x, delta_y);
         let result = if self.clips_children {
             self.builder.with_clip(self.rect, |builder| {
-                Ok(self.root.paint_node(child, builder, self.child_clip))
+                builder.with_transform(transform, |builder| {
+                    Ok(self.root.paint_node(child, builder, self.child_clip))
+                })
             })?
         } else {
-            self.root.paint_node(child, self.builder, self.child_clip)
+            self.builder.with_transform(transform, |builder| {
+                Ok(self.root.paint_node(child, builder, self.child_clip))
+            })?
         };
         if result.is_ok() {
             self.painted_children[index] = true;
@@ -1576,6 +1756,25 @@ impl PaintCtx<'_> {
             self.paint_child(index)?;
         }
         Ok(())
+    }
+}
+
+pub struct AnimationCtx<'a> {
+    id: WidgetId,
+    rect: Rect,
+    state: &'a mut dyn Any,
+    subscriptions: &'a mut Vec<SubscriptionToken>,
+    reactivity: Rc<RootReactivity>,
+    now: Duration,
+    invalidation: Invalidation,
+    animation_requested: bool,
+}
+
+impl AnimationCtx<'_> {
+    common_context!();
+
+    pub fn rect(&self) -> Rect {
+        self.rect
     }
 }
 
@@ -1621,6 +1820,18 @@ impl EventCtx<'_> {
 
     pub fn set_handled(&mut self) {
         self.requests.handled = true;
+        self.requests.scroll_remainder = None;
+    }
+
+    /// Continue a scroll transaction with only the unconsumed logical delta.
+    /// `consumed` reports whether this widget moved before reaching its bound.
+    pub fn handoff_scroll(&mut self, delta_x: f32, delta_y: f32, consumed: bool) -> UiResult<()> {
+        if !delta_x.is_finite() || !delta_y.is_finite() {
+            return Err(UiError::InvalidEvent);
+        }
+        self.requests.handled |= consumed;
+        self.requests.scroll_remainder = Some((delta_x, delta_y));
+        Ok(())
     }
 
     pub fn request_focus(&mut self) {

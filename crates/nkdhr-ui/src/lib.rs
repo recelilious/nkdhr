@@ -12,7 +12,7 @@ mod tree;
 mod widgets;
 
 pub use animation::{Clock, ManualClock, SystemClock, Timeline, lerp};
-pub use input::{Key, Modifiers, PointerButton, UiEvent};
+pub use input::{Key, Modifiers, PointerButton, ScrollPhase, UiEvent};
 pub use layout::{
     Align, Alignment, Axis, Clip, Constraints, CrossAxisAlignment, Flex, Insets, MainAxisAlignment,
     Padding, Size, Stack,
@@ -30,11 +30,11 @@ pub use theme::{
     Typography,
 };
 pub use tree::{
-    ArrangeCtx, DispatchResult, Element, EventCtx, Invalidation, MeasureCtx, PaintCtx,
-    SemanticsCtx, UiError, UiResult, UiRoot, UpdateCtx, Widget, WidgetId, WidgetKey,
+    AnimationCtx, ArrangeCtx, DispatchResult, Element, EventCtx, Invalidation, MeasureCtx,
+    PaintCtx, SemanticsCtx, UiError, UiResult, UiRoot, UpdateCtx, Widget, WidgetId, WidgetKey,
 };
 pub use widgets::{
     Button, ButtonVariant, GlassSurface, List, ListError, ListItem, ListItemBehavior, Scroll,
-    ScrollError, ScrollOffset, Slider, SliderError, SurfaceState, Text, TextInput, TextInputError,
-    TextInputStatus, Toggle,
+    ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy, Slider,
+    SliderError, SurfaceState, Text, TextInput, TextInputError, TextInputStatus, Toggle,
 };

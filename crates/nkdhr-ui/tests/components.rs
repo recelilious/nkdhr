@@ -1,4 +1,4 @@
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
 use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
@@ -8,8 +8,9 @@ use nkdhr_ui::text::{TextConfig, TextResources, TextSystem};
 use nkdhr_ui::{
     Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment, Density, Element, Flex,
     GlassSurface, Insets, Key, List, ListItem, MainAxisAlignment, ManualClock, MaterialTier,
-    Modifiers, MotionMode, PointerButton, Reactive, Scroll, ScrollOffset, SemanticRole, Size,
-    Slider, Text, TextInput, TextRole, Theme, Toggle, UiEvent, UiRoot, Widget,
+    Modifiers, MotionMode, Padding, PointerButton, Reactive, Scroll, ScrollAnchor, ScrollAxis,
+    ScrollOffset, ScrollPhase, ScrollReveal, SemanticRole, Size, Slider, Text, TextInput, TextRole,
+    Theme, Toggle, UiEvent, UiRoot, Widget,
 };
 
 fn prepare(root: &mut UiRoot, size: Size) -> nkdhr_render::DisplayList {
@@ -440,9 +441,16 @@ fn scroll_clamps_pointer_and_keyboard_updates_to_content_extent() {
         position: Point::new(50.0, 50.0),
         delta_x: 0.0,
         delta_y: 72.0,
+        modifiers: Modifiers::default(),
     })
     .unwrap();
     assert_eq!(offset.get().y, 72.0);
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Tab,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
     prepare(&mut root, Size::new(100.0, 100.0));
     root.dispatch(&UiEvent::KeyDown {
         key: Key::End,
@@ -451,6 +459,481 @@ fn scroll_clamps_pointer_and_keyboard_updates_to_content_extent() {
     })
     .unwrap();
     assert_eq!(offset.get().y, 300.0);
+}
+
+#[test]
+fn scrollbar_overlay_supports_exact_thumb_drag_and_track_paging() {
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let scroll = Scroll::new(
+        "Settings page",
+        Size::new(100.0, 400.0),
+        offset.clone(),
+        Arc::new(Theme::default()),
+    )
+    .unwrap()
+    .horizontal(false);
+    let mut root = UiRoot::new(Element::new(scroll).child(Element::new(LabelBlock))).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    let down = root
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(95.0, 12.0),
+            button: PointerButton::Primary,
+        })
+        .unwrap();
+    assert!(down.handled);
+    assert!(down.pointer_capture.is_some());
+    root.dispatch(&UiEvent::PointerMoved {
+        position: Point::new(95.0, 72.0),
+    })
+    .unwrap();
+    assert!((offset.get().y - 240.0).abs() < 0.01);
+    let up = root
+        .dispatch(&UiEvent::PointerUp {
+            position: Point::new(95.0, 72.0),
+            button: PointerButton::Primary,
+        })
+        .unwrap();
+    assert!(up.pointer_capture.is_none());
+
+    offset.set(ScrollOffset::ZERO);
+    prepare(&mut root, Size::new(100.0, 100.0));
+    root.dispatch(&UiEvent::PointerDown {
+        position: Point::new(95.0, 80.0),
+        button: PointerButton::Primary,
+    })
+    .unwrap();
+    assert_eq!(offset.get().y, 100.0);
+}
+
+#[test]
+fn nested_scroll_hands_only_the_exact_boundary_remainder_outward() {
+    let outer_offset = Reactive::new(ScrollOffset::ZERO);
+    let inner_offset = Reactive::new(ScrollOffset::new(0.0, 150.0));
+    let theme = Arc::new(Theme::default());
+    let inner = Scroll::new(
+        "Inner",
+        Size::new(100.0, 500.0),
+        inner_offset.clone(),
+        Arc::clone(&theme),
+    )
+    .unwrap()
+    .horizontal(false);
+    let outer = Scroll::new(
+        "Outer",
+        Size::new(100.0, 300.0),
+        outer_offset.clone(),
+        theme,
+    )
+    .unwrap()
+    .horizontal(false);
+    let scene = Element::new(outer).child(Element::new(inner).child(Element::new(LabelBlock)));
+    let mut root = UiRoot::new(scene).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    let result = root
+        .dispatch(&UiEvent::PointerScroll {
+            position: Point::new(50.0, 50.0),
+            delta_x: 0.0,
+            delta_y: 100.0,
+            modifiers: Modifiers::default(),
+        })
+        .unwrap();
+    assert!(result.handled);
+    assert_eq!(inner_offset.get().y, 200.0);
+    assert_eq!(outer_offset.get().y, 50.0);
+}
+
+#[test]
+fn nested_scroll_gesture_lifecycle_reaches_the_container_that_consumed_remainder() {
+    let clock = ManualClock::default();
+    let outer_offset = Reactive::new(ScrollOffset::ZERO);
+    let inner_offset = Reactive::new(ScrollOffset::new(0.0, 200.0));
+    let theme = Arc::new(Theme::default());
+    let inner = Scroll::new(
+        "Inner",
+        Size::new(100.0, 500.0),
+        inner_offset.clone(),
+        Arc::clone(&theme),
+    )
+    .unwrap()
+    .horizontal(false);
+    let outer = Scroll::new(
+        "Outer",
+        Size::new(100.0, 300.0),
+        outer_offset.clone(),
+        theme,
+    )
+    .unwrap()
+    .horizontal(false);
+    let mut root = UiRoot::with_clock(
+        Element::new(outer).child(Element::new(inner).child(Element::new(LabelBlock))),
+        clock.clone(),
+    )
+    .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    for (advance, delta_y, phase) in [
+        (0, 0.0, ScrollPhase::Begin),
+        (16, 60.0, ScrollPhase::Update),
+        (16, 0.0, ScrollPhase::End),
+    ] {
+        clock.advance(Duration::from_millis(advance));
+        root.dispatch(&UiEvent::ScrollGesture {
+            position: Point::new(50.0, 50.0),
+            delta_x: 0.0,
+            delta_y,
+            phase,
+            modifiers: Modifiers::default(),
+        })
+        .unwrap();
+    }
+    assert_eq!(inner_offset.get().y, 200.0);
+    assert_eq!(outer_offset.get().y, 60.0);
+    clock.advance(Duration::from_millis(32));
+    assert!(root.tick());
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert!(outer_offset.get().y > 60.0);
+}
+
+#[test]
+fn captured_thumb_drag_never_transfers_scroll_to_an_ancestor() {
+    let outer_offset = Reactive::new(ScrollOffset::ZERO);
+    let inner_offset = Reactive::new(ScrollOffset::ZERO);
+    let theme = Arc::new(Theme::default());
+    let inner = Scroll::new(
+        "Inner",
+        Size::new(80.0, 500.0),
+        inner_offset.clone(),
+        Arc::clone(&theme),
+    )
+    .unwrap()
+    .horizontal(false);
+    let outer = Scroll::new(
+        "Outer",
+        Size::new(100.0, 300.0),
+        outer_offset.clone(),
+        theme,
+    )
+    .unwrap()
+    .horizontal(false);
+    let inset_inner = Element::new(Padding {
+        insets: Insets::new(0.0, 0.0, 20.0, 0.0),
+    })
+    .child(Element::new(inner).child(Element::new(LabelBlock)));
+    let mut root = UiRoot::new(Element::new(outer).child(inset_inner)).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    let down = root
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(75.0, 20.0),
+            button: PointerButton::Primary,
+        })
+        .unwrap();
+    assert!(down.pointer_capture.is_some());
+    root.dispatch(&UiEvent::PointerScroll {
+        position: Point::new(75.0, 20.0),
+        delta_x: 0.0,
+        delta_y: 100.0,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    assert_eq!(inner_offset.get(), ScrollOffset::ZERO);
+    assert_eq!(outer_offset.get(), ScrollOffset::ZERO);
+}
+
+#[test]
+fn scroll_gesture_inertia_is_host_clocked_and_interruptible() {
+    let clock = ManualClock::default();
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let scroll = Scroll::new(
+        "Canvas",
+        Size::new(100.0, 1_000.0),
+        offset.clone(),
+        Arc::new(Theme::default()),
+    )
+    .unwrap()
+    .horizontal(false);
+    let mut root = UiRoot::with_clock(
+        Element::new(scroll).child(Element::new(LabelBlock)),
+        clock.clone(),
+    )
+    .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 0.0,
+        phase: ScrollPhase::Begin,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    clock.advance(Duration::from_millis(16));
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 60.0,
+        phase: ScrollPhase::Update,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    clock.advance(Duration::from_millis(16));
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 0.0,
+        phase: ScrollPhase::End,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    let released = offset.get().y;
+    clock.advance(Duration::from_millis(32));
+    assert!(root.tick());
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert!(offset.get().y > released);
+
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 0.0,
+        phase: ScrollPhase::Begin,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    let interrupted = offset.get().y;
+    clock.advance(Duration::from_millis(48));
+    root.tick();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(offset.get().y, interrupted);
+}
+
+#[test]
+fn scroll_anchor_reveal_and_conditional_tail_follow_preserve_visual_context() {
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let theme = Arc::new(Theme::default());
+    let anchor = ScrollAnchor::new(1, Point::new(0.0, 300.0), Point::new(0.0, 40.0)).unwrap();
+    let scene =
+        |content_height: f32, anchor: Option<ScrollAnchor>, reveal: Option<ScrollReveal>| {
+            let scroll = Scroll::new(
+                "History",
+                Size::new(100.0, content_height),
+                offset.clone(),
+                Arc::clone(&theme),
+            )
+            .unwrap()
+            .horizontal(false)
+            .follow_tail(true)
+            .anchor(anchor)
+            .reveal(reveal);
+            Element::new(scroll).child(Element::new(LabelBlock))
+        };
+    let mut root = UiRoot::new(scene(500.0, Some(anchor), None)).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(offset.get().y, 260.0);
+
+    offset.set(ScrollOffset::new(0.0, 100.0));
+    root.reconcile(scene(500.0, Some(anchor), None)).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(
+        offset.get().y,
+        100.0,
+        "the same anchor revision must not fight user scrolling"
+    );
+
+    let reveal = ScrollReveal::new(1, nkdhr_render::Rect::new(0.0, 330.0, 20.0, 20.0)).unwrap();
+    root.reconcile(scene(500.0, Some(anchor), Some(reveal)))
+        .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(offset.get().y, 250.0);
+
+    offset.set(ScrollOffset::new(0.0, 400.0));
+    root.reconcile(scene(500.0, Some(anchor), Some(reveal)))
+        .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    root.reconcile(scene(560.0, Some(anchor), Some(reveal)))
+        .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(
+        offset.get().y,
+        460.0,
+        "content growth follows only when already near the old tail"
+    );
+}
+
+#[test]
+fn opt_in_snap_points_settle_on_the_host_clock() {
+    let clock = ManualClock::default();
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let scroll = Scroll::new(
+        "Pages",
+        Size::new(100.0, 400.0),
+        offset.clone(),
+        Arc::new(Theme::default()),
+    )
+    .unwrap()
+    .horizontal(false)
+    .snap_points(ScrollAxis::Vertical, [0.0, 100.0, 200.0, 300.0])
+    .unwrap();
+    let mut root = UiRoot::with_clock(
+        Element::new(scroll).child(Element::new(LabelBlock)),
+        clock.clone(),
+    )
+    .unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 0.0,
+        phase: ScrollPhase::Begin,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::ScrollGesture {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 70.0,
+        phase: ScrollPhase::End,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    assert_eq!(offset.get().y, 70.0);
+    clock.advance(Duration::from_millis(300));
+    assert!(root.tick());
+    prepare(&mut root, Size::new(100.0, 100.0));
+    assert_eq!(offset.get().y, 100.0);
+}
+
+#[test]
+fn elastic_boundary_motion_translates_content_but_reduced_motion_does_not() {
+    fn boundary_display_list(motion_mode: MotionMode) -> nkdhr_render::DisplayList {
+        let mut theme = Theme::default();
+        theme.motion.mode = motion_mode;
+        let scroll = Scroll::new(
+            "Boundary",
+            Size::new(100.0, 400.0),
+            Reactive::new(ScrollOffset::ZERO),
+            Arc::new(theme),
+        )
+        .unwrap()
+        .horizontal(false);
+        let mut root = UiRoot::new(Element::new(scroll).child(Element::new(LabelBlock))).unwrap();
+        prepare(&mut root, Size::new(100.0, 100.0));
+        root.dispatch(&UiEvent::PointerScroll {
+            position: Point::new(50.0, 50.0),
+            delta_x: 0.0,
+            delta_y: -40.0,
+            modifiers: Modifiers::default(),
+        })
+        .unwrap();
+        prepare(&mut root, Size::new(100.0, 100.0))
+    }
+
+    let standard = boundary_display_list(MotionMode::Standard);
+    assert!(
+        standard
+            .primitives()
+            .iter()
+            .any(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform != nkdhr_render::Transform::IDENTITY,
+            })
+    );
+    let reduced = boundary_display_list(MotionMode::Reduced);
+    assert!(
+        reduced
+            .primitives()
+            .iter()
+            .all(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform == nkdhr_render::Transform::IDENTITY,
+            })
+    );
+}
+
+#[test]
+fn switching_to_reduced_motion_settles_active_scroll_spatial_state_immediately() {
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let scene = |motion_mode: MotionMode| {
+        let mut theme = Theme::default();
+        theme.motion.mode = motion_mode;
+        Element::new(
+            Scroll::new(
+                "Boundary",
+                Size::new(100.0, 400.0),
+                offset.clone(),
+                Arc::new(theme),
+            )
+            .unwrap()
+            .horizontal(false),
+        )
+        .child(Element::new(LabelBlock))
+    };
+    let mut root = UiRoot::new(scene(MotionMode::Standard)).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+    root.dispatch(&UiEvent::PointerScroll {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: -40.0,
+        modifiers: Modifiers::default(),
+    })
+    .unwrap();
+    let moving = prepare(&mut root, Size::new(100.0, 100.0));
+    assert!(moving.primitives().iter().any(|primitive| match primitive {
+        Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
+        Primitive::Texture(texture) => texture.transform != nkdhr_render::Transform::IDENTITY,
+    }));
+
+    root.reconcile(scene(MotionMode::Reduced)).unwrap();
+    let reduced = prepare(&mut root, Size::new(100.0, 100.0));
+    assert!(
+        reduced
+            .primitives()
+            .iter()
+            .all(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform == nkdhr_render::Transform::IDENTITY,
+            })
+    );
+}
+
+#[test]
+fn shift_wheel_and_vim_keys_share_scroll_direction_semantics() {
+    let offset = Reactive::new(ScrollOffset::ZERO);
+    let scroll = Scroll::new(
+        "Timeline",
+        Size::new(400.0, 400.0),
+        offset.clone(),
+        Arc::new(Theme::default()),
+    )
+    .unwrap();
+    let mut root = UiRoot::new(Element::new(scroll).child(Element::new(LabelBlock))).unwrap();
+    prepare(&mut root, Size::new(100.0, 100.0));
+
+    root.dispatch(&UiEvent::PointerScroll {
+        position: Point::new(50.0, 50.0),
+        delta_x: 0.0,
+        delta_y: 50.0,
+        modifiers: Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    })
+    .unwrap();
+    assert_eq!(offset.get(), ScrollOffset::new(50.0, 0.0));
+    for key in ["l", "j", "h", "k"] {
+        root.dispatch(&UiEvent::KeyDown {
+            key: Key::Character(key.to_owned()),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+        .unwrap();
+    }
+    assert_eq!(offset.get(), ScrollOffset::new(50.0, 0.0));
 }
 
 #[test]

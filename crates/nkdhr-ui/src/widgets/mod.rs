@@ -11,7 +11,9 @@ mod toggle;
 
 pub use button::{Button, ButtonVariant};
 pub use list::{List, ListError, ListItem, ListItemBehavior};
-pub use scroll::{Scroll, ScrollError, ScrollOffset};
+pub use scroll::{
+    Scroll, ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy,
+};
 pub use slider::{Slider, SliderError};
 pub use surface::{GlassSurface, SurfaceState};
 pub use text::Text;

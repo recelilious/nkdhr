@@ -20,6 +20,15 @@ pub struct Modifiers {
     pub logo: bool,
 }
 
+/// Lifecycle of a continuous touch or precision-scroll gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScrollPhase {
+    Begin,
+    Update,
+    End,
+    Cancel,
+}
+
 /// Logical key identity used by the toolkit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -59,6 +68,14 @@ pub enum UiEvent {
         position: Point,
         delta_x: f32,
         delta_y: f32,
+        modifiers: Modifiers,
+    },
+    ScrollGesture {
+        position: Point,
+        delta_x: f32,
+        delta_y: f32,
+        phase: ScrollPhase,
+        modifiers: Modifiers,
     },
     PointerCancel,
     PointerLeft,
@@ -87,7 +104,8 @@ impl UiEvent {
             Self::PointerMoved { position }
             | Self::PointerDown { position, .. }
             | Self::PointerUp { position, .. }
-            | Self::PointerScroll { position, .. } => Some(*position),
+            | Self::PointerScroll { position, .. }
+            | Self::ScrollGesture { position, .. } => Some(*position),
             _ => None,
         }
     }
@@ -99,6 +117,7 @@ impl UiEvent {
                 | Self::PointerDown { .. }
                 | Self::PointerUp { .. }
                 | Self::PointerScroll { .. }
+                | Self::ScrollGesture { .. }
                 | Self::PointerCancel
                 | Self::PointerLeft
         )
