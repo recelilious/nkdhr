@@ -105,6 +105,35 @@ fn multiline_caret_uses_global_source_offsets_and_visual_line_geometry() {
         second_line.y + second_line.height * 0.5,
     ));
     assert_eq!(hit.byte_index, 3);
+    assert_eq!(layout.hit_line(0, f32::NEG_INFINITY).byte_index, 0);
+    assert_eq!(layout.hit_line(0, f32::INFINITY).byte_index, 2);
+}
+
+#[test]
+fn multiline_and_bidirectional_selection_resolves_to_visual_fragments() {
+    let mut text = fixture_system(TextConfig::default());
+    let source = "abc العربية 123\n第二行";
+    let layout = text
+        .layout(source, &fixture_style(), Some(180.0), 1.0)
+        .unwrap();
+    let fragments = layout.selection_rects(0..source.len());
+    assert!(fragments.iter().any(|fragment| fragment.line_index == 0));
+    assert!(fragments.iter().any(|fragment| fragment.line_index > 0));
+    assert!(fragments.iter().all(|fragment| {
+        fragment.rect.width > 0.0
+            && fragment.rect.height > 0.0
+            && fragment.rect.x.is_finite()
+            && fragment.rect.y.is_finite()
+    }));
+
+    let arabic = source.find("العربية").unwrap();
+    let bidi_fragments = layout.selection_rects(arabic..arabic + "العربية".len());
+    assert!(!bidi_fragments.is_empty());
+    assert!(
+        bidi_fragments
+            .iter()
+            .all(|fragment| fragment.line_index == 0)
+    );
 }
 
 #[test]

@@ -20,5 +20,9 @@ pub use scroll::{
 pub use slider::{Slider, SliderError};
 pub use surface::{GlassSurface, SurfaceState};
 pub use text::Text;
-pub use text_input::{TextInput, TextInputError, TextInputStatus};
+pub use text_input::{
+    PasswordCopyPolicy, TextInput, TextInputEdit, TextInputEnterBehavior, TextInputError,
+    TextInputSelection, TextInputStatus, TextInputTabBehavior, TextInputValidationOutcome,
+    TextInputValidationRequest, TextInputValidationResult, TextInputValidationTrigger,
+};
 pub use toggle::Toggle;

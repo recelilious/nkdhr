@@ -2,6 +2,8 @@
 
 use nkdhr_render::Point;
 
+use crate::tree::WidgetId;
+
 /// Pointer button identity without a libinput or Wayland dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PointerButton {
@@ -48,6 +50,17 @@ pub enum Key {
     Delete,
     Character(String),
     Named(String),
+}
+
+/// Host clipboard work emitted by one input dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardRequest {
+    /// Read plain text and return it to the originating widget with
+    /// `UiEvent::ClipboardText`.
+    ReadText {
+        target: WidgetId,
+    },
+    WriteText(String),
 }
 
 /// One input transaction delivered at a frame boundary.
@@ -100,6 +113,11 @@ pub enum UiEvent {
         selection: Option<(usize, usize)>,
     },
     ImeCommit(String),
+    /// Plain text returned by the host for an earlier clipboard read.
+    ClipboardText {
+        target: WidgetId,
+        text: String,
+    },
     FocusChanged(bool),
     HoverChanged(bool),
 }
@@ -137,6 +155,7 @@ impl UiEvent {
                 | Self::TextInput(_)
                 | Self::ImePreedit { .. }
                 | Self::ImeCommit(_)
+                | Self::ClipboardText { .. }
         )
     }
 }

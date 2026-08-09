@@ -1,4 +1,9 @@
-use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
@@ -6,11 +11,13 @@ use nkdhr_render::{
 };
 use nkdhr_ui::text::{TextConfig, TextResources, TextSystem};
 use nkdhr_ui::{
-    Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment, Density, Element, Flex,
-    GlassSurface, Insets, Key, List, ListEntry, ListItem, ListItemBehavior, ListMultiSelection,
-    ListReorder, ListTreeToggle, ListVirtualWindow, MainAxisAlignment, ManualClock, MaterialTier,
-    Modifiers, MotionMode, Padding, PointerButton, Reactive, Scroll, ScrollAnchor, ScrollAxis,
-    ScrollOffset, ScrollPhase, ScrollReveal, SemanticRole, Size, Slider, Text, TextInput, TextRole,
+    Axis, Button, ButtonVariant, ClipboardRequest, Constraints, CrossAxisAlignment, Density,
+    Element, Flex, GlassSurface, Insets, Key, List, ListEntry, ListItem, ListItemBehavior,
+    ListMultiSelection, ListReorder, ListTreeToggle, ListVirtualWindow, MainAxisAlignment,
+    ManualClock, MaterialTier, Modifiers, MotionMode, Padding, PasswordCopyPolicy, PointerButton,
+    Reactive, Scroll, ScrollAnchor, ScrollAxis, ScrollOffset, ScrollPhase, ScrollReveal,
+    SemanticRole, Size, Slider, Text, TextInput, TextInputEdit, TextInputTabBehavior,
+    TextInputValidationRequest, TextInputValidationResult, TextInputValidationTrigger, TextRole,
     Theme, Toggle, UiEvent, UiRoot, Widget,
 };
 
@@ -1496,4 +1503,447 @@ fn retained_text_and_text_input_use_shared_glyph_geometry() {
     .unwrap();
     root.dispatch(&UiEvent::TextInput("X".to_owned())).unwrap();
     assert_eq!(value.get(), "Xabc🙂");
+}
+
+#[test]
+fn clipboard_reads_are_targeted_and_copy_cut_follow_password_policy() {
+    let value = Reactive::new("alpha".to_owned());
+    let input = TextInput::new("Clipboard", value.clone(), Arc::new(Theme::default()));
+    let mut root = UiRoot::with_text(Element::new(input), fixture_text_resources()).unwrap();
+    prepare(&mut root, Size::new(220.0, 44.0));
+    primary_click(&mut root, Point::new(30.0, 22.0), Modifiers::default());
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Character("a".to_owned()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+
+    let copied = root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("c".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(
+        copied.clipboard,
+        vec![ClipboardRequest::WriteText("alpha".to_owned())]
+    );
+
+    let paste = root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("v".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    let target = match paste.clipboard.as_slice() {
+        [ClipboardRequest::ReadText { target }] => *target,
+        other => panic!("unexpected clipboard requests: {other:?}"),
+    };
+    root.set_focus(None).unwrap();
+    root.dispatch(&UiEvent::ClipboardText {
+        target,
+        text: "粘贴🙂".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(value.get(), "粘贴🙂");
+    root.set_focus(Some(target)).unwrap();
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Character("a".to_owned()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    let cut = root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("x".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(
+        cut.clipboard,
+        vec![ClipboardRequest::WriteText("粘贴🙂".to_owned())]
+    );
+    assert!(value.get().is_empty());
+
+    let secret = Reactive::new("secret".to_owned());
+    let password = TextInput::new("Password", secret.clone(), Arc::new(Theme::default()))
+        .password(true)
+        .password_copy_policy(PasswordCopyPolicy::Deny);
+    let mut password_root =
+        UiRoot::with_text(Element::new(password), fixture_text_resources()).unwrap();
+    prepare(&mut password_root, Size::new(220.0, 44.0));
+    primary_click(
+        &mut password_root,
+        Point::new(30.0, 22.0),
+        Modifiers::default(),
+    );
+    password_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("a".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    let denied = password_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("c".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert!(denied.clipboard.is_empty());
+}
+
+#[test]
+fn undo_redo_and_formatter_preserve_the_explicit_caret() {
+    let value = Reactive::new(String::new());
+    let input = TextInput::new("Formatted", value.clone(), Arc::new(Theme::default()))
+        .formatter(|edit| TextInputEdit::new(edit.value.to_uppercase(), edit.selection));
+    let mut root = UiRoot::with_text(Element::new(input), fixture_text_resources()).unwrap();
+    prepare(&mut root, Size::new(220.0, 44.0));
+    primary_click(&mut root, Point::new(12.0, 22.0), Modifiers::default());
+    root.dispatch(&UiEvent::TextInput("ab".to_owned())).unwrap();
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::ArrowLeft,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::TextInput("x".to_owned())).unwrap();
+    assert_eq!(value.get(), "AXB");
+
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Character("z".to_owned()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(value.get(), "AB");
+    root.dispatch(&UiEvent::KeyDown {
+        key: Key::Character("z".to_owned()),
+        modifiers: Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(value.get(), "AXB");
+
+    let secret = Reactive::new(String::new());
+    let password =
+        TextInput::new("Secret", secret.clone(), Arc::new(Theme::default())).password(true);
+    let mut password_root =
+        UiRoot::with_text(Element::new(password), fixture_text_resources()).unwrap();
+    prepare(&mut password_root, Size::new(220.0, 44.0));
+    primary_click(
+        &mut password_root,
+        Point::new(12.0, 22.0),
+        Modifiers::default(),
+    );
+    password_root
+        .dispatch(&UiEvent::TextInput("sensitive".to_owned()))
+        .unwrap();
+    password_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("z".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(secret.get(), "sensitive");
+}
+
+#[test]
+fn pointer_double_and_triple_click_select_unicode_word_and_line_units() {
+    let value = Reactive::new("alpha beta\nlast".to_owned());
+    let input = TextInput::new("Multiline", value, Arc::new(Theme::default()))
+        .multiline(3)
+        .unwrap();
+    let mut root = UiRoot::with_text(Element::new(input), fixture_text_resources()).unwrap();
+    prepare(&mut root, Size::new(240.0, 80.0));
+
+    primary_click_count(&mut root, Point::new(20.0, 18.0), Modifiers::default(), 2);
+    let word = root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("c".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(
+        word.clipboard,
+        vec![ClipboardRequest::WriteText("alpha".to_owned())]
+    );
+
+    primary_click_count(&mut root, Point::new(20.0, 38.0), Modifiers::default(), 3);
+    let line = root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Character("c".to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(
+        line.clipboard,
+        vec![ClipboardRequest::WriteText("last".to_owned())]
+    );
+}
+
+#[test]
+fn debounced_validation_ignores_stale_generations_and_retains_backend_text() {
+    let clock = ManualClock::default();
+    let value = Reactive::new(String::new());
+    let result = Reactive::new(None);
+    let requests = Rc::new(RefCell::<Vec<TextInputValidationRequest>>::new(Vec::new()));
+    let callback_requests = Rc::clone(&requests);
+    let input = TextInput::new("Validated", value.clone(), Arc::new(Theme::default()))
+        .validation(
+            TextInputValidationTrigger::OnChange {
+                debounce: Duration::from_millis(100),
+            },
+            result.clone(),
+            move |request| callback_requests.borrow_mut().push(request),
+        )
+        .unwrap();
+    let mut root =
+        UiRoot::with_clock_and_text(Element::new(input), clock.clone(), fixture_text_resources())
+            .unwrap();
+    prepare(&mut root, Size::new(240.0, 44.0));
+    primary_click(&mut root, Point::new(12.0, 22.0), Modifiers::default());
+    root.dispatch(&UiEvent::TextInput("a".to_owned())).unwrap();
+    clock.advance(Duration::from_millis(50));
+    assert!(root.tick());
+    root.dispatch(&UiEvent::TextInput("b".to_owned())).unwrap();
+    clock.advance(Duration::from_millis(99));
+    assert!(root.tick());
+    assert!(requests.borrow().is_empty());
+    clock.advance(Duration::from_millis(1));
+    assert!(root.tick());
+    let first = requests.borrow()[0].clone();
+    assert_eq!(first.value, "ab");
+
+    result.set(Some(TextInputValidationResult::invalid(
+        first.generation.saturating_sub(1),
+        "stale",
+    )));
+    prepare(&mut root, Size::new(240.0, 44.0));
+    assert!(
+        !root.semantic_tree()[0]
+            .semantics
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("stale")
+    );
+
+    result.set(Some(TextInputValidationResult::invalid(
+        first.generation,
+        "not available",
+    )));
+    prepare(&mut root, Size::new(240.0, 44.0));
+    assert!(
+        root.semantic_tree()[0]
+            .semantics
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("invalid: not available")
+    );
+    assert_eq!(value.get(), "ab");
+
+    root.dispatch(&UiEvent::TextInput("c".to_owned())).unwrap();
+    prepare(&mut root, Size::new(240.0, 44.0));
+    assert!(
+        !root.semantic_tree()[0]
+            .semantics
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("not available")
+    );
+    clock.advance(Duration::from_millis(100));
+    assert!(root.tick());
+    let second = requests.borrow()[1].clone();
+    result.set(Some(TextInputValidationResult::backend_error(
+        second.generation,
+        "offline",
+    )));
+    prepare(&mut root, Size::new(240.0, 44.0));
+    let semantic = root.semantic_tree()[0].semantics.value.clone().unwrap();
+    assert!(semantic.contains("validation unavailable: offline"));
+    assert!(semantic.starts_with("abc"));
+
+    root.dispatch(&UiEvent::TextInput("d".to_owned())).unwrap();
+    clock.advance(Duration::from_millis(100));
+    assert!(root.tick());
+    let third = requests.borrow()[2].clone();
+    result.set(Some(TextInputValidationResult::valid(third.generation)));
+    prepare(&mut root, Size::new(240.0, 44.0));
+    assert!(
+        root.semantic_tree()[0]
+            .semantics
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("valid")
+    );
+    clock.advance(Duration::from_millis(220));
+    assert!(root.tick());
+    prepare(&mut root, Size::new(240.0, 44.0));
+    assert!(
+        !root.semantic_tree()[0]
+            .semantics
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("valid")
+    );
+}
+
+#[test]
+fn blur_and_submit_validation_fire_only_at_their_declared_boundaries() {
+    let blur_requests = Rc::new(RefCell::<Vec<TextInputValidationRequest>>::new(Vec::new()));
+    let blur_callback = Rc::clone(&blur_requests);
+    let blur_input = TextInput::new(
+        "Blur validation",
+        Reactive::new("draft".to_owned()),
+        Arc::new(Theme::default()),
+    )
+    .validation(
+        TextInputValidationTrigger::OnBlur,
+        Reactive::new(None),
+        move |request| blur_callback.borrow_mut().push(request),
+    )
+    .unwrap();
+    let mut blur_root =
+        UiRoot::with_text(Element::new(blur_input), fixture_text_resources()).unwrap();
+    prepare(&mut blur_root, Size::new(240.0, 44.0));
+    primary_click(&mut blur_root, Point::new(20.0, 22.0), Modifiers::default());
+    blur_root
+        .dispatch(&UiEvent::TextInput("!".to_owned()))
+        .unwrap();
+    assert!(blur_requests.borrow().is_empty());
+    blur_root.set_focus(None).unwrap();
+    assert_eq!(blur_requests.borrow().len(), 1);
+
+    let submit_requests = Rc::new(RefCell::<Vec<TextInputValidationRequest>>::new(Vec::new()));
+    let submit_callback = Rc::clone(&submit_requests);
+    let submit_input = TextInput::new(
+        "Submit validation",
+        Reactive::new("ready".to_owned()),
+        Arc::new(Theme::default()),
+    )
+    .validation(
+        TextInputValidationTrigger::OnSubmit,
+        Reactive::new(None),
+        move |request| submit_callback.borrow_mut().push(request),
+    )
+    .unwrap();
+    let mut submit_root =
+        UiRoot::with_text(Element::new(submit_input), fixture_text_resources()).unwrap();
+    prepare(&mut submit_root, Size::new(240.0, 44.0));
+    primary_click(
+        &mut submit_root,
+        Point::new(20.0, 22.0),
+        Modifiers::default(),
+    );
+    submit_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(submit_requests.borrow().len(), 1);
+    assert_eq!(submit_requests.borrow()[0].value, "ready");
+}
+
+#[test]
+fn multiline_enter_and_explicit_tab_completion_follow_declared_form_policy() {
+    let multiline_value = Reactive::new("one".to_owned());
+    let multiline = TextInput::new("Notes", multiline_value.clone(), Arc::new(Theme::default()))
+        .multiline(2)
+        .unwrap();
+    let mut multiline_root =
+        UiRoot::with_text(Element::new(multiline), fixture_text_resources()).unwrap();
+    prepare(&mut multiline_root, Size::new(220.0, 60.0));
+    primary_click(
+        &mut multiline_root,
+        Point::new(200.0, 18.0),
+        Modifiers::default(),
+    );
+    multiline_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+        .unwrap();
+    assert_eq!(multiline_value.get(), "one\n");
+
+    let completions = Rc::new(Cell::new(0));
+    let completion_count = Rc::clone(&completions);
+    let command = TextInput::new(
+        "Command",
+        Reactive::new("/audio".to_owned()),
+        Arc::new(Theme::default()),
+    )
+    .tab_behavior(TextInputTabBehavior::Complete)
+    .on_complete(move |_| completion_count.set(completion_count.get() + 1));
+    let mut command_root =
+        UiRoot::with_text(Element::new(command), fixture_text_resources()).unwrap();
+    prepare(&mut command_root, Size::new(220.0, 44.0));
+    primary_click(
+        &mut command_root,
+        Point::new(20.0, 22.0),
+        Modifiers::default(),
+    );
+    let tab = command_root
+        .dispatch(&UiEvent::KeyDown {
+            key: Key::Tab,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+        .unwrap();
+    assert!(tab.handled);
+    assert_eq!(completions.get(), 1);
 }

@@ -15,8 +15,8 @@ use nkdhr_render::{BuildError, Color, DisplayListBuilder, Point, Rect, TextureSt
 use crate::reactive::SubscriptionToken;
 use crate::text::{TextDrawStats, TextError, TextLayout, TextResources, TextStyle};
 use crate::{
-    Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, ScrollPhase, SemanticNode,
-    Semantics, Size, SystemClock, UiEvent,
+    ClipboardRequest, Clock, Constraints, Key, Modifiers, Reactive, RootReactivity, ScrollPhase,
+    SemanticNode, Semantics, Size, SystemClock, UiEvent,
 };
 
 pub type UiResult<T> = Result<T, UiError>;
@@ -462,12 +462,13 @@ struct PaintEntry {
     accepts_pointer: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DispatchResult {
     pub target: Option<WidgetId>,
     pub handled: bool,
     pub focused: Option<WidgetId>,
     pub pointer_capture: Option<WidgetId>,
+    pub clipboard: Vec<ClipboardRequest>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -483,6 +484,7 @@ struct EventRequests {
     focus: Option<WidgetId>,
     capture: Option<CaptureRequest>,
     scroll_remainder: Option<(f32, f32)>,
+    clipboard: Vec<ClipboardRequest>,
 }
 
 /// One retained UI tree. Hosts call `reconcile`, `layout`, `paint`, `dispatch`
@@ -696,6 +698,8 @@ impl UiRoot {
         }
         let target = if event.is_pointer() {
             self.pointer_capture().or(pointer_hit)
+        } else if let UiEvent::ClipboardText { target, .. } = event {
+            self.is_alive(*target).then_some(*target)
         } else if event.is_keyboard() {
             self.focused()
         } else {
@@ -714,6 +718,7 @@ impl UiRoot {
                 if current.capture.is_some() {
                     requests.capture = current.capture;
                 }
+                requests.clipboard.extend(current.clipboard.iter().cloned());
                 if let Some((delta_x, delta_y)) = current.scroll_remainder {
                     if delta_x.abs() <= f32::EPSILON && delta_y.abs() <= f32::EPSILON {
                         boundary = None;
@@ -741,6 +746,7 @@ impl UiRoot {
                 if current.capture.is_some() {
                     requests.capture = current.capture;
                 }
+                requests.clipboard.extend(current.clipboard);
             }
         }
 
@@ -763,6 +769,7 @@ impl UiRoot {
             handled: requests.handled,
             focused: self.focused(),
             pointer_capture: self.pointer_capture(),
+            clipboard: requests.clipboard,
         })
     }
 
@@ -1887,6 +1894,20 @@ impl EventCtx<'_> {
 
     pub fn release_pointer(&mut self) {
         self.requests.capture = Some(CaptureRequest::Release);
+    }
+
+    /// Ask the host for plain clipboard text. The response is explicitly
+    /// targeted so a later focus change cannot paste into another widget.
+    pub fn read_clipboard_text(&mut self) {
+        self.requests
+            .clipboard
+            .push(ClipboardRequest::ReadText { target: self.id });
+    }
+
+    pub fn write_clipboard_text(&mut self, text: impl Into<String>) {
+        self.requests
+            .clipboard
+            .push(ClipboardRequest::WriteText(text.into()));
     }
 
     pub fn focused(&self) -> bool {

@@ -46,9 +46,12 @@ motion removes its spatial effects. `List` now adds stable-identity multi-
 selection with range/discontiguous input, real-focus keyboard/typeahead
 navigation, tree disclosure, explicit-handle pointer and keyboard reorder,
 virtual leading/trailing extent, loading rows, object double-click and context
-actions. UI-3 remains open while advanced TextInput behavior, real compositor
-backdrop blur and the accepted Settings composition are wired and visually
-accepted.
+actions. `TextInput` now adds multiline/BiDi visual selection fragments, IME
+composition selection, multi-click/drag and visual/word/line navigation,
+targeted host clipboard requests, non-sensitive undo/redo, explicit formatter
+selection mapping and generation-ordered change/blur/submit validation. UI-3
+remains open while real compositor backdrop blur and the accepted Settings
+composition are wired and visually accepted.
 
 ## Documentation
 

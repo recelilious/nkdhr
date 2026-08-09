@@ -7,7 +7,7 @@ use std::{
 use cosmic_text::{
     Align, Attrs, Buffer, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
-use nkdhr_render::Point;
+use nkdhr_render::{Point, Rect};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::TextError;
@@ -127,6 +127,16 @@ pub struct TextCaret {
     pub x: f32,
     pub y: f32,
     pub height: f32,
+}
+
+/// One visual fragment of a logical text selection.
+///
+/// A single logical range can produce several fragments on one line when it
+/// crosses bidirectional runs, and one fragment per visual line when wrapped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextSelectionRect {
+    pub line_index: usize,
+    pub rect: Rect,
 }
 
 /// Immutable shaped text, independent from glyph-atlas residency and color.
@@ -290,6 +300,154 @@ impl TextLayout {
         fallback
     }
 
+    /// Resolve a grapheme-aligned logical range into exact visual fragments.
+    pub fn selection_rects(&self, range: Range<usize>) -> Vec<TextSelectionRect> {
+        let start = floor_grapheme_boundary(&self.text, range.start.min(self.text.len()));
+        let end = ceil_grapheme_boundary(&self.text, range.end.min(self.text.len()));
+        if start >= end {
+            return Vec::new();
+        }
+
+        let mut fragments = Vec::new();
+        for (line_index, line) in self.lines.iter().enumerate() {
+            let mut cells = Vec::new();
+            for positioned in &self.glyphs[line.glyphs.clone()] {
+                if positioned.byte_end <= start || positioned.byte_start >= end {
+                    continue;
+                }
+                let graphemes = self.text[positioned.byte_start..positioned.byte_end]
+                    .grapheme_indices(true)
+                    .collect::<Vec<_>>();
+                if graphemes.is_empty() || positioned.glyph.w <= 0.0 {
+                    continue;
+                }
+                let cell_width = positioned.glyph.w / graphemes.len() as f32;
+                for (logical_index, (offset, grapheme)) in graphemes.iter().enumerate() {
+                    let byte_start = positioned.byte_start + offset;
+                    let byte_end = byte_start + grapheme.len();
+                    if byte_end <= start || byte_start >= end {
+                        continue;
+                    }
+                    let visual_index = if positioned.glyph.level.is_rtl() {
+                        graphemes.len() - 1 - logical_index
+                    } else {
+                        logical_index
+                    };
+                    cells.push(Rect::new(
+                        positioned.glyph.x + visual_index as f32 * cell_width,
+                        positioned.line_top,
+                        cell_width.max(1.0),
+                        positioned.line_height,
+                    ));
+                }
+            }
+
+            cells.sort_by(|left, right| left.x.total_cmp(&right.x));
+            let mut merged: Vec<Rect> = Vec::new();
+            for cell in cells {
+                if let Some(previous) = merged.last_mut()
+                    && cell.x <= previous.right() + 0.5
+                    && (cell.y - previous.y).abs() <= 0.5
+                {
+                    let right = previous.right().max(cell.right());
+                    previous.width = right - previous.x;
+                    previous.height = previous.height.max(cell.height);
+                } else {
+                    merged.push(cell);
+                }
+            }
+
+            if merged.is_empty()
+                && line.bytes.is_empty()
+                && start <= line.bytes.start
+                && end > line.bytes.start
+            {
+                merged.push(Rect::new(0.0, line.top, 1.0, line.bottom - line.top));
+            }
+            fragments.extend(
+                merged
+                    .into_iter()
+                    .map(|rect| TextSelectionRect { line_index, rect }),
+            );
+        }
+        fragments
+    }
+
+    /// Bounds for a visual line, used by vertical caret movement.
+    pub fn line_bounds(&self, line_index: usize) -> Option<Rect> {
+        self.lines
+            .get(line_index)
+            .map(|line| Rect::new(0.0, line.top, self.width, line.bottom - line.top))
+    }
+
+    /// Move to the nearest grapheme boundary at `x` on a visual line.
+    pub fn hit_line(&self, line_index: usize, x: f32) -> TextHit {
+        let line_index = line_index.min(self.lines.len().saturating_sub(1));
+        let y = self
+            .lines
+            .get(line_index)
+            .map_or(0.0, |line| (line.top + line.bottom) * 0.5);
+        let x = if x == f32::NEG_INFINITY {
+            -1.0
+        } else if x == f32::INFINITY {
+            self.width + 1.0
+        } else {
+            x
+        };
+        self.hit_test(Point::new(x, y))
+    }
+
+    /// Move one grapheme boundary in visual order, crossing visual lines at
+    /// their nearest edge. Logical word movement remains a TextInput policy.
+    pub fn visual_neighbor(&self, byte_index: usize, forward: bool) -> usize {
+        let current = self.caret(byte_index);
+        let mut carets = self
+            .text
+            .grapheme_indices(true)
+            .map(|(boundary, _)| boundary)
+            .chain(std::iter::once(self.text.len()))
+            .map(|boundary| self.caret(boundary))
+            .filter(|caret| caret.line_index == current.line_index)
+            .collect::<Vec<_>>();
+        carets.sort_by(|left, right| {
+            left.x
+                .total_cmp(&right.x)
+                .then_with(|| left.byte_index.cmp(&right.byte_index))
+        });
+        carets.dedup_by_key(|caret| caret.byte_index);
+        if let Some(index) = carets
+            .iter()
+            .position(|caret| caret.byte_index == current.byte_index)
+        {
+            if forward && index + 1 < carets.len() {
+                return carets[index + 1].byte_index;
+            }
+            if !forward && index > 0 {
+                return carets[index - 1].byte_index;
+            }
+        }
+
+        let adjacent = if forward {
+            current.line_index.checked_add(1)
+        } else {
+            current.line_index.checked_sub(1)
+        };
+        adjacent
+            .filter(|line| *line < self.lines.len())
+            .map(|line| {
+                self.hit_line(
+                    line,
+                    if forward {
+                        f32::NEG_INFINITY
+                    } else {
+                        f32::INFINITY
+                    },
+                )
+                .byte_index
+            })
+            .unwrap_or(current.byte_index)
+    }
+
     pub(crate) fn visible_glyph_range(
         &self,
         origin_y: f32,
@@ -380,6 +538,17 @@ fn floor_grapheme_boundary(text: &str, index: usize) -> usize {
         .take_while(|boundary| *boundary <= index)
         .last()
         .unwrap_or(0)
+}
+
+fn ceil_grapheme_boundary(text: &str, index: usize) -> usize {
+    if index == 0 || index >= text.len() {
+        return index.min(text.len());
+    }
+    text.grapheme_indices(true)
+        .map(|(boundary, _)| boundary)
+        .chain(std::iter::once(text.len()))
+        .find(|boundary| *boundary >= index)
+        .unwrap_or(text.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -12,7 +12,7 @@ mod tree;
 mod widgets;
 
 pub use animation::{Clock, ManualClock, SystemClock, Timeline, lerp};
-pub use input::{Key, Modifiers, PointerButton, ScrollPhase, UiEvent};
+pub use input::{ClipboardRequest, Key, Modifiers, PointerButton, ScrollPhase, UiEvent};
 pub use layout::{
     Align, Alignment, Axis, Clip, Constraints, CrossAxisAlignment, Flex, Insets, MainAxisAlignment,
     Padding, Size, Stack,
@@ -35,7 +35,10 @@ pub use tree::{
 };
 pub use widgets::{
     Button, ButtonVariant, GlassSurface, List, ListEntry, ListError, ListItem, ListItemBehavior,
-    ListMultiSelection, ListReorder, ListSelection, ListTreeToggle, ListVirtualWindow, Scroll,
-    ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy, Slider,
-    SliderError, SurfaceState, Text, TextInput, TextInputError, TextInputStatus, Toggle,
+    ListMultiSelection, ListReorder, ListSelection, ListTreeToggle, ListVirtualWindow,
+    PasswordCopyPolicy, Scroll, ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal,
+    ScrollbarPolicy, Slider, SliderError, SurfaceState, Text, TextInput, TextInputEdit,
+    TextInputEnterBehavior, TextInputError, TextInputSelection, TextInputStatus,
+    TextInputTabBehavior, TextInputValidationOutcome, TextInputValidationRequest,
+    TextInputValidationResult, TextInputValidationTrigger, Toggle,
 };

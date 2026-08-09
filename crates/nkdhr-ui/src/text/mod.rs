@@ -11,7 +11,9 @@ use nkdhr_render::{
 };
 
 pub use atlas::{AtlasConfig, AtlasStats};
-pub use layout::{FontSlant, TextAlign, TextCaret, TextHit, TextLayout, TextStyle, TextWrap};
+pub use layout::{
+    FontSlant, TextAlign, TextCaret, TextHit, TextLayout, TextSelectionRect, TextStyle, TextWrap,
+};
 
 use self::{atlas::GlyphAtlas, layout::LayoutCache};
 
