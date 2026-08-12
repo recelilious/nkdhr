@@ -84,7 +84,13 @@ saved baseline, and generation-ordered host requests commit through CTRL-5
 without blocking the UI thread. A separately atomic `theme.library` stores
 validated user profiles and supports save, copy and bounded JSON import/export;
 failed writes retain local work, while external changes are adopted or surfaced
-as conflicts instead of silently overwriting a preview. The standalone/
+as conflicts instead of silently overwriting a preview. A deterministic,
+resource-bounded wallpaper adapter now turns host-decoded RGBA8 pixels into a
+complete readable semantic palette, with Auto/Dark/Light appearance plus
+colorfulness and contrast inputs. Live-linked generations are ordered so stale
+wallpaper jobs cannot win; only the frozen base/source changes, every explicit
+override survives, and clean results produce an atomic persistence request
+while an existing local edit remains visibly unsaved. The standalone/
 in-compositor window hosts still belong to later milestones.
 
 ## Documentation

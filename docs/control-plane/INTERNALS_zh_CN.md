@@ -205,7 +205,8 @@ namespace,做法是在一个 `serde` 派生的结构体
 上实现 `Namespace` trait(`backends::config_store::Namespace`——**位于
 `nkdhrd`,而非 `nkdhr-ipc`**:客户端仍使用下面这套通用的点分 key `Config1`
 IPC;UI-4 可移植 profile 的类型则放在守护进程校验和 UI 解析共同使用、与后端
-无关的 `nkdhr-theme` crate 中),然后在 `nkdhrd/src/main.rs`
+无关的 `nkdhr-theme` crate 中;其中的壁纸适配器只借用宿主已解码的 RGBA8 视图,
+最终仅保存生成调色板,不保存图片字节),然后在 `nkdhrd/src/main.rs`
 的 `static NAMESPACES: &[NamespaceSchema]` 列表里加一条
 `NamespaceSchema::of::<T>()`。
 

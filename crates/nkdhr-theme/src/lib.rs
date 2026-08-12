@@ -12,6 +12,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
 
+mod wallpaper;
+
+pub use wallpaper::*;
+
 pub const THEME_SCHEMA_VERSION: u32 = 1;
 pub const THEME_LIBRARY_SCHEMA_VERSION: u32 = 1;
 pub const MAX_THEME_LIBRARY_PROFILES: usize = 256;
@@ -640,10 +644,11 @@ impl ThemeProfile {
                 wallpaper_id,
                 frozen_palette,
             } => {
-                if *live && wallpaper_id.trim().is_empty() {
-                    return Err(ThemeProfileError::InvalidMetadata(
-                        "a live wallpaper profile requires wallpaper_id".into(),
-                    ));
+                if (*live && wallpaper_id.trim().is_empty())
+                    || wallpaper_id.len() > 1024
+                    || wallpaper_id.chars().any(char::is_control)
+                {
+                    return Err(ThemeProfileError::InvalidMetadata("wallpaper_id".into()));
                 }
                 frozen_palette.validate()?;
                 ThemeData {

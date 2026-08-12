@@ -101,7 +101,9 @@ key 是以点分隔的路径(例如 `theme.profile`、`canvas.grid_size` 和
 可用 `nkdhrctl config get theme.profile`、`nkdhrctl config get theme.library`
 查看,或用 `nkdhrctl config watch theme` 监听。设置应用提供即时预览、取消、保存、
 复制和有界 JSON 导入/导出;直接 `config set` 主要用于导入一份已经准备好且通过
-校验的 JSON 文档。
+校验的 JSON 文档。壁纸解码仍由宿主负责;共享主题适配器以确定且有界的方式采样
+RGBA8 像素,只把生成后的完整调色板与来源身份写入可移植 profile,绝不会把图片
+像素存进 `theme.toml`。
 
 ## 故障排查
 

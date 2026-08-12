@@ -236,7 +236,9 @@ validation/last-known-good tests. A later phase registers another namespace by
 implementing the `Namespace` trait (`backends::config_store::Namespace` — **in
 `nkdhrd`, not `nkdhr-ipc`**: clients use the generic dotted-key IPC; UI-4's
 portable profile types instead live in the backend-neutral `nkdhr-theme` crate
-shared by daemon validation and UI resolution) on a `serde`-derived struct and
+shared by daemon validation and UI resolution; its wallpaper adapter consumes
+only a borrowed host-decoded RGBA8 view and stores the resulting palette, never
+image bytes) on a `serde`-derived struct and
 adding a `NamespaceSchema::of::<T>()` entry to
 the `static NAMESPACES: &[NamespaceSchema]` list in `nkdhrd/src/main.rs`.
 

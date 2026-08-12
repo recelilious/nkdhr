@@ -6,7 +6,10 @@
 
 use std::{cell::RefCell, fmt, rc::Rc};
 
-use nkdhr_theme::{ThemeLibraryError, ThemeProfile, ThemeProfileError, ThemeProfileLibrary};
+use nkdhr_theme::{
+    PaletteData, ThemeLibraryError, ThemeProfile, ThemeProfileError, ThemeProfileLibrary,
+    WallpaperPaletteError, regenerate_live_wallpaper_profile,
+};
 use nkdhr_ui::{ThemeRuntime, ThemeRuntimeError};
 
 pub const ACTIVE_THEME_PROFILE_KEY: &str = "theme.profile";
@@ -76,6 +79,19 @@ pub enum ThemeExternalOutcome {
     PreservedLocalPreview,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WallpaperRegenerationToken {
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WallpaperRegenerationOutcome {
+    IgnoredStale,
+    Failed,
+    PreviewUpdated,
+    PersistenceRequired(ThemePersistenceRequest),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThemeEditorSnapshot {
     pub committed_profile: ThemeProfile,
@@ -85,6 +101,7 @@ pub struct ThemeEditorSnapshot {
     pub status: String,
     pub conflict: Option<String>,
     pub pending: Vec<ThemePersistenceTarget>,
+    pub wallpaper_regeneration_pending: bool,
 }
 
 struct PendingProfile {
@@ -97,6 +114,12 @@ struct PendingLibrary {
     candidate: ThemeProfileLibrary,
 }
 
+struct PendingWallpaperRegeneration {
+    token: WallpaperRegenerationToken,
+    profile_id: String,
+    wallpaper_id: String,
+}
+
 struct ThemeEditorState {
     runtime: ThemeRuntime,
     committed_profile: ThemeProfile,
@@ -105,6 +128,7 @@ struct ThemeEditorState {
     next_generation: u64,
     pending_profile: Option<PendingProfile>,
     pending_library: Option<PendingLibrary>,
+    pending_wallpaper: Option<PendingWallpaperRegeneration>,
     feedback: ThemeEditorFeedback,
     status: String,
     conflict: Option<String>,
@@ -139,6 +163,7 @@ impl ThemeProfileEditor {
                 next_generation: 1,
                 pending_profile: None,
                 pending_library: None,
+                pending_wallpaper: None,
                 feedback: ThemeEditorFeedback::Idle,
                 status: "主题配置已同步".into(),
                 conflict: None,
@@ -167,6 +192,7 @@ impl ThemeProfileEditor {
             status: state.status.clone(),
             conflict: state.conflict.clone(),
             pending,
+            wallpaper_regeneration_pending: state.pending_wallpaper.is_some(),
         }
     }
 
@@ -229,12 +255,125 @@ impl ThemeProfileEditor {
             .preview_profile
             .clone()
             .ok_or(ThemeEditorError::NoPreview)?;
-        let value = candidate.to_json_pretty()?;
-        let token = next_token(&mut state, ThemePersistenceTarget::ActiveProfile);
-        state.pending_profile = Some(PendingProfile { token, candidate });
+        begin_profile_write(&mut state, candidate, "正在保存当前主题配置")
+    }
+
+    /// Start an asynchronous palette extraction for a new wallpaper identity.
+    /// Only the latest token for the same editor may publish its result.
+    pub fn begin_wallpaper_regeneration(
+        &self,
+        wallpaper_id: impl Into<String>,
+    ) -> Result<WallpaperRegenerationToken, ThemeEditorError> {
+        let wallpaper_id = wallpaper_id.into();
+        if wallpaper_id.trim().is_empty()
+            || wallpaper_id.len() > 1024
+            || wallpaper_id.chars().any(char::is_control)
+        {
+            return Err(WallpaperPaletteError::InvalidWallpaperId.into());
+        }
+        let mut state = self.state.borrow_mut();
+        let visible = state
+            .preview_profile
+            .as_ref()
+            .unwrap_or(&state.committed_profile);
+        match &visible.base {
+            nkdhr_theme::ThemeBase::BuiltIn { .. } => {
+                return Err(WallpaperPaletteError::NotWallpaperProfile.into());
+            }
+            nkdhr_theme::ThemeBase::Wallpaper { live: false, .. } => {
+                return Err(WallpaperPaletteError::NotLiveLinked.into());
+            }
+            nkdhr_theme::ThemeBase::Wallpaper { live: true, .. } => {}
+        }
+        let profile_id = visible.id.clone();
+        let generation = state.next_generation;
+        state.next_generation = generation.wrapping_add(1).max(1);
+        let token = WallpaperRegenerationToken { generation };
+        state.pending_wallpaper = Some(PendingWallpaperRegeneration {
+            token,
+            profile_id,
+            wallpaper_id,
+        });
         state.feedback = ThemeEditorFeedback::Pending;
-        state.status = "正在保存当前主题配置".into();
-        Ok(ThemePersistenceRequest { token, value })
+        state.status = "正在从新壁纸生成完整配色".into();
+        Ok(token)
+    }
+
+    /// Publish a generated base palette. Clean profiles immediately return an
+    /// atomic persistence request; an existing local preview is updated in
+    /// place but remains explicitly unsaved so regeneration cannot commit the
+    /// user's unrelated edits behind their back.
+    pub fn complete_wallpaper_regeneration(
+        &self,
+        token: WallpaperRegenerationToken,
+        result: Result<PaletteData, String>,
+    ) -> Result<WallpaperRegenerationOutcome, ThemeEditorError> {
+        let mut state = self.state.borrow_mut();
+        let is_latest = state
+            .pending_wallpaper
+            .as_ref()
+            .is_some_and(|pending| pending.token == token);
+        if !is_latest {
+            return Ok(WallpaperRegenerationOutcome::IgnoredStale);
+        }
+        let pending = state
+            .pending_wallpaper
+            .take()
+            .expect("latest wallpaper regeneration exists");
+        let palette = match result {
+            Ok(palette) => palette,
+            Err(status) => {
+                state.feedback = ThemeEditorFeedback::Error;
+                state.status = status;
+                return Ok(WallpaperRegenerationOutcome::Failed);
+            }
+        };
+        let visible = state
+            .preview_profile
+            .clone()
+            .unwrap_or_else(|| state.committed_profile.clone());
+        if visible.id != pending.profile_id
+            || !matches!(
+                &visible.base,
+                nkdhr_theme::ThemeBase::Wallpaper { live: true, .. }
+            )
+        {
+            state.feedback = if state.preview_profile.is_some() {
+                ThemeEditorFeedback::Previewing
+            } else {
+                ThemeEditorFeedback::Idle
+            };
+            state.status = "壁纸已再次变化，较早的配色结果已忽略".into();
+            return Ok(WallpaperRegenerationOutcome::IgnoredStale);
+        }
+        let had_local_work = state.preview_profile.is_some() || state.pending_profile.is_some();
+        let candidate =
+            match regenerate_live_wallpaper_profile(&visible, pending.wallpaper_id, palette) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    state.feedback = ThemeEditorFeedback::Error;
+                    state.status = format!("壁纸配色无效：{error}");
+                    return Err(error.into());
+                }
+            };
+        if let Err(error) = state.runtime.publish(candidate.clone()) {
+            state.feedback = ThemeEditorFeedback::Error;
+            state.status = format!("壁纸配色无法发布：{error}");
+            return Err(error.into());
+        }
+        state.preview_profile = Some(candidate.clone());
+        if had_local_work {
+            state.feedback = ThemeEditorFeedback::Previewing;
+            state.status = "壁纸配色已更新；现有本地主题修改仍未保存".into();
+            Ok(WallpaperRegenerationOutcome::PreviewUpdated)
+        } else {
+            let request = begin_profile_write(
+                &mut state,
+                candidate,
+                "壁纸配色已生成，正在保存便携回退调色板",
+            )?;
+            Ok(WallpaperRegenerationOutcome::PersistenceRequired(request))
+        }
     }
 
     /// Stage the displayed profile into the library and return one atomic
@@ -331,13 +470,22 @@ impl ThemeProfileEditor {
                 match result {
                     Ok(status) => {
                         state.committed_profile = pending.candidate.clone();
-                        if state.preview_profile.as_ref() == Some(&pending.candidate) {
+                        let newer_preview = state
+                            .preview_profile
+                            .as_ref()
+                            .is_some_and(|preview| preview != &pending.candidate);
+                        if !newer_preview {
                             state.preview_profile = None;
                         }
                         publish_visible(&mut state);
-                        state.feedback = ThemeEditorFeedback::Success;
-                        state.status = status;
                         state.conflict = None;
+                        if newer_preview {
+                            state.feedback = ThemeEditorFeedback::Previewing;
+                            state.status = format!("{status}；较新的本地预览仍未保存");
+                        } else {
+                            state.feedback = ThemeEditorFeedback::Success;
+                            state.status = status;
+                        }
                     }
                     Err(status) => {
                         state.feedback = ThemeEditorFeedback::Error;
@@ -385,21 +533,34 @@ impl ThemeProfileEditor {
         {
             state.pending_profile = None;
             state.committed_profile = profile.clone();
-            if state.preview_profile.as_ref() == Some(&profile) {
+            let newer_preview = state
+                .preview_profile
+                .as_ref()
+                .is_some_and(|preview| preview != &profile);
+            if !newer_preview {
                 state.preview_profile = None;
             }
             publish_visible(&mut state);
-            state.feedback = ThemeEditorFeedback::Success;
-            state.status = "主题配置已由 CTRL-5 确认".into();
             state.conflict = None;
+            if newer_preview {
+                state.feedback = ThemeEditorFeedback::Previewing;
+                state.status = "CTRL-5 已确认较早的主题；较新的本地预览仍未保存".into();
+            } else {
+                state.feedback = ThemeEditorFeedback::Success;
+                state.status = "主题配置已由 CTRL-5 确认".into();
+            }
             return Ok(ThemeExternalOutcome::ConfirmedPendingWrite);
         }
 
-        state.pending_profile = None;
+        let write_in_flight = state.pending_profile.is_some();
         state.committed_profile = profile;
-        if state.preview_profile.is_some() {
+        if state.preview_profile.is_some() || write_in_flight {
             state.feedback = ThemeEditorFeedback::Conflict;
-            state.status = "外部主题已变化；本地预览被保留，请选择保存或取消".into();
+            state.status = if write_in_flight {
+                "外部主题已变化；本地预览和仍在途的保存请求均被保留".into()
+            } else {
+                "外部主题已变化；本地预览被保留，请选择保存或取消".into()
+            };
             state.conflict = Some("theme.profile changed outside Appearance Settings".into());
             Ok(ThemeExternalOutcome::PreservedLocalPreview)
         } else {
@@ -436,7 +597,7 @@ impl ThemeProfileEditor {
             state.conflict = None;
             return Ok(ThemeExternalOutcome::ConfirmedPendingWrite);
         }
-        let conflicted = state.pending_library.take().is_some();
+        let conflicted = state.pending_library.is_some();
         state.library = library;
         state.feedback = if conflicted {
             ThemeEditorFeedback::Conflict
@@ -444,7 +605,7 @@ impl ThemeProfileEditor {
             ThemeEditorFeedback::Success
         };
         state.status = if conflicted {
-            "外部配色资料库已变化；未确认的本地资料库写入已丢弃".into()
+            "外部配色资料库已变化；仍在途的本地资料库写入被保留".into()
         } else {
             "已同步外部配色资料库".into()
         };
@@ -472,6 +633,19 @@ fn next_token(
     let generation = state.next_generation;
     state.next_generation = generation.wrapping_add(1).max(1);
     ThemePersistenceToken { generation, target }
+}
+
+fn begin_profile_write(
+    state: &mut ThemeEditorState,
+    candidate: ThemeProfile,
+    status: &str,
+) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+    let value = candidate.to_json_pretty()?;
+    let token = next_token(state, ThemePersistenceTarget::ActiveProfile);
+    state.pending_profile = Some(PendingProfile { token, candidate });
+    state.feedback = ThemeEditorFeedback::Pending;
+    state.status = status.into();
+    Ok(ThemePersistenceRequest { token, value })
 }
 
 fn begin_library_write(
@@ -504,6 +678,7 @@ pub enum ThemeEditorError {
     Profile(ThemeProfileError),
     Library(ThemeLibraryError),
     Runtime(ThemeRuntimeError),
+    Wallpaper(WallpaperPaletteError),
     NoPreview,
     PersistencePending(ThemePersistenceTarget),
 }
@@ -514,6 +689,7 @@ impl fmt::Display for ThemeEditorError {
             Self::Profile(error) => error.fmt(formatter),
             Self::Library(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
+            Self::Wallpaper(error) => error.fmt(formatter),
             Self::NoPreview => formatter.write_str("there is no unsaved theme preview"),
             Self::PersistencePending(target) => {
                 write!(formatter, "a {} write is still pending", target.key())
@@ -542,6 +718,12 @@ impl From<ThemeRuntimeError> for ThemeEditorError {
     }
 }
 
+impl From<WallpaperPaletteError> for ThemeEditorError {
+    fn from(value: WallpaperPaletteError) -> Self {
+        Self::Wallpaper(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nkdhr_theme::{BuiltInTheme, ThemeBase};
@@ -554,6 +736,19 @@ mod tests {
             id: id.into(),
             name: id.into(),
             overrides: json!({"palette": {"accent": accent}}),
+            ..ThemeProfile::default()
+        }
+    }
+
+    fn wallpaper_profile() -> ThemeProfile {
+        ThemeProfile {
+            id: "live-wallpaper".into(),
+            name: "Live Wallpaper".into(),
+            base: ThemeBase::Wallpaper {
+                live: true,
+                wallpaper_id: "old".into(),
+                frozen_palette: Box::new(PaletteData::tokyo_night()),
+            },
             ..ThemeProfile::default()
         }
     }
@@ -593,6 +788,23 @@ mod tests {
     }
 
     #[test]
+    fn successful_older_commit_does_not_mark_a_newer_preview_as_saved() {
+        let editor = ThemeProfileEditor::default();
+        let first = profile("first", "#010203ff");
+        editor.preview(first.clone()).unwrap();
+        let request = editor.begin_profile_commit().unwrap();
+        let newer = profile("newer", "#aabbccff");
+        editor.preview(newer.clone()).unwrap();
+        assert!(editor.complete_persistence(request.token(), Ok("较早主题已保存".into())));
+        let snapshot = editor.snapshot();
+        assert_eq!(snapshot.committed_profile, first);
+        assert_eq!(snapshot.preview_profile, Some(newer.clone()));
+        assert_eq!(snapshot.feedback, ThemeEditorFeedback::Previewing);
+        assert!(snapshot.status.contains("较新的本地预览仍未保存"));
+        assert_eq!(editor.runtime().snapshot().resolved().profile, newer);
+    }
+
+    #[test]
     fn external_change_preserves_local_work_and_confirmation_clears_it() {
         let editor = ThemeProfileEditor::default();
         let preview = profile("preview", "#010203ff");
@@ -614,6 +826,27 @@ mod tests {
         );
         assert!(editor.snapshot().preview_profile.is_none());
         assert_eq!(editor.snapshot().committed_profile, candidate);
+    }
+
+    #[test]
+    fn divergent_external_change_keeps_the_in_flight_request_trackable() {
+        let editor = ThemeProfileEditor::default();
+        editor.preview(profile("local", "#010203ff")).unwrap();
+        let request = editor.begin_profile_commit().unwrap();
+        assert_eq!(
+            editor
+                .accept_external_profile(profile("external", "#aabbccff"))
+                .unwrap(),
+            ThemeExternalOutcome::PreservedLocalPreview
+        );
+        assert!(
+            editor
+                .snapshot()
+                .pending
+                .contains(&ThemePersistenceTarget::ActiveProfile)
+        );
+        assert!(editor.complete_persistence(request.token(), Ok("本地写入最终完成".into())));
+        assert!(editor.snapshot().pending.is_empty());
     }
 
     #[test]
@@ -660,5 +893,159 @@ mod tests {
         };
         editor.preview(nord.clone()).unwrap();
         assert_eq!(editor.runtime().snapshot().resolved().profile, nord);
+    }
+
+    #[test]
+    fn latest_clean_wallpaper_regeneration_previews_and_requests_persistence() {
+        let editor =
+            ThemeProfileEditor::new(wallpaper_profile(), ThemeProfileLibrary::default()).unwrap();
+        let stale = editor
+            .begin_wallpaper_regeneration("wallpaper:stale")
+            .unwrap();
+        let latest = editor
+            .begin_wallpaper_regeneration("wallpaper:latest")
+            .unwrap();
+        assert_eq!(
+            editor
+                .complete_wallpaper_regeneration(stale, Ok(PaletteData::tokyo_night()))
+                .unwrap(),
+            WallpaperRegenerationOutcome::IgnoredStale
+        );
+        let outcome = editor
+            .complete_wallpaper_regeneration(latest, Ok(PaletteData::nord()))
+            .unwrap();
+        let WallpaperRegenerationOutcome::PersistenceRequired(request) = outcome else {
+            panic!("clean live regeneration must persist its frozen fallback")
+        };
+        assert_eq!(request.key(), ACTIVE_THEME_PROFILE_KEY);
+        let candidate = ThemeProfile::from_json(request.value()).unwrap();
+        let ThemeBase::Wallpaper {
+            wallpaper_id,
+            frozen_palette,
+            ..
+        } = &candidate.base
+        else {
+            panic!("candidate stays wallpaper-based")
+        };
+        assert_eq!(wallpaper_id, "wallpaper:latest");
+        assert_eq!(frozen_palette.as_ref(), &PaletteData::nord());
+        assert_eq!(editor.runtime().snapshot().resolved().profile, candidate);
+    }
+
+    #[test]
+    fn regeneration_preserves_dirty_overrides_without_implicitly_saving_them() {
+        let editor =
+            ThemeProfileEditor::new(wallpaper_profile(), ThemeProfileLibrary::default()).unwrap();
+        let mut dirty = wallpaper_profile();
+        dirty.overrides = json!({"palette": {"accent": "#010203ff"}});
+        editor.preview(dirty).unwrap();
+        let token = editor
+            .begin_wallpaper_regeneration("wallpaper:new")
+            .unwrap();
+        assert_eq!(
+            editor
+                .complete_wallpaper_regeneration(token, Ok(PaletteData::nord()))
+                .unwrap(),
+            WallpaperRegenerationOutcome::PreviewUpdated
+        );
+        let snapshot = editor.snapshot();
+        assert!(snapshot.pending.is_empty());
+        let preview = snapshot.preview_profile.unwrap();
+        assert_eq!(
+            preview.overrides,
+            json!({"palette": {"accent": "#010203ff"}})
+        );
+        assert_eq!(preview.resolve().unwrap().data.palette.accent, "#010203ff");
+        assert_eq!(
+            preview.resolve().unwrap().data.palette.surface,
+            PaletteData::nord().surface
+        );
+    }
+
+    #[test]
+    fn failed_wallpaper_extraction_keeps_the_last_visible_generation() {
+        let editor =
+            ThemeProfileEditor::new(wallpaper_profile(), ThemeProfileLibrary::default()).unwrap();
+        let generation = editor.runtime().snapshot().generation();
+        let token = editor
+            .begin_wallpaper_regeneration("wallpaper:new")
+            .unwrap();
+        assert!(editor.snapshot().wallpaper_regeneration_pending);
+        assert_eq!(
+            editor
+                .complete_wallpaper_regeneration(token, Err("图片解码失败".into()))
+                .unwrap(),
+            WallpaperRegenerationOutcome::Failed
+        );
+        assert_eq!(editor.runtime().snapshot().generation(), generation);
+        assert_eq!(editor.snapshot().feedback, ThemeEditorFeedback::Error);
+    }
+
+    #[test]
+    fn invalid_palette_or_profile_switch_cannot_publish_a_finished_job() {
+        let editor =
+            ThemeProfileEditor::new(wallpaper_profile(), ThemeProfileLibrary::default()).unwrap();
+        let generation = editor.runtime().snapshot().generation();
+        let invalid_token = editor
+            .begin_wallpaper_regeneration("wallpaper:new")
+            .unwrap();
+        let mut invalid = PaletteData::nord();
+        invalid.accent = "not-a-color".into();
+        assert!(
+            editor
+                .complete_wallpaper_regeneration(invalid_token, Ok(invalid))
+                .is_err()
+        );
+        assert_eq!(editor.runtime().snapshot().generation(), generation);
+        assert_eq!(editor.snapshot().feedback, ThemeEditorFeedback::Error);
+
+        let switched_token = editor
+            .begin_wallpaper_regeneration("wallpaper:obsolete")
+            .unwrap();
+        editor.preview(ThemeProfile::default()).unwrap();
+        assert_eq!(
+            editor
+                .complete_wallpaper_regeneration(switched_token, Ok(PaletteData::nord()))
+                .unwrap(),
+            WallpaperRegenerationOutcome::IgnoredStale
+        );
+        assert!(!editor.snapshot().wallpaper_regeneration_pending);
+        assert_eq!(
+            editor.runtime().snapshot().resolved().profile,
+            ThemeProfile::default()
+        );
+    }
+
+    #[test]
+    fn newer_wallpaper_result_survives_confirmation_of_the_previous_palette() {
+        let editor =
+            ThemeProfileEditor::new(wallpaper_profile(), ThemeProfileLibrary::default()).unwrap();
+        let first_token = editor
+            .begin_wallpaper_regeneration("wallpaper:first")
+            .unwrap();
+        let first = editor
+            .complete_wallpaper_regeneration(first_token, Ok(PaletteData::nord()))
+            .unwrap();
+        let WallpaperRegenerationOutcome::PersistenceRequired(first_request) = first else {
+            panic!("first clean regeneration persists")
+        };
+
+        let newer_token = editor
+            .begin_wallpaper_regeneration("wallpaper:newer")
+            .unwrap();
+        assert_eq!(
+            editor
+                .complete_wallpaper_regeneration(newer_token, Ok(PaletteData::tokyo_night()))
+                .unwrap(),
+            WallpaperRegenerationOutcome::PreviewUpdated
+        );
+        assert!(editor.complete_persistence(first_request.token(), Ok("旧调色板已保存".into())));
+        let snapshot = editor.snapshot();
+        assert_eq!(snapshot.feedback, ThemeEditorFeedback::Previewing);
+        let preview = snapshot.preview_profile.unwrap();
+        let ThemeBase::Wallpaper { wallpaper_id, .. } = preview.base else {
+            panic!("preview remains wallpaper-based")
+        };
+        assert_eq!(wallpaper_id, "wallpaper:newer");
     }
 }

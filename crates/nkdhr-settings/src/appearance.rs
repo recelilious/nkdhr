@@ -15,7 +15,7 @@ use std::{
 };
 
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
-use nkdhr_theme::{BuiltInTheme, ThemeBase, ThemeProfile};
+use nkdhr_theme::{BuiltInTheme, PaletteData, ThemeBase, ThemeProfile};
 use nkdhr_ui::{
     Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, Constraints,
     CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
@@ -27,7 +27,8 @@ use nkdhr_ui::{
 
 use crate::{
     ThemeEditorError, ThemeEditorFeedback, ThemePersistenceRequest, ThemePersistenceTarget,
-    ThemePersistenceToken, ThemeProfileEditor,
+    ThemePersistenceToken, ThemeProfileEditor, WallpaperRegenerationOutcome,
+    WallpaperRegenerationToken,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -580,6 +581,37 @@ impl AppearanceSettings {
         completed
     }
 
+    pub fn begin_wallpaper_palette_regeneration(
+        &self,
+        wallpaper_id: impl Into<String>,
+    ) -> Result<WallpaperRegenerationToken, ThemeEditorError> {
+        let token = self
+            .state
+            .theme_profiles
+            .begin_wallpaper_regeneration(wallpaper_id)?;
+        self.sync_theme_editor_feedback();
+        Ok(token)
+    }
+
+    pub fn complete_wallpaper_palette_regeneration(
+        &self,
+        token: WallpaperRegenerationToken,
+        result: Result<PaletteData, String>,
+    ) -> Result<WallpaperRegenerationOutcome, ThemeEditorError> {
+        let result = self
+            .state
+            .theme_profiles
+            .complete_wallpaper_regeneration(token, result);
+        let snapshot = self.state.theme_profiles.snapshot();
+        let visible = snapshot
+            .preview_profile
+            .as_ref()
+            .unwrap_or(&snapshot.committed_profile);
+        self.state.scheme.set(scheme_for_profile(visible));
+        self.sync_theme_editor_feedback();
+        result
+    }
+
     pub fn accept_external_theme_profile_json(&self, text: &str) -> Result<(), ThemeEditorError> {
         self.state
             .theme_profiles
@@ -637,12 +669,11 @@ impl AppearanceSettings {
     pub fn snapshot(&self) -> AppearanceSnapshot {
         let mut pending_settings: Vec<_> =
             self.state.pending_apply.borrow().keys().copied().collect();
-        if self
-            .state
-            .theme_profiles
-            .snapshot()
+        let theme = self.state.theme_profiles.snapshot();
+        if (theme
             .pending
             .contains(&ThemePersistenceTarget::ActiveProfile)
+            || theme.wallpaper_regeneration_pending)
             && !pending_settings.contains(&AppearanceSetting::Scheme)
         {
             pending_settings.push(AppearanceSetting::Scheme);
@@ -1643,7 +1674,12 @@ impl AppearanceSettings {
                                 .theme_profiles
                                 .snapshot()
                                 .pending
-                                .contains(&ThemePersistenceTarget::ActiveProfile),
+                                .contains(&ThemePersistenceTarget::ActiveProfile)
+                            || self
+                                .state
+                                .theme_profiles
+                                .snapshot()
+                                .wallpaper_regeneration_pending,
                     )
                     .capabilities(capabilities)
                     .on_activate(move || {
@@ -1877,6 +1913,11 @@ impl AppearanceSettings {
             .pending
             .contains(&ThemePersistenceTarget::ActiveProfile)
             .then_some(AppearanceSetting::Scheme)
+            .or_else(|| {
+                snapshot
+                    .wallpaper_regeneration_pending
+                    .then_some(AppearanceSetting::Scheme)
+            })
             .or_else(|| {
                 matches!(
                     snapshot.feedback,
@@ -2652,5 +2693,41 @@ mod tests {
         model.preview_theme_profile(custom.clone()).unwrap();
         assert_eq!(model.snapshot().scheme, ColorScheme::Custom);
         assert_eq!(model.theme_runtime().snapshot().resolved().profile, custom);
+    }
+
+    #[test]
+    fn appearance_bridge_reports_wallpaper_generation_and_persistence_as_one_pending_setting() {
+        let profile = ThemeProfile {
+            id: "live-wallpaper".into(),
+            name: "Live Wallpaper".into(),
+            base: ThemeBase::Wallpaper {
+                live: true,
+                wallpaper_id: "old".into(),
+                frozen_palette: Box::new(PaletteData::tokyo_night()),
+            },
+            ..ThemeProfile::default()
+        };
+        let editor = ThemeProfileEditor::new(profile, Default::default()).unwrap();
+        let model = AppearanceSettings::with_theme_profiles(editor);
+        let token = model
+            .begin_wallpaper_palette_regeneration("wallpaper:new")
+            .unwrap();
+        assert_eq!(model.snapshot().feedback, SettingsFeedbackKind::Pending);
+        assert!(
+            model
+                .snapshot()
+                .pending_settings
+                .contains(&AppearanceSetting::Scheme)
+        );
+
+        let outcome = model
+            .complete_wallpaper_palette_regeneration(token, Ok(PaletteData::nord()))
+            .unwrap();
+        let WallpaperRegenerationOutcome::PersistenceRequired(request) = outcome else {
+            panic!("clean regeneration produces a persistence request")
+        };
+        assert_eq!(model.snapshot().scheme, ColorScheme::Wallpaper);
+        assert!(model.complete_theme_persistence(request.token(), Ok("壁纸配色已保存".into())));
+        assert_eq!(model.snapshot().feedback, SettingsFeedbackKind::Success);
     }
 }

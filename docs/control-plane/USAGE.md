@@ -114,7 +114,10 @@ replaces only the base and preserves the explicit override object. Use
 `nkdhrctl config watch theme` to inspect them. Settings is the normal editor
 and provides immediate preview, cancel, save, copy and bounded JSON
 import/export. Direct `config set` is chiefly useful for importing an already
-validated JSON document.
+validated JSON document. Wallpaper decoding remains a host responsibility;
+the shared theme adapter consumes RGBA8 pixels with bounded deterministic
+sampling and writes only the generated complete palette and source identity
+into the portable profile. It never stores image pixels in `theme.toml`.
 
 ## Troubleshooting
 
