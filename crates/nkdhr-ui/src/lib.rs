@@ -1,5 +1,6 @@
 //! Shared retained UI toolkit for nkdhr.
 
+mod action;
 mod animation;
 mod host;
 mod input;
@@ -13,6 +14,16 @@ mod theme_runtime;
 mod tree;
 mod widgets;
 
+pub use action::{
+    ActionArgument, ActionCatalog, ActionDescriptor, ActionDispatcher, ActionEnvironment,
+    ActionFeedback, ActionFeedbackKind, ActionId, ActionInvocation, ActionKind, ActionPhase,
+    ActionRegistry, ActionValue, ActionValueSchema, BindingAvailability, BindingContext,
+    BindingDiagnostic, BindingDiagnosticCode, BindingDocument, BindingEntry, BindingPublication,
+    BindingRuntime, BindingSeverity, BindingSnapshot, ButtonCode, CompiledBinding, CompiledTrigger,
+    DeviceClass, DispatchError, GestureActivation, GestureDirection, GestureKind, GestureOrigin,
+    InteractionId, KeyPhase, Modifier, ModifierSet, RuntimeTrigger, TerminalReason, Trigger,
+    ValidatedActionInvocation, built_in_compositor_catalog, default_compositor_bindings,
+};
 pub use animation::{Clock, ManualClock, SystemClock, Timeline, lerp};
 pub use host::{UiHost, UiHostFrame, UiSurface};
 pub use input::{ClipboardRequest, Key, Modifiers, PointerButton, ScrollPhase, UiEvent};

@@ -2,6 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use nkdhr_ipc::ConfigProxyBlocking;
+use nkdhr_ui::{
+    ActionEnvironment, BindingDiagnostic, BindingRuntime, BindingSnapshot, DeviceClass,
+    built_in_compositor_catalog, default_compositor_bindings,
+};
 use smithay::input::keyboard::{Keysym, xkb};
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
@@ -9,23 +13,9 @@ use zbus::zvariant::Value;
 const DEFAULT_GRID_SIZE: f64 = 32.0;
 const MAX_GRID_SIZE: u64 = 4096;
 
-/// Compositor-level keybindings resolved to real xkbcommon keysyms.
-#[derive(Debug, Clone, Copy)]
-pub struct Keybindings {
-    pub close_window: Keysym,
-    pub cycle_focus: Keysym,
-    pub overview: Keysym,
-}
-
-impl Default for Keybindings {
-    fn default() -> Self {
-        Self {
-            close_window: xkb::keysym_from_name("q", xkb::KEYSYM_NO_FLAGS),
-            cycle_focus: xkb::keysym_from_name("Tab", xkb::KEYSYM_NO_FLAGS),
-            overview: xkb::keysym_from_name("o", xkb::KEYSYM_NO_FLAGS),
-        }
-    }
-}
+const DEFAULT_CLOSE_KEY: &str = "Escape";
+const DEFAULT_CYCLE_KEY: &str = "Tab";
+const DEFAULT_OVERVIEW_KEY: &str = "o";
 
 /// World-coordinate grid used by window placement, interactive geometry,
 /// and the work viewport's primary-output anchor. It does not apply to
@@ -65,10 +55,70 @@ impl GridSettings {
 
 /// The hot-reloadable subset of the CTRL-5 `canvas` namespace consumed by
 /// the input and window-placement paths.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug)]
 pub struct InteractionSettings {
-    pub keybindings: Keybindings,
     pub grid: GridSettings,
+    bindings: BindingRuntime,
+    binding_diagnostics: Arc<[BindingDiagnostic]>,
+}
+
+impl Default for InteractionSettings {
+    fn default() -> Self {
+        let catalog = built_in_compositor_catalog();
+        let bindings = BindingRuntime::new(
+            catalog,
+            nested_environment(),
+            default_compositor_bindings(DEFAULT_CLOSE_KEY, DEFAULT_CYCLE_KEY, DEFAULT_OVERVIEW_KEY),
+        )
+        .expect("built-in compositor bindings are valid");
+        Self {
+            grid: GridSettings::default(),
+            binding_diagnostics: bindings.snapshot().diagnostics().to_vec().into(),
+            bindings,
+        }
+    }
+}
+
+impl InteractionSettings {
+    pub fn binding_snapshot(&self) -> Arc<BindingSnapshot> {
+        self.bindings.snapshot()
+    }
+
+    pub fn binding_diagnostics(&self) -> &[BindingDiagnostic] {
+        &self.binding_diagnostics
+    }
+
+    pub fn enable_tty_capabilities(&mut self) {
+        let publication = self.bindings.set_environment(tty_environment());
+        self.binding_diagnostics = publication.diagnostics;
+    }
+
+    fn reload_bindings(&mut self, config: &ConfigProxyBlocking<'_>) {
+        let document = fetch_string(config, "canvas.bindings").unwrap_or_default();
+        let publication = if document.trim().is_empty() {
+            let close = fetch_legacy_key(config, "canvas.close_window", DEFAULT_CLOSE_KEY);
+            let cycle = fetch_legacy_key(config, "canvas.cycle_focus", DEFAULT_CYCLE_KEY);
+            let overview = fetch_legacy_key(config, "canvas.overview", DEFAULT_OVERVIEW_KEY);
+            self.bindings
+                .publish(default_compositor_bindings(close, cycle, overview))
+        } else {
+            self.bindings.publish_json(&document)
+        };
+        self.binding_diagnostics = Arc::clone(&publication.diagnostics);
+        if publication.accepted {
+            println!(
+                "nkdhr-canvas: binding generation {} published with {} diagnostic(s)",
+                publication.effective.generation(),
+                publication.diagnostics.len()
+            );
+        } else {
+            eprintln!(
+                "nkdhr-canvas: rejected binding candidate; generation {} remains active: {:?}",
+                publication.effective.generation(),
+                publication.diagnostics
+            );
+        }
+    }
 }
 
 /// Reads interaction settings once and watches their `Config1.Changed`
@@ -81,7 +131,11 @@ pub fn watch() -> Arc<Mutex<InteractionSettings>> {
         return current;
     };
 
-    *current.lock().unwrap() = fetch(&connection);
+    if let Ok(config) = ConfigProxyBlocking::new(&connection) {
+        let mut settings = current.lock().unwrap();
+        settings.grid = fetch_grid(&config);
+        settings.reload_bindings(&config);
+    }
 
     let watched = Arc::clone(&current);
     thread::spawn(move || {
@@ -96,9 +150,13 @@ pub fn watch() -> Arc<Mutex<InteractionSettings>> {
                 continue;
             };
             if is_interaction_key(args.key()) {
-                let updated = fetch(&connection);
-                *watched.lock().unwrap() = updated;
-                println!("nkdhr-canvas: interaction settings reloaded: {updated:?}");
+                let mut settings = watched.lock().unwrap();
+                if is_binding_key(args.key()) {
+                    settings.reload_bindings(&config);
+                } else {
+                    settings.grid = fetch_grid(&config);
+                    println!("nkdhr-canvas: grid settings reloaded: {:?}", settings.grid);
+                }
             }
         }
     });
@@ -109,7 +167,8 @@ pub fn watch() -> Arc<Mutex<InteractionSettings>> {
 fn is_interaction_key(key: &str) -> bool {
     matches!(
         key,
-        "canvas.close_window"
+        "canvas.bindings"
+            | "canvas.close_window"
             | "canvas.cycle_focus"
             | "canvas.overview"
             | "canvas.snap_to_grid"
@@ -117,48 +176,56 @@ fn is_interaction_key(key: &str) -> bool {
     )
 }
 
-fn fetch(connection: &Connection) -> InteractionSettings {
-    let defaults = InteractionSettings::default();
-    let Ok(config) = ConfigProxyBlocking::new(connection) else {
-        return defaults;
-    };
-    InteractionSettings {
-        keybindings: Keybindings {
-            close_window: fetch_key(
-                &config,
-                "canvas.close_window",
-                defaults.keybindings.close_window,
-            ),
-            cycle_focus: fetch_key(
-                &config,
-                "canvas.cycle_focus",
-                defaults.keybindings.cycle_focus,
-            ),
-            overview: fetch_key(&config, "canvas.overview", defaults.keybindings.overview),
-        },
-        grid: GridSettings {
-            enabled: fetch_bool(&config, "canvas.snap_to_grid", defaults.grid.enabled),
-            size: fetch_grid_size(&config, defaults.grid.size),
-        },
+fn is_binding_key(key: &str) -> bool {
+    matches!(
+        key,
+        "canvas.bindings" | "canvas.close_window" | "canvas.cycle_focus" | "canvas.overview"
+    )
+}
+
+fn fetch_grid(config: &ConfigProxyBlocking<'_>) -> GridSettings {
+    let defaults = GridSettings::default();
+    GridSettings {
+        enabled: fetch_bool(config, "canvas.snap_to_grid", defaults.enabled),
+        size: fetch_grid_size(config, defaults.size),
     }
 }
 
-fn fetch_key(config: &ConfigProxyBlocking<'_>, key: &str, fallback: Keysym) -> Keysym {
+fn fetch_string(config: &ConfigProxyBlocking<'_>, key: &str) -> Option<String> {
     let Ok(owned) = config.get(key) else {
-        return fallback;
+        return None;
     };
     let Value::Str(name) = Value::from(owned) else {
-        return fallback;
+        return None;
     };
-    let sym = xkb::keysym_from_name(name.as_str(), xkb::KEYSYM_CASE_INSENSITIVE);
+    Some(name.to_string())
+}
+
+fn fetch_legacy_key(config: &ConfigProxyBlocking<'_>, key: &str, fallback: &'static str) -> String {
+    let Some(name) = fetch_string(config, key) else {
+        return fallback.to_owned();
+    };
+    let sym = xkb::keysym_from_name(&name, xkb::KEYSYM_CASE_INSENSITIVE);
     if sym == Keysym::NoSymbol {
         eprintln!(
             "nkdhr-canvas: {key} = {name:?} is not a recognized key name, keeping the built-in default"
         );
-        fallback
+        fallback.to_owned()
     } else {
-        sym
+        xkb::keysym_get_name(sym)
     }
+}
+
+fn nested_environment() -> ActionEnvironment {
+    ActionEnvironment::default()
+        .with_device(DeviceClass::Keyboard)
+        .with_device(DeviceClass::Mouse)
+}
+
+fn tty_environment() -> ActionEnvironment {
+    nested_environment()
+        .with_device(DeviceClass::Touchpad)
+        .with_capability("tty-vt")
 }
 
 fn fetch_bool(config: &ConfigProxyBlocking<'_>, key: &str, fallback: bool) -> bool {
@@ -219,6 +286,7 @@ mod tests {
     fn reloads_only_for_interaction_leaves() {
         for key in [
             "canvas.close_window",
+            "canvas.bindings",
             "canvas.cycle_focus",
             "canvas.overview",
             "canvas.snap_to_grid",
@@ -230,5 +298,26 @@ mod tests {
         assert!(!is_interaction_key(
             "canvas.outputs.desk.members.Virtual-1.x"
         ));
+    }
+
+    #[test]
+    fn default_bindings_are_shared_with_the_toolkit_catalog() {
+        let settings = InteractionSettings::default();
+        let snapshot = settings.binding_snapshot();
+        assert_eq!(snapshot.generation(), 1);
+        assert!(snapshot.bindings().iter().any(|binding| {
+            binding.id == "window-close"
+                && binding.invocation.action.as_str() == "canvas.window.close"
+        }));
+        assert_eq!(
+            settings
+                .binding_diagnostics()
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code == nkdhr_ui::BindingDiagnosticCode::UnsupportedDevice
+                })
+                .count(),
+            2
+        );
     }
 }

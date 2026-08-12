@@ -1,0 +1,244 @@
+# nkdhr UI 栈——内部实现
+
+> [English version / 英文版本](INTERNALS.md)
+
+## 范围
+
+本文覆盖 Phase 3 UI-1…UI-6：共享图元渲染器、文字系统、保留式组件工具包、主题
+runtime、双宿主集成与类型化交互语言。shell 产品组件属于 Phase 4；gallery/demo
+只验证公共 API，不是临时 shell 实现。
+
+## 依赖方向
+
+```text
+nkdhr-canvas ─┬─> nkdhr-ui ──> nkdhr-render ──> Smithay GLES
+              └─> COMP-7 pinned-node host
+
+nkdhr-settings/files/tasks ──> nkdhr-ui ──> nkdhr-render
+nkdhr-ui ──> nkdhr-ipc
+```
+
+`nkdhr-render` 不依赖 UI、画布世界、Wayland 组件或 CTRL-5；`nkdhr-ui` 不依赖具体
+画布后端，宿主适配器向内依赖工具包。
+
+## crate 布局
+
+`nkdhr-render/src` 分为公共 geometry/color、经校验的 display-list recorder、稳定
+texture/revision、Smithay GLES backend、确定性 software oracle 与提交的 shader。
+`nkdhr-ui/src` 分为 text、tree、layout、input、animation、widgets、theme/runtime、
+双 host 与 action。模块随里程碑落地，不预建空壳。
+
+## UI-1：图元层
+
+### Display list
+
+`DisplayList` 是画家顺序的不可变序列，命令只含 owned、后端无关数据和稳定
+`TextureId`。Builder 管理 transform/clip 栈，输入时验证、归一化圆角并把状态拍平到
+命令；`finish` 无需再失败。逻辑坐标保持 `f32`，目标 scale 只乘一次；六分量仿射
+变换按父→子组合。clip 被交成每命令一个 target-space 交集，空交集丢命令，旋转或
+错切 clip 返回 `NonAxisAlignedClip`。
+
+图元只有 Shape、Texture、BackdropBlur。矩形是零圆角 rounded rect；border 与 shadow
+复用同一 signed-distance 路径，阴影边界为 spread+3σ。纹理 source 在 prepare 对 CPU
+资源规范化。BackdropBlur 是严格画家顺序 barrier：只滤它之前的命令/合成器层，不滤
+自己的材料或之后内容。
+
+### GLES 与批处理
+
+每个 Smithay `GlesRenderer` context 对应一个 `GlesBackend`，拥有四个 shader、动态
+VBO、共享 index buffer、按目标调整的 blur texture/FBO 与 context-local texture cache。
+prepare 在借用 `GlesFrame` 前上传 revision；draw 在 Smithay 已激活的 framebuffer/
+projection 内通过 `with_context` 运行。
+
+shape 每 quad 六顶点，连续同 clip shape 合成一个 draw；texture 每 quad 四顶点，
+连续同 texture/sampling/clip 合批。任何 pipeline、clip、texture、blur barrier 都不
+跨越重排。Blur 只复制 radius 扩展后的依赖区域，执行九采样水平与垂直 pass，通过
+变换后的圆角 mask 替换预乘像素，并在抗锯齿边缘混回原 snapshot。
+
+部分合成宿主必须先调用 `PreparedDisplayList::expand_damage`，用其物理矩形重绘下层
+并提交同一 damage；重叠 blur 依赖按 fixed-point 传播。后端恢复 framebuffer、viewport、
+buffer、program、texture unit/binding、attribute、scissor 与预乘 blend 基线。资源销毁
+显式且依赖当前 context；下一 prepare 回收 texture 删除。shader 仅要求 GLES 2.0，
+不依赖 UBO/SSBO/desktop GL/instancing。
+
+### Golden 与性能
+
+`software.rs` 是测试 oracle，不是产品路径。它对拍平 display list 实现同一预乘混合、
+圆角 SDF、border、shadow、clip、transform、texture sampling 和可分离 blur；每次 blur
+读取不可变 painter-order snapshot。固定 scale 后叠加明确背景并编码 binary PPM，
+提交字节即 golden 契约。独立测试覆盖几何、变换、clip、圆角、batch barrier、revision
+和预乘；离屏 GLES 仅在硬件 edge coverage 处允许小容差。
+
+benchmark 使用约 1,000 稳定图元，warm-up 后分别测 CPU submission 与 fenced GPU，
+记录驱动、分辨率、scale、图元/draw 数与 percentile。2026-08-08 Iris Xe 2560×1600
+一批次结果为编译+VBO 1.937 ms、GPU median 1.189 ms、p95 1.228 ms；clear+draw+fence
+p95 3.032 ms 单列。2026-08-09 加 1160×760、36 logical px blur 后 GPU p95 3.212 ms，
+完整 wall p95 5.426 ms；高频离屏 oracle 最大通道差 ≤4、p95 ≤1。
+
+## UI-2：文字
+
+`cosmic-text` 负责 shaping、BiDi 与 fallback。glyph atlas key 含 font identity、glyph ID、
+subpixel bin、scale、raster mode；Alpha8 mask 与彩色 glyph 分开。atlas 用 skyline allocator、
+有界页数和页级 LRU，本帧引用页在提交完成前 pin。文字布局 LRU 与 raster cache 分离：
+改色只 repaint，改宽只重排需要 wrap 的 run，逐出 atlas 不丢 shaped layout。
+
+`TextSystem` 一次加载系统字体库，缓存不可变 `TextLayout`，键包括内容、字体优先级、
+weight/slant/metrics/wrap/alignment/width/scale/locale。布局存每行 glyph range，垂直 clip
+用二分选择邻近行，因此滚动成本随视口而非全文增长。新 glyph 先尝试 oxitext 的
+COLR/CPAL（Swash 0.2 会把已装 Noto COLRv1 画成单色 outline），再分别打包 mask/RGBA。
+dirty CPU 页更新稳定 texture revision；逐出页删除其所有 key 并提升 atlas generation。
+若所需格式的全部有界页都被当前帧 pin，明确返回 `AtlasFull`。
+
+确定性测试使用提交的 SIL OFL Noto Sans、Noto Sans CJK SC、Noto Color Emoji 子集，
+覆盖 Latin/CJK/emoji fallback、BiDi、wrap、golden、彩色页、逐出重建和行 clip。验收
+benchmark：5,000 混合行/265,000 glyph，初次 layout 175.999 ms、缓存 1.539 ms；
+滚动帧访问 2,055 glyph、记录 1,744 图元，CPU p95 0.262 ms，稳定 atlas 无逐出。
+
+## UI-3：工具包核心
+
+每个组件有带代次 `WidgetId`。保留树存 descriptor 私有状态、children、layout 与 dirty。
+同 key/位置及类型才复用；删除先释放 capture、focus、hover、animation 和 reactive。
+invalidation 分 layout/paint/semantics；layout 为约束/测量/排列，paint 顺序也成为逆序
+hit-test 顺序并共享 clip。
+
+`Element` 带可选 `WidgetKey`、flex 与 children；arena 用 `(slot,generation)`，slot
+复用提升 generation。keyed sibling 用临时 map 线性匹配，无 key 按位置。`Constraints`
+要求有限且 min≤max，所有派生 Rect/size 再校验。Flex/Padding/Align/Stack/Clip 无主题
+默认。未布局不能 paint；完全 clip 或父级故意不画的 subtree 会消费 paint dirty，
+避免永远请求 frame。
+
+Reactive 只往 root 队列追加 invalidation；订阅 token 由 retained node 拥有、去重并在
+替换/删除时立即解绑。宿主在明确边界处理更新、输入、动画。`Widget::animation` 在下一
+layout 前得到 `AnimationCtx`，几何动画可改状态并重新注册；仅绘制动画可在 PaintCtx
+采样同一 Clock。生产用 SystemClock，测试用 ManualClock，不内置 duration/easing。
+
+Pointer 默认命中最后绘制节点并向根冒泡，capture 时 hover 仍跟真实 hit path；
+PointerCancel 先送 captured target 再强制释放。focus 为受 scope 限制的树路径，Tab 按
+semantic 顺序。IME selection 验证 UTF-8 byte boundary。host 传 modifier 与非零 click
+count。复合组件可显式 handled-and-continue 并请求直接 child focus，普通 handled 仍
+立即停止。剪贴板请求在 `DispatchResult` 聚合，read 带原 `WidgetId`，过期/被删 target
+不收返回。overlay hit rect 和只影响绘制的 child translation 支持滚动条与弹性。
+
+Theme/Motion/标准组件是经所有者确认的产品层。Theme 包含密度、间距、圆角、排版、
+palette、七层 glass；能力解析在无真实 blur 或降低透明度时使用补偿 opacity。
+`MotionProfile` 含曲线、family 时长、全局 policy 和 fluid tuning；ScalarMotion 重定向
+前采样可见值，procedural variation 只供 shell 且由稳定 seed 有界决定。全局 speed
+同步缩放 control/panel/wallpaper/fluid 时长，不改曲线或幅度。
+
+Button/Toggle/Slider pending 是 layout-stable；Settings 为每项保存最新 opaque token，
+并行设置互不阻塞，同一项旧 transport 回包不可覆盖新反馈。List 用稳定 selection/
+cursor/anchor，virtual extent 不改隐藏 selection；tree/reorder/typeahead 都发稳定 ID
+事务。Scroll 把 exact remainder 冒泡给嵌套容器，生命周期可跨零余量，只有最外边界
+拥有弹性；thumb capture 不转移。offset 与 visual elasticity 分开，Reduced 跳过惯性/
+snap/stretch。TextResources 统一 TextSystem、atlas、scale、TextureStore，本帧 glyph
+统一 pin。TextLayout 保存 source offset、BiDi visual cell 和多片 selection。TextInput
+分开 logical anchor/caret，preedit/format/mask 都显式映射；密码无 undo snapshot 且
+语义永不暴露。validation 带 generation/debounce/status，旧结果无效，失败不改值。
+
+Appearance & Interaction oracle 使用完整 CJK fixture、真实 icon mask、四宽度模式和
+单一外层 blur。专业 panel/drawer 在 retained layout state 持有 ScalarMotion，从当前
+几何重定向；窄屏退出期间保留 InputBarrier，Reduced/Off 直接 settle。只 clip 移动
+overlay，不切 sibling shadow。2026-08-10 所有者接受静止和导出 transition frame，
+UI-3 完成。
+
+## UI-4：主题 runtime
+
+`nkdhr-theme` 把有界 schema-v1 `ThemeProfile` 解析成完整 ThemeData。base 为不可变
+Tokyo Night/Nord 或带 frozen palette 的 wallpaper；稀疏 override 只覆盖已知字段，
+live base 再生成时原样保留。任何 syntax/version/unknown/type/range/scale/material/motion
+错误拒绝整个候选。
+
+`nkdhrd` 用两个独立 scalar 保存 `theme.profile` 与 `theme.library`；namespace 校验
+完整 profile、library 全成员、唯一 ID 和边界，原子持久化/Changed。ThemeRuntime 在
+锁外 resolve/convert，然后一次交换共享不可变 snapshot+generation；拒绝不动 Arc。
+diff 区分 paint/layout，ThemeToken/ThemeReadSet 记录精确 leaf。UiRoot 在自己的活动
+边界比较自己上一 snapshot 与最新值，允许跨代；只 dirty 相交 reader。默认 portable
+profile 与 UI-3 Theme 结构完全相等。
+
+ThemeProfileEditor 是共享 runtime 上可 clone、宿主无关的 Settings transaction owner。
+preview 先校验发布，cancel 重新发布 committed。profile/library commit 返回 opaque token、
+dotted key、已校验 JSON，由宿主在线程外写 D-Bus；只接受最新 completion。失败保留
+draft，外部 Changed 可确认匹配请求、在干净时采用，或在有本地预览时报告冲突。
+library 在替换前整体验证，支持 save/upsert/copy/remove/import/export。
+
+WallpaperImage 校验尺寸、stride、overflow、长度；生成器固定内存最多取样 262,144
+像素写入 alpha-weighted 5-bit RGB histogram，以 OKLab/OKLCH 分析、weighted median
+选明暗、population/chroma 选 accent，并 gamut-map 全部语义角色。对比与极端输入有
+测试，生成器不保留像素/解码。live profile 再生成只替换 frozen base，保留 ID/name/
+override；异步 token 保证旧结果和离开 profile 后的结果不能赢。干净结果进入原子保存，
+dirty 结果只更新 preview 不暗中写入；失败保留 runtime generation。
+
+ThemeExtensionRegistry 由受信任宿主在 runtime 前装配，reverse-DNS group/token descriptor
+声明 type/range/default/paint-layout impact。profile 的 `overrides.extension` 只有稀疏值，
+缺省补 default，未知/无效拒绝全部。ResolvedTheme、diff、ThemeSnapshot、动态 ReadSet
+和 Settings/library 共享同一 registry。双 root 测试证明各显示器只在本地边界同步，
+可 1→3 跨代并忽略 generation 2 中改后还原的 layout 值，同时捕获 generation 3 paint
+值。插件加载/声明分发属于以后工作。
+
+## UI-5：两个宿主，一个 runtime
+
+UiHost 拥有 UiRoot、逻辑 size/scale、layout/paint scheduling、最后完整不可变 display
+list、texture namespace 与 commit；只有成功记录推进 commit，无改动复用前帧。
+UiSurface 是 object-safe 的 render/list/textures/commit/input/focus/frame-demand 边界。
+AppearanceSurface 只实现一次；仅 viewport、composition revision 或 theme generation
+变化时重建 Element，值型 Reactive 在现有 root 内继续。
+
+集成适配器用 UiPinnedNode 实现 PinnedNode，NkdhrUi payload 借用完整 list/store/commit。
+`DisplayList::transformed` 组合外部 viewport translation/zoom 与 clip，root 始终保持
+node-local。每 `(node ID, GLES context ID)` 独立持有 GlesBackend 和 PreparedDisplayList，
+避免输出/context 代次互相污染。GlesTargetRenderer 统一 nested 直接 frame 与 TTY
+multi-GPU 的 GLES render side；element identity/commit signature 含 app commit、target、
+placement、zoom、scale，无 CPU 中间图。
+
+指针为 node-local，padding 也可命中，capture 越界继续，focus/leave 明确。局部 UI
+键盘焦点在全局绑定前接收 key/text，外部 press 清除。集成 clipboard/IME 桥接仍归
+以后 shell，接口已经能接收。独立宿主持有 Wayland winit window、wl_egl_window、EGL
+display/context/surface、Smithay renderer/backend；resize/scale 在一帧边界更新。
+pointer/keyboard/repeat/focus/text-input-v3 归一化为 UiEvent，剪贴板保留请求 WidgetId。
+独立模式全帧绘制可满足 blur 依赖。相同 Appearance root 的 twin test 输出相等，真实
+独立和 nested 首帧均已运行，TTY multi-renderer 由 all-feature build 覆盖。
+
+## UI-6：类型化交互语言
+
+`nkdhr-ui::action` 不依赖后端。ActionCatalog 最多 512 个稳定 lowercase ID；descriptor
+含说明、instant/continuous、最多 32 个 Boolean/有界 integer/number/string/choice
+参数及声明式 required capabilities。ActionRegistry 为每项附一个 Send+Sync 宿主 adapter；
+配置永远不能选择函数指针或可执行字符串。
+
+schema-v1 BindingDocument 上限 1 MiB/2,048 项。Trigger 为 key/button/gesture 加 context。
+编译解析 action、填 default、校验参数、lowercase key、把 modifier array 变成 bit set，
+拒绝客户端保留的两指触控板以及非空白/边缘触屏 ownership，并逐对分析 overlap。手势
+冲突比较 kind、device overlap、finger、origin、direction、context；按钮同样比较
+device/origin/context。重复 ID、无效 action/参数/冲突是 error；缺能力/设备是 warning，
+该行保留但 non-effective。
+
+BindingRuntime 只发布完整编译候选。Arc<BindingSnapshot> 内含同一个 catalog Arc、递增
+generation、编译行与 warning；拒绝返回候选诊断但保留精确旧 Arc/代次。canvas watcher
+把它与 grid policy 放同一 mutex；`canvas.bindings` 是 CTRL-5 bounded string，空值从
+旧叶子合成标准文档，非空 JSON 权威。输入线程每次只 clone 不可变 snapshot。
+
+`ActionDispatcher<App,CanvasActionPayload>` 是可配置 action 唯一 adapter 入口。
+`input.rs` 只做宿主归一化/lookup，不按快捷键匹配 action；`actions.rs` 集中实现 action。
+instant 用 Invoke；continuous begin 分配 InteractionId，只有同 ID 可 update/end。终止
+前先清 ownership，update 失败会 cancel，故最多一个终止 phase。输出/焦点改变、目标
+死亡、设备移除、锁屏、绑定代次变化均取消，并抑制已消费物理流的余部。
+
+Phase 2 Drag 仍是 operational state，但只由 action phase 创建/更新/结束。客户端 xdg
+move/resize 在协议 grab 校验后进入同一 dispatcher。三指 swipe 平移；三指 pinch 让
+初始世界点留在移动逻辑中心下，并把 zoom 限在工作区间；其他手势经 pointer-gestures
+转发。真实 TouchHandle 转发 down/motion/up/frame/cancel；在 recognizer 完成前不把触屏
+action 宣称有效。锁屏 VT 是刻意例外：fail-closed path 保留 Linux 固定 Ctrl+Alt+Fn/
+XF86 紧急 chord；普通会话 VT 是 capability-gated typed action，nested 明确显示不支持。
+
+BindingSettingsModel 直接接收 BindingSnapshot，从其 catalog 格式化无样式 trigger row；
+拒绝 publication 只更新诊断。ActionFeedback 提供统一结果 seam，不提前设计 Phase 4
+通知组件。任何绑定都不是代码；未来 CTRL-EXT 命令仍必须是单独授权的类型化 action。
+
+## 错误与安全策略
+
+- 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；
+- shader/GL 错误传播给宿主并跳过整帧，不显示半更新 UI；
+- theme 与 binding 使用最后有效 snapshot；
+- unsafe 只隔离在 GLES，记录 context/buffer invariant，并由 software oracle 与真实
+  离屏渲染覆盖；
+- renderer/widget/action callback 不直接执行特权系统工作，系统操作统一经过 `nkdhrd`。

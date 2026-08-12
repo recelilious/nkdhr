@@ -1,16 +1,22 @@
 use std::time::Duration;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
-    GestureEndEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
+    GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent, GestureSwipeUpdateEvent,
+    InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+    PointerMotionEvent, TouchEvent,
 };
-use smithay::input::keyboard::{FilterResult, KeyboardHandle, Keysym, ModifiersState, keysyms};
+use smithay::input::keyboard::{FilterResult, KeyboardHandle, Keysym, ModifiersState, xkb};
 use smithay::input::pointer::{
-    AxisFrame, ButtonEvent, GestureSwipeBeginEvent as PointerSwipeBeginEvent,
-    GestureSwipeEndEvent as PointerSwipeEndEvent,
+    AxisFrame, ButtonEvent, GesturePinchBeginEvent as PointerPinchBeginEvent,
+    GesturePinchEndEvent as PointerPinchEndEvent,
+    GesturePinchUpdateEvent as PointerPinchUpdateEvent,
+    GestureSwipeBeginEvent as PointerSwipeBeginEvent, GestureSwipeEndEvent as PointerSwipeEndEvent,
     GestureSwipeUpdateEvent as PointerSwipeUpdateEvent, MotionEvent, PointerHandle,
     RelativeMotionEvent,
+};
+use smithay::input::touch::{
+    DownEvent as TouchDownEvent, MotionEvent as TouchMotionEvent, UpEvent as TouchUpEvent,
 };
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
@@ -27,10 +33,8 @@ use crate::widget_host::{InputHandled, PinnedLayer, PinnedPointerEvent};
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const TRANSITION: Duration = Duration::from_millis(250);
-const KEYBOARD_PAN_TRANSITION: Duration = Duration::from_millis(140);
 const WINDOW_SNAP_TRANSITION: Duration = Duration::from_millis(120);
 const VIEWPORT_SNAP_TRANSITION: Duration = Duration::from_millis(120);
-const PAN_STEP: f64 = 80.0;
 type RelativeMotion = (Point<f64, Logical>, Point<f64, Logical>, u64);
 
 #[derive(Clone)]
@@ -49,6 +53,8 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
         return;
     }
 
+    crate::actions::sync_binding_generation(app);
+
     let keyboard = app
         .seat
         .get_keyboard()
@@ -57,9 +63,16 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
         .seat
         .get_pointer()
         .expect("App::new always creates a pointer");
+    let touch = app
+        .seat
+        .get_touch()
+        .expect("App::new always creates touch input");
     let extent = layout.logical_extent();
 
     match event {
+        InputEvent::DeviceRemoved { .. } => {
+            crate::actions::cancel(app, nkdhr_ui::TerminalReason::DeviceRemoved);
+        }
         InputEvent::Keyboard { event } => {
             if let Some(group) = active_group(app, layout) {
                 handle_keyboard::<B>(app, &keyboard, group, event);
@@ -108,16 +121,35 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
             }
         }
         InputEvent::GestureSwipeBegin { event } => {
+            app.suppress_gesture_remainder = false;
             activate_group_at(app, layout, pointer.current_location());
-            // Three fingers are the compositor's global canvas gesture.
-            // Client focus, grabs and pointer constraints must not turn it
-            // back into an application gesture; session lock has its own
-            // fail-closed input path above this dispatcher.
-            let compositor_owned = event.fingers() == 3 && app.drag.is_none();
-            app.canvas_swipe_active = compositor_owned;
-            if compositor_owned {
-                app.active_view_mut().animation = None;
-            } else {
+            let binding = active_group(app, layout).and_then(|group| {
+                let origin = gesture_origin_at(app, &group, pointer.current_location());
+                find_binding(
+                    app,
+                    binding_context_for_origin(app, origin),
+                    &nkdhr_ui::RuntimeTrigger::Gesture {
+                        gesture: nkdhr_ui::GestureKind::Swipe,
+                        device: nkdhr_ui::DeviceClass::Touchpad,
+                        fingers: u8::try_from(event.fingers()).unwrap_or(u8::MAX),
+                        origin,
+                        direction: None,
+                        activation: nkdhr_ui::GestureActivation::Begin,
+                    },
+                )
+                .map(|binding| (group, binding))
+            });
+            let handled = binding.is_some_and(|(group, binding)| {
+                crate::actions::begin_gesture_binding(
+                    app,
+                    &binding,
+                    crate::actions::CanvasActionPayload::GestureStart {
+                        logical_center: local_point(&group, pointer.current_location()),
+                        canvas_anchor: group.canvas_anchor,
+                    },
+                )
+            });
+            if !handled {
                 pointer.gesture_swipe_begin(
                     app,
                     &PointerSwipeBeginEvent {
@@ -129,10 +161,17 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
             }
         }
         InputEvent::GestureSwipeUpdate { event } => {
-            if app.canvas_swipe_active {
-                let view = app.active_view_mut();
-                view.viewport.center =
-                    gesture_pan_center(view.viewport.center, event.delta(), view.viewport.zoom);
+            if app.suppress_gesture_remainder {
+                return;
+            }
+            let compositor_owned = app.gesture_action.is_some();
+            if compositor_owned {
+                crate::actions::update_gesture(
+                    app,
+                    crate::actions::CanvasActionPayload::GesturePan {
+                        delta: event.delta(),
+                    },
+                );
             } else {
                 pointer.gesture_swipe_update(
                     app,
@@ -144,8 +183,15 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
             }
         }
         InputEvent::GestureSwipeEnd { event } => {
-            if std::mem::take(&mut app.canvas_swipe_active) {
-                animate_viewport_snap(app);
+            if std::mem::take(&mut app.suppress_gesture_remainder) {
+                return;
+            }
+            if app.gesture_action.is_some() {
+                if event.cancelled() {
+                    crate::actions::cancel(app, nkdhr_ui::TerminalReason::CancelledByInput);
+                } else {
+                    crate::actions::end_gesture(app);
+                }
             } else {
                 pointer.gesture_swipe_end(
                     app,
@@ -157,6 +203,134 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
                 );
             }
         }
+        InputEvent::GesturePinchBegin { event } => {
+            app.suppress_gesture_remainder = false;
+            activate_group_at(app, layout, pointer.current_location());
+            let binding = active_group(app, layout).and_then(|group| {
+                let origin = gesture_origin_at(app, &group, pointer.current_location());
+                find_binding(
+                    app,
+                    binding_context_for_origin(app, origin),
+                    &nkdhr_ui::RuntimeTrigger::Gesture {
+                        gesture: nkdhr_ui::GestureKind::Pinch,
+                        device: nkdhr_ui::DeviceClass::Touchpad,
+                        fingers: u8::try_from(event.fingers()).unwrap_or(u8::MAX),
+                        origin,
+                        direction: None,
+                        activation: nkdhr_ui::GestureActivation::Begin,
+                    },
+                )
+                .map(|binding| (group, binding))
+            });
+            let handled = binding.is_some_and(|(group, binding)| {
+                crate::actions::begin_gesture_binding(
+                    app,
+                    &binding,
+                    crate::actions::CanvasActionPayload::GestureStart {
+                        logical_center: local_point(&group, pointer.current_location()),
+                        canvas_anchor: group.canvas_anchor,
+                    },
+                )
+            });
+            if !handled {
+                pointer.gesture_pinch_begin(
+                    app,
+                    &PointerPinchBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        fingers: event.fingers(),
+                    },
+                );
+            }
+        }
+        InputEvent::GesturePinchUpdate { event } => {
+            if app.suppress_gesture_remainder {
+                return;
+            }
+            let compositor_owned = app.gesture_action.is_some();
+            if compositor_owned {
+                crate::actions::update_gesture(
+                    app,
+                    crate::actions::CanvasActionPayload::GesturePinch {
+                        delta: event.delta(),
+                        scale: event.scale(),
+                    },
+                );
+            } else {
+                pointer.gesture_pinch_update(
+                    app,
+                    &PointerPinchUpdateEvent {
+                        time: event.time_msec(),
+                        delta: event.delta(),
+                        scale: event.scale(),
+                        rotation: event.rotation(),
+                    },
+                );
+            }
+        }
+        InputEvent::GesturePinchEnd { event } => {
+            if std::mem::take(&mut app.suppress_gesture_remainder) {
+                return;
+            }
+            if app.gesture_action.is_some() {
+                if event.cancelled() {
+                    crate::actions::cancel(app, nkdhr_ui::TerminalReason::CancelledByInput);
+                } else {
+                    crate::actions::end_gesture(app);
+                }
+            } else {
+                pointer.gesture_pinch_end(
+                    app,
+                    &PointerPinchEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        cancelled: event.cancelled(),
+                    },
+                );
+            }
+        }
+        InputEvent::TouchDown { event } => {
+            let location = event.position_transformed(extent);
+            activate_group_at(app, layout, location);
+            let focus =
+                active_group(app, layout).and_then(|group| pointer_focus_at(app, &group, location));
+            touch.down(
+                app,
+                focus,
+                &TouchDownEvent {
+                    slot: event.slot(),
+                    location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchMotion { event } => {
+            let location = event.position_transformed(extent);
+            let focus =
+                active_group(app, layout).and_then(|group| pointer_focus_at(app, &group, location));
+            touch.motion(
+                app,
+                focus,
+                &TouchMotionEvent {
+                    slot: event.slot(),
+                    location,
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchUp { event } => {
+            touch.up(
+                app,
+                &TouchUpEvent {
+                    slot: event.slot(),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchFrame { .. } => touch.frame(app),
+        InputEvent::TouchCancel { .. } => touch.cancel(app),
         _ => {}
     }
 }
@@ -176,6 +350,10 @@ fn handle_session_lock_input<B: InputBackend>(
         .seat
         .get_pointer()
         .expect("App::new always creates a pointer");
+    let touch = app
+        .seat
+        .get_touch()
+        .expect("App::new always creates touch input");
     let extent = layout.logical_extent();
 
     match event {
@@ -289,6 +467,74 @@ fn handle_session_lock_input<B: InputBackend>(
                 },
             );
         }
+        InputEvent::GesturePinchBegin { event } => {
+            pointer.gesture_pinch_begin(
+                app,
+                &PointerPinchBeginEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                    fingers: event.fingers(),
+                },
+            );
+        }
+        InputEvent::GesturePinchUpdate { event } => {
+            pointer.gesture_pinch_update(
+                app,
+                &PointerPinchUpdateEvent {
+                    time: event.time_msec(),
+                    delta: event.delta(),
+                    scale: event.scale(),
+                    rotation: event.rotation(),
+                },
+            );
+        }
+        InputEvent::GesturePinchEnd { event } => {
+            pointer.gesture_pinch_end(
+                app,
+                &PointerPinchEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                    cancelled: event.cancelled(),
+                },
+            );
+        }
+        InputEvent::TouchDown { event } => {
+            let location = event.position_transformed(extent);
+            touch.down(
+                app,
+                lock_pointer_focus(app, layout, location),
+                &TouchDownEvent {
+                    slot: event.slot(),
+                    location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchMotion { event } => {
+            let location = event.position_transformed(extent);
+            touch.motion(
+                app,
+                lock_pointer_focus(app, layout, location),
+                &TouchMotionEvent {
+                    slot: event.slot(),
+                    location,
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchUp { event } => {
+            touch.up(
+                app,
+                &TouchUpEvent {
+                    slot: event.slot(),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+        }
+        InputEvent::TouchFrame { .. } => touch.frame(app),
+        InputEvent::TouchCancel { .. } => touch.cancel(app),
         _ => {}
     }
 }
@@ -349,6 +595,64 @@ fn local_point(group: &InputGroup, global: Point<f64, Logical>) -> Point<f64, Lo
     global - group.origin.to_f64()
 }
 
+fn find_binding(
+    app: &App,
+    context: nkdhr_ui::BindingContext,
+    trigger: &nkdhr_ui::RuntimeTrigger,
+) -> Option<nkdhr_ui::CompiledBinding> {
+    app.interaction_settings
+        .lock()
+        .unwrap()
+        .binding_snapshot()
+        .find(context, trigger)
+        .cloned()
+}
+
+fn binding_context_for_origin(
+    app: &App,
+    origin: nkdhr_ui::GestureOrigin,
+) -> nkdhr_ui::BindingContext {
+    if app.active_view().in_overview {
+        return nkdhr_ui::BindingContext::Overview;
+    }
+    match origin {
+        nkdhr_ui::GestureOrigin::Window => nkdhr_ui::BindingContext::Window,
+        nkdhr_ui::GestureOrigin::WindowFrame => nkdhr_ui::BindingContext::WindowFrame,
+        nkdhr_ui::GestureOrigin::EmptyCanvas => nkdhr_ui::BindingContext::EmptyCanvas,
+        nkdhr_ui::GestureOrigin::Edge | nkdhr_ui::GestureOrigin::Anywhere => {
+            nkdhr_ui::BindingContext::Canvas
+        }
+    }
+}
+
+fn gesture_origin_at(
+    app: &App,
+    group: &InputGroup,
+    pointer_pos: Point<f64, Logical>,
+) -> nkdhr_ui::GestureOrigin {
+    const EDGE_WIDTH: f64 = 16.0;
+    let local = local_point(group, pointer_pos);
+    if local.x < EDGE_WIDTH
+        || local.y < EDGE_WIDTH
+        || local.x >= f64::from(group.size.w) - EDGE_WIDTH
+        || local.y >= f64::from(group.size.h) - EDGE_WIDTH
+    {
+        return nkdhr_ui::GestureOrigin::Edge;
+    }
+    let viewport = app.active_view().viewport;
+    let world_pos = viewport.group_logical_to_world(local, group.canvas_anchor);
+    app.active_canvas().window_at(world_pos).map_or(
+        nkdhr_ui::GestureOrigin::EmptyCanvas,
+        |window| {
+            if window.content_rect().contains(world_pos) {
+                nkdhr_ui::GestureOrigin::Window
+            } else {
+                nkdhr_ui::GestureOrigin::WindowFrame
+            }
+        },
+    )
+}
+
 fn handle_pointer_motion(
     app: &mut App,
     pointer: &PointerHandle<App>,
@@ -357,8 +661,11 @@ fn handle_pointer_motion(
     time: u32,
     relative: Option<RelativeMotion>,
 ) {
-    if let Some(drag) = app.drag.clone() {
-        apply_drag(app, &drag, pointer_pos);
+    if app.pointer_action.is_some() {
+        crate::actions::update_pointer(
+            app,
+            crate::actions::CanvasActionPayload::PointerPosition(pointer_pos),
+        );
         pointer.motion(
             app,
             None,
@@ -586,7 +893,6 @@ fn handle_keyboard<B: InputBackend>(
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     let key_state = event.state();
-    let bindings = app.interaction_settings.lock().unwrap().keybindings;
     keyboard.input::<(), _>(
         app,
         event.key_code(),
@@ -630,76 +936,53 @@ fn handle_keyboard<B: InputBackend>(
                 return FilterResult::Intercept(());
             }
 
-            if handle_vt_switch(app, modifiers, sym, &raw_syms, pressed) {
+            let context = crate::actions::key_context(app);
+            let modifier_set = action_modifiers(*modifiers);
+            let phase = if pressed {
+                nkdhr_ui::KeyPhase::Press
+            } else {
+                nkdhr_ui::KeyPhase::Release
+            };
+            let mut symbols = raw_syms;
+            if !symbols.contains(&sym) {
+                symbols.push(sym);
+            }
+            let binding = symbols.iter().find_map(|symbol| {
+                find_binding(
+                    app,
+                    context,
+                    &nkdhr_ui::RuntimeTrigger::key(
+                        xkb::keysym_get_name(*symbol),
+                        modifier_set,
+                        phase,
+                    ),
+                )
+            });
+            if let Some(binding) = binding {
+                crate::actions::invoke_binding(
+                    app,
+                    &binding,
+                    crate::actions::CanvasActionPayload::Group {
+                        size: group.size,
+                        canvas_anchor: group.canvas_anchor,
+                    },
+                );
                 return FilterResult::Intercept(());
             }
-            if sym == Keysym::Escape {
-                if pressed && app.active_view().in_overview {
-                    exit_overview(app, None);
-                }
-                return FilterResult::Intercept(());
-            }
-            if modifiers.logo && sym == bindings.overview {
-                if pressed {
-                    toggle_overview(app, group.size, group.canvas_anchor);
-                }
-                return FilterResult::Intercept(());
-            }
-            if modifiers.logo && sym == bindings.close_window {
-                if pressed {
-                    close_focused_window(app);
-                }
-                return FilterResult::Intercept(());
-            }
-            if modifiers.alt && sym == bindings.cycle_focus {
-                if pressed {
-                    cycle_focus(app);
-                }
-                return FilterResult::Intercept(());
-            }
-            if modifiers.logo && !app.active_view().in_overview {
-                let step = match sym {
-                    Keysym::Left => Some((-PAN_STEP, 0.0)),
-                    Keysym::Right => Some((PAN_STEP, 0.0)),
-                    Keysym::Up => Some((0.0, -PAN_STEP)),
-                    Keysym::Down => Some((0.0, PAN_STEP)),
-                    _ => None,
-                };
-                if let Some((dx, dy)) = step {
-                    if pressed {
-                        let grid = { app.interaction_settings.lock().unwrap().grid };
-                        let view = app.active_view_mut();
-                        let base = view
-                            .animation
-                            .as_ref()
-                            .map(Animation::target)
-                            .unwrap_or(view.viewport);
-                        let target = snapped_viewport(
-                            grid,
-                            Viewport {
-                                center: (base.center.x + dx, base.center.y + dy).into(),
-                                zoom: base.zoom,
-                            },
-                        );
-                        view.animation = Some(Animation::new(
-                            view.viewport,
-                            target,
-                            KEYBOARD_PAN_TRANSITION,
-                        ));
-                    }
-                    return FilterResult::Intercept(());
-                }
-            }
-            if modifiers.logo
-                && let Some(digit) = keysym.raw_syms().first().and_then(|sym| digit_value(*sym))
+            if !pressed
+                && symbols.iter().any(|symbol| {
+                    find_binding(
+                        app,
+                        context,
+                        &nkdhr_ui::RuntimeTrigger::key(
+                            xkb::keysym_get_name(*symbol),
+                            modifier_set,
+                            nkdhr_ui::KeyPhase::Press,
+                        ),
+                    )
+                    .is_some()
+                })
             {
-                if pressed {
-                    if modifiers.shift {
-                        set_mark(app, digit);
-                    } else {
-                        jump_to_mark(app, digit);
-                    }
-                }
                 return FilterResult::Intercept(());
             }
             FilterResult::Forward
@@ -766,16 +1049,7 @@ fn xf86_vt_number(sym: Keysym) -> Option<i32> {
     }
 }
 
-fn digit_value(sym: Keysym) -> Option<u8> {
-    let raw = sym.raw();
-    if (keysyms::KEY_0..=keysyms::KEY_9).contains(&raw) {
-        Some((raw - keysyms::KEY_0) as u8)
-    } else {
-        None
-    }
-}
-
-fn close_focused_window(app: &mut App) {
+pub(crate) fn close_focused_window(app: &mut App) {
     let Some(focused) = focused_surface(app) else {
         return;
     };
@@ -789,7 +1063,7 @@ fn close_focused_window(app: &mut App) {
     }
 }
 
-fn cycle_focus(app: &mut App) {
+pub(crate) fn cycle_focus(app: &mut App) {
     let current = focused_surface(app);
     let Some((next_surface, next_focus)) = app
         .active_canvas()
@@ -804,7 +1078,7 @@ fn cycle_focus(app: &mut App) {
     }
 }
 
-fn set_mark(app: &mut App, digit: u8) {
+pub(crate) fn set_mark(app: &mut App, digit: u8) {
     let canvas = app.active_view().canvas.clone();
     let center = app.active_view().viewport.center;
     app.marks
@@ -815,7 +1089,7 @@ fn set_mark(app: &mut App, digit: u8) {
     println!("nkdhr-canvas: set mark {digit} on canvas {canvas:?} at {center:?}");
 }
 
-fn jump_to_mark(app: &mut App, digit: u8) {
+pub(crate) fn jump_to_mark(app: &mut App, digit: u8) {
     let canvas = app.active_view().canvas.clone();
     let Some(&center) = app.marks.get(&canvas).and_then(|marks| marks.get(&digit)) else {
         return;
@@ -827,7 +1101,7 @@ fn jump_to_mark(app: &mut App, digit: u8) {
     view.in_overview = false;
 }
 
-fn toggle_overview(
+pub(crate) fn toggle_overview(
     app: &mut App,
     group_size: Size<i32, Logical>,
     canvas_anchor: Point<f64, Logical>,
@@ -849,7 +1123,7 @@ fn toggle_overview(
     view.in_overview = true;
 }
 
-fn exit_overview(app: &mut App, target: Option<Viewport>) {
+pub(crate) fn exit_overview(app: &mut App, target: Option<Viewport>) {
     let grid = { app.interaction_settings.lock().unwrap().grid };
     let view = app.active_view_mut();
     let target = snapped_viewport(grid, target.unwrap_or(view.pre_overview_viewport));
@@ -867,17 +1141,21 @@ fn handle_pointer_button<B: InputBackend>(
     let button_state = event.state();
     let button_code = event.button_code();
 
+    if button_state == ButtonState::Released && std::mem::take(&mut app.suppress_pointer_release) {
+        return;
+    }
+    if button_state == ButtonState::Pressed {
+        app.suppress_pointer_release = false;
+    }
+    if button_state == ButtonState::Released && app.pointer_action.is_some() {
+        crate::actions::end_pointer(app);
+        return;
+    }
+
     if app.active_view().in_overview {
         if button_state == ButtonState::Pressed && button_code == BTN_LEFT {
             handle_overview_click(app, pointer, group);
         }
-        return;
-    }
-
-    if button_state == ButtonState::Released
-        && let Some(drag) = app.drag.take()
-    {
-        finish_drag(app, &drag);
         return;
     }
 
@@ -926,46 +1204,69 @@ fn handle_pointer_button<B: InputBackend>(
             ))
         });
 
-        if modifiers.logo && button_code == BTN_LEFT {
-            if let Some((surface, position, _, _, _)) = hit {
-                app.drag = Some(Drag::Move {
-                    surface,
-                    window_start: position,
-                    pointer_start: pointer_pos,
-                });
-            }
-            return;
+        if button_code == BTN_LEFT
+            && !modifiers.logo
+            && let Some((surface, _, _, focus, _)) = hit.as_ref()
+        {
+            app.active_canvas_mut().raise(surface);
+            keyboard.set_focus(app, Some(focus.clone()), SERIAL_COUNTER.next_serial());
         }
-        if modifiers.logo && button_code == BTN_RIGHT {
-            if let Some((surface, position, size, _, _)) = hit {
-                app.drag = Some(Drag::Resize {
-                    surface,
-                    size_start: (size.w.max(1.0) as i32, size.h.max(1.0) as i32).into(),
-                    window_start: position,
-                    pointer_start: pointer_pos,
-                    edge: ResizeEdge::BottomRight,
-                });
-            }
-            return;
-        }
-        if button_code == BTN_LEFT {
-            if let Some((surface, position, _, focus, content_hit)) = hit {
-                app.active_canvas_mut().raise(&surface);
-                keyboard.set_focus(app, Some(focus), SERIAL_COUNTER.next_serial());
-                if !content_hit {
-                    app.drag = Some(Drag::Move {
-                        surface,
-                        window_start: position,
-                        pointer_start: pointer_pos,
-                    });
-                    return;
+
+        let origin = hit.as_ref().map_or(
+            nkdhr_ui::GestureOrigin::EmptyCanvas,
+            |(_, _, _, _, content_hit)| {
+                if *content_hit {
+                    nkdhr_ui::GestureOrigin::Window
+                } else {
+                    nkdhr_ui::GestureOrigin::WindowFrame
                 }
-            } else {
-                app.drag = Some(Drag::Pan {
-                    viewport_start: viewport.center,
-                    pointer_start: pointer_pos,
-                    zoom: viewport.zoom,
-                });
+            },
+        );
+        if let Some(button) = action_button(button_code)
+            && let Some(binding) = find_binding(
+                app,
+                binding_context_for_origin(app, origin),
+                &nkdhr_ui::RuntimeTrigger::Button {
+                    button,
+                    modifiers: action_modifiers(modifiers),
+                    device: pointer_device_class::<B, _>(event),
+                    origin,
+                    phase: nkdhr_ui::KeyPhase::Press,
+                },
+            )
+        {
+            let target =
+                hit.as_ref().map(
+                    |(surface, position, size, _, _)| crate::actions::PointerTarget {
+                        surface: surface.clone(),
+                        position: *position,
+                        size: (
+                            size.w.round().max(1.0) as i32,
+                            size.h.round().max(1.0) as i32,
+                        )
+                            .into(),
+                    },
+                );
+            if crate::actions::begin_pointer_binding(
+                app,
+                &binding,
+                crate::actions::CanvasActionPayload::PointerStart {
+                    pointer: pointer_pos,
+                    target,
+                    viewport,
+                    resize_edge: None,
+                },
+            ) {
+                return;
+            }
+        }
+
+        if button_code == BTN_LEFT
+            && let Some((surface, _, _, focus, content_hit)) = hit
+        {
+            app.active_canvas_mut().raise(&surface);
+            keyboard.set_focus(app, Some(focus), SERIAL_COUNTER.next_serial());
+            if !content_hit {
                 return;
             }
         }
@@ -1030,6 +1331,42 @@ fn ui_modifiers(state: smithay::input::keyboard::ModifiersState) -> nkdhr_ui::Mo
     }
 }
 
+fn action_modifiers(state: smithay::input::keyboard::ModifiersState) -> nkdhr_ui::ModifierSet {
+    let mut modifiers = Vec::with_capacity(4);
+    if state.ctrl {
+        modifiers.push(nkdhr_ui::Modifier::Control);
+    }
+    if state.alt {
+        modifiers.push(nkdhr_ui::Modifier::Alt);
+    }
+    if state.shift {
+        modifiers.push(nkdhr_ui::Modifier::Shift);
+    }
+    if state.logo {
+        modifiers.push(nkdhr_ui::Modifier::Logo);
+    }
+    nkdhr_ui::ModifierSet::new(modifiers)
+}
+
+fn action_button(button: u32) -> Option<nkdhr_ui::ButtonCode> {
+    match button {
+        BTN_LEFT => Some(nkdhr_ui::ButtonCode::Primary),
+        BTN_RIGHT => Some(nkdhr_ui::ButtonCode::Secondary),
+        0x112 => Some(nkdhr_ui::ButtonCode::Middle),
+        0x116 => Some(nkdhr_ui::ButtonCode::Back),
+        0x115 => Some(nkdhr_ui::ButtonCode::Forward),
+        _ => None,
+    }
+}
+
+fn pointer_device_class<B: InputBackend, E: Event<B>>(event: &E) -> nkdhr_ui::DeviceClass {
+    if event.device().has_capability(DeviceCapability::Gesture) {
+        nkdhr_ui::DeviceClass::Touchpad
+    } else {
+        nkdhr_ui::DeviceClass::Mouse
+    }
+}
+
 fn ui_key(sym: Keysym) -> nkdhr_ui::Key {
     match sym {
         Keysym::Tab => nkdhr_ui::Key::Tab,
@@ -1072,7 +1409,7 @@ fn axis_frame<B: InputBackend>(event: &B::PointerAxisEvent) -> AxisFrame {
     frame
 }
 
-fn gesture_pan_center(
+pub(crate) fn gesture_pan_center(
     center: Point<f64, World>,
     delta: Point<f64, Logical>,
     zoom: f64,
@@ -1105,7 +1442,7 @@ fn handle_overview_click(app: &mut App, pointer: &PointerHandle<App>, group: &In
     }
 }
 
-fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
+pub(crate) fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
     let grid = { app.interaction_settings.lock().unwrap().grid };
     match drag {
         Drag::Move {
@@ -1158,7 +1495,7 @@ fn apply_drag(app: &mut App, drag: &Drag, pointer_pos: Point<f64, Logical>) {
     }
 }
 
-fn finish_drag(app: &mut App, drag: &Drag) {
+pub(crate) fn finish_drag(app: &mut App, drag: &Drag) {
     let Drag::Move { surface, .. } = drag else {
         if matches!(drag, Drag::Pan { .. }) {
             animate_viewport_snap(app);
@@ -1183,14 +1520,14 @@ fn finish_drag(app: &mut App, drag: &Drag) {
         .animate_position(surface, target, WINDOW_SNAP_TRANSITION);
 }
 
-fn snapped_viewport(grid: GridSettings, viewport: Viewport) -> Viewport {
+pub(crate) fn snapped_viewport(grid: GridSettings, viewport: Viewport) -> Viewport {
     Viewport {
         center: (grid.snap(viewport.center.x), grid.snap(viewport.center.y)).into(),
         ..viewport
     }
 }
 
-fn animate_viewport_snap(app: &mut App) {
+pub(crate) fn animate_viewport_snap(app: &mut App) {
     if app.active_view().in_overview {
         return;
     }
@@ -1265,19 +1602,33 @@ pub fn begin_client_move(app: &mut App, surface: &WlSurface) -> bool {
     let Some(pointer_focus) = pointer.current_focus() else {
         return false;
     };
-    let Some(window) =
-        app.active_canvas().windows().iter().find(|window| {
-            window.matches_surface(surface) && window.matches_surface(&pointer_focus)
+    let Some(target) = app
+        .active_canvas()
+        .windows()
+        .iter()
+        .find(|window| window.matches_surface(surface) && window.matches_surface(&pointer_focus))
+        .map(|window| crate::actions::PointerTarget {
+            surface: surface.clone(),
+            position: window.position,
+            size: (
+                window.size().w.round().max(1.0) as i32,
+                window.size().h.round().max(1.0) as i32,
+            )
+                .into(),
         })
     else {
         return false;
     };
-    app.drag = Some(Drag::Move {
-        surface: surface.clone(),
-        window_start: window.position,
-        pointer_start: pointer.current_location(),
-    });
-    true
+    crate::actions::begin_named_pointer(
+        app,
+        "canvas.window.move",
+        crate::actions::CanvasActionPayload::PointerStart {
+            pointer: pointer.current_location(),
+            target: Some(target),
+            viewport: app.active_view().viewport,
+            resize_edge: None,
+        },
+    )
 }
 
 /// Begin a client-requested edge resize after the shell protocol has
@@ -1292,29 +1643,36 @@ pub fn begin_client_resize(app: &mut App, surface: &WlSurface, edge: ResizeEdge)
     let Some(pointer_focus) = pointer.current_focus() else {
         return false;
     };
-    let Some(window) =
-        app.active_canvas().windows().iter().find(|window| {
-            window.matches_surface(surface) && window.matches_surface(&pointer_focus)
+    let Some(target) = app
+        .active_canvas()
+        .windows()
+        .iter()
+        .find(|window| window.matches_surface(surface) && window.matches_surface(&pointer_focus))
+        .map(|window| crate::actions::PointerTarget {
+            surface: surface.clone(),
+            position: window.position,
+            size: (
+                window.size().w.round().max(1.0) as i32,
+                window.size().h.round().max(1.0) as i32,
+            )
+                .into(),
         })
     else {
         return false;
     };
-    let size = window.size();
-    app.drag = Some(Drag::Resize {
-        surface: surface.clone(),
-        size_start: (
-            size.w.round().max(1.0) as i32,
-            size.h.round().max(1.0) as i32,
-        )
-            .into(),
-        window_start: window.position,
-        pointer_start: pointer.current_location(),
-        edge,
-    });
-    true
+    crate::actions::begin_named_pointer(
+        app,
+        "canvas.window.resize",
+        crate::actions::CanvasActionPayload::PointerStart {
+            pointer: pointer.current_location(),
+            target: Some(target),
+            viewport: app.active_view().viewport,
+            resize_edge: Some(edge),
+        },
+    )
 }
 
-fn focused_surface(app: &App) -> Option<WlSurface> {
+pub(crate) fn focused_surface(app: &App) -> Option<WlSurface> {
     app.seat
         .get_keyboard()?
         .current_focus()?

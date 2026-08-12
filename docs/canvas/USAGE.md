@@ -191,7 +191,7 @@ or pointer input and are never rendered or exposed through screencopy.
   windows and still delivers the click itself to whatever you clicked on);
   `alt+tab` cycles focus among windows currently mapped, independent of
   where the pointer is. Focus does not follow the mouse.
-- **Close a window**: `super+q` (without needing to find a close button —
+- **Close a window**: `super+escape` (without needing to find a close button —
   there isn't one yet, same reasoning as move/resize above).
 
 ## Multiple canvases and multi-monitor
@@ -248,26 +248,31 @@ active.
 
 ## Keybindings
 
-The three bindings and the grid policy are configurable. Bindings specify
-the key only, each combined with a fixed modifier (Super for close/overview,
-Alt for cycling focus):
+UI-6 replaces the former fixed-modifier leaves with one typed schema-v1
+document. Every keyboard, mouse and touchpad binding maps a normalized trigger
+to a registered action and validated scalar arguments. The document is a JSON
+string because CTRL-5 currently exposes scalar leaves:
 
 ```
-nkdhrctl config set canvas.close_window <key>    # default q, held with Super
-nkdhrctl config set canvas.cycle_focus <key>     # default Tab, held with Alt
-nkdhrctl config set canvas.overview <key>        # default o, held with Super
+nkdhrctl config set canvas.bindings '<schema-v1-json>'
 nkdhrctl config set canvas.snap_to_grid <bool>   # default true
 nkdhrctl config set canvas.grid_size <integer>   # default 32
 ```
 
-`<key>` is an xkbcommon key name (`q`, `Tab`, `F4`, ...); changes take
-effect immediately in a running nkdhr-canvas, no restart needed. An
-unrecognized key name is logged and ignored (the built-in default stays
-active) rather than breaking the binding. Pan (`super+arrow`, empty-canvas
-click-drag, three-finger swipe), move/resize
-(`super+drag`/`super+right-drag`), mark
-set/jump (`super+shift+<0-9>`/`super+<0-9>`), and `Esc` aren't
-configurable yet. The binding and grid settings above all go through CTRL-5.
+The default empty value selects the complete built-in structured map while
+still honoring the three legacy key leaves during migration. A non-empty
+document is authoritative. Changes publish immediately without restart only
+when the complete candidate is valid. Unknown actions, wrong arguments,
+duplicate IDs and trigger conflicts reject the candidate while the exact last
+effective generation remains active; absent TTY/touchpad capabilities remain
+visible as unsupported diagnostics rather than silently dead shortcuts.
+
+Defaults are Super+Escape close, Alt+Tab focus cycle, Super+O overview,
+Super+arrows or standard Vim H/J/K/L canvas pan, Super+Shift+direction focused
+window move, Super+Ctrl+direction focused window resize, and the existing mark
+bindings. Pointer move/resize/empty-canvas pan and TTY three-finger swipe/pinch
+are in the same document. Client two-finger scroll and complete touchscreen
+sequences are not captured. See the UI stack guide for the exact JSON grammar.
 
 ## Troubleshooting
 
@@ -292,8 +297,8 @@ configurable yet. The binding and grid settings above all go through CTRL-5.
   the session reports `locked: true`, canvas input is intentionally
   routed to the lock screen only.
 - Marks or keybindings didn't survive a restart: check `nkdhrctl config
-  get canvas.marks` and individual binding leaves such as
-  `canvas.overview` — an external edit that failed
-  validation keeps the last-known-good value; see the control-plane
+  get canvas.marks` and `canvas.bindings`. A compositor-rejected binding
+  candidate keeps its previous effective generation; an external namespace
+  edit that failed validation keeps the last-known-good value. See the control-plane
   USAGE.md's troubleshooting section for how to find the rejection
   reason.

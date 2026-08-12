@@ -68,7 +68,11 @@ generation 排序，因此较慢的旧壁纸结果不能覆盖新结果；更新
 精确 paint/layout 影响，稀疏 profile 值不能替换内置项或携带代码，无效组会保留上一份
 有效快照。设置/资料库事务与 retained 组件使用同一份不可变值。多 root 测试证明共享
 runtime 的显示器仍只在各自本地活动边界同步，也覆盖直接跨过中间 generation 的情况。
-独立 Wayland/合成器内窗口宿主仍属于后续里程碑。
+UI-5 现已让同一个 retained Settings 表面分别通过合成器直接 display list 与独立
+Wayland/EGL 窗口运行。UI-6 完成类型化交互基础：有界且可热重载的键盘/按钮/手势
+文档、经过验证的命名 action、最后有效快照、冲突诊断以及唯一的 instant/continuous
+dispatcher 共同接管已有画布输入词汇；Settings 直接消费同一份有效快照而不自行重建。
+Phase 3 下一步进入 UI-7，并从与项目所有者共同确定专业运动编辑器的设计开始。
 
 ## 文档
 
@@ -84,6 +88,12 @@ runtime 的显示器仍只在各自本地活动边界同步，也覆盖直接跨
   [English](docs/canvas/EXTENDING.md)
 - [主题扩展令牌](docs/theme/EXTENDING_zh_CN.md) ·
   [English](docs/theme/EXTENDING.md)
+- [共享 UI 用户与应用开发指南](docs/ui/USAGE_zh_CN.md) ·
+  [English](docs/ui/USAGE.md)
+- [共享 UI 内部实现](docs/ui/INTERNALS_zh_CN.md) ·
+  [English](docs/ui/INTERNALS.md)
+- [共享 UI 扩展规则](docs/ui/EXTENDING_zh_CN.md) ·
+  [English](docs/ui/EXTENDING.md)
 
 ## 协议
 

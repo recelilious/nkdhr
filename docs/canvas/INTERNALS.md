@@ -184,9 +184,10 @@ not a structure imposed up front.
 `CompositorState` (`wl_compositor`/`wl_subcompositor`, buffer commit),
 `ShmState` (`wl_shm`), `DmabufState` (`zwp_linux_dmabuf_v1`), `XdgShellState`
 (`xdg_wm_base` — toplevels and popups), `SeatState` + one `Seat`
-(`wl_seat` — keyboard and pointer; touch is declared via
-`SeatHandler::TouchFocus` but nothing feeds it yet, no touch hardware to
-test against). `DataDeviceState` (clipboard/DnD) is also wired up already,
+(`wl_seat` — keyboard, pointer and touch). UI-6 feeds complete touch
+down/motion/up/frame/cancel sequences to Smithay; touchscreen compositor
+gestures remain unavailable until an empty-canvas/edge recognizer exists.
+`DataDeviceState` (clipboard/DnD) is also wired up already,
 matching `minimal.rs`, even though COMP-2's own verification list doesn't
 exercise it — skipping it would mean *removing* handler impls again in
 COMP-6 rather than adding to them, and the four `SelectionHandler`/
@@ -348,31 +349,18 @@ raise/cycle), not a wrapper around Smithay's `desktop` module.
   involved at all. This sidesteps `PointerGrab`'s large trait surface
   (every gesture/axis/relative-motion method needs an implementation,
   even as a pass-through) for something that doesn't need it.
-- **Interaction settings**: `canvas.close_window` (default `q`, held with
-  Super), `canvas.cycle_focus` (default `Tab`, held with Alt),
-  `canvas.overview`, `canvas.snap_to_grid` and `canvas.grid_size` — CTRL-5's
-  first real production namespace
-  (`nkdhrd/src/namespaces/canvas.rs`). Values are xkbcommon key names
-  (`xkb::keysym_from_name`), each combined with one fixed,
-  not-independently-configurable modifier — enough to prove hot-reload
-  end to end without a general modifier+key parser nothing else needs
-  yet. `nkdhrd` validates only what it can judge generically (non-empty);
-  it does not depend on `xkbcommon` just to check a value is a *real* key
-  name, since that's `nkdhr-canvas`'s domain knowledge, not the
-  config-store daemon's — an unrecognized name round-trips through the
-  store fine, and `nkdhr-canvas` logs a warning and falls back to its own
-  built-in default (not to whatever the previous value was) rather than
-  erroring. All five interaction settings hot-reload through one
-  `Config1.Changed` watcher; invalid grid intervals are rejected by
-  `nkdhrd` before reaching the compositor.
-
-This deliberately remains a narrow Phase 2 binding surface. The project
-owner chose to design the typed action registry, central dispatcher and full
-key/modifier/gesture configuration together with toolkit-backed interaction
-feedback in Phase 3 (`UI-6`), instead of introducing half of that architecture
-at the compositor-prototype boundary. Phase 2 input therefore continues to
-recognize its fixed gestures directly in `input.rs`; configuration names only
-the three keysyms and grid policy above. No configuration value executes code.
+- **Interaction settings**: UI-6 adds the bounded scalar `canvas.bindings`, a
+  schema-v1 JSON document compiled by `nkdhr-ui` into key/button/gesture
+  triggers and typed action invocations. Empty selects the canonical complete
+  document and reads the three old keys as migration inputs; non-empty is
+  authoritative. `nkdhrd` owns only the 1 MiB scalar bound. Domain validation,
+  conflict analysis, device/capability availability, last-known-good
+  generation and structured diagnostics belong to the compositor/shared UI
+  compiler. `canvas.snap_to_grid` and `canvas.grid_size` remain ordinary typed
+  leaves. The watcher publishes the complete binding candidate atomically;
+  `input.rs` only normalizes events and looks up a compiled trigger, while
+  `actions.rs` centrally maps stable action IDs to canvas operations. No
+  configuration value executes code.
 
 **Verified live**, nested inside a temporary
 `weston --backend=headless --renderer=pixman` host with `nkdhrd` also
@@ -432,19 +420,21 @@ formal state-machine enum — two fields remain simpler than a third
     backends calculate the next global point from that handle; updating the
     viewport without updating the pointer would make every event start from
     the original press and appear to freeze a touchpad drag.
-  - Touchpad: the TTY/libinput backend's exactly-three-finger
-    `GestureSwipeBegin`/`Update`/`End` sequence is compositor-owned and
-    translates the swipe delta into `viewport.center` movement. Two-finger
+  - Touchpad: the typed default map owns exactly-three-finger swipe as
+    `canvas.viewport.pan` and exactly-three-finger pinch as
+    `canvas.viewport.pinch`. Swipe translates delta into `viewport.center`;
+    pinch preserves its initial world-space anchor beneath the moving logical
+    center while changing zoom. Two-finger
     scrolling remains an ordinary `InputEvent::PointerAxis`; it is forwarded
     unchanged to the pointer-focused Wayland client (after a pinned node gets
     first refusal), exactly like a mouse wheel. Treating every axis event as
     canvas pan made application lists impossible to scroll and was rejected
-    by the first real GTK/TTY test. Other swipe finger counts remain available
+    by the first real GTK/TTY test. Other unbound finger counts remain available
     through the standard pointer-gestures protocol. The nested winit backend
     types native gesture events as `UnusedEvent`, so three-finger canvas pan
     is a TTY-session feature; ordinary application scrolling still works on
     both backends.
-  - Keyboard: `super+arrow`, a fixed step per press (`PAN_STEP` world
+  - Keyboard: `super+arrow` or standard Vim H/J/K/L, a fixed step per press (`PAN_STEP` world
     units) rendered through a short ease-out transition. A new press starts
     from the currently displayed viewport but adds its step to the previous
     animation's destination, so rapid/repeated input coalesces rather than

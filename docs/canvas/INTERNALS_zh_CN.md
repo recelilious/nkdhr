@@ -123,7 +123,9 @@ COMP-2 增加真实 `wayland_server::Display` 和 `ListeningSocket::bind_auto` s
 `App` 持有 COMP-2 所需的五类 `wayland_frontend` 状态：
 `CompositorState`（`wl_compositor`/`wl_subcompositor`、buffer commit）、
 `ShmState`、`DmabufState`、`XdgShellState`（`xdg_wm_base`，含 toplevel/popup）及
-`SeatState` 和一个 `Seat`（键盘、指针；touch 在 trait 中声明但没有硬件输入）。
+`SeatState` 和一个 `Seat`（键盘、指针、触屏）。UI-6 已将完整的触屏 down/motion/up/
+frame/cancel 序列交给 Smithay；在空白画布/边缘识别器完成前，触屏合成器手势会显示为
+不支持。
 `DataDeviceState`（剪贴板/DnD）也按 `minimal.rs` 接好。即使 COMP-2 的验证表未覆盖，
 省略它会导致 COMP-6 先删除再添加处理器；所需四个 selection/DnD handler 只是少量
 样板，并非新子系统。
@@ -196,19 +198,13 @@ raise 和 cycle 定制的小模型，不是 Smithay desktop 的包装。
   因而单击后台窗口会切换窗口并激活所点内容。`cycle_focus`（默认 Alt+Tab）不依赖
   指针位置。修饰键移动/缩放不实现 Smithay `PointerGrab`：后者用于协议可见 grab，
   而窗口管理器级手势在事件发往 seat 前就由合成器自己识别，无协议对象参与。
-- **交互设置**：`canvas.close_window`（默认 `q` + Super）、
-  `canvas.cycle_focus`（默认 `Tab` + Alt）、`canvas.overview`、
-  `canvas.snap_to_grid`、`canvas.grid_size` 是 CTRL-5 的第一个正式生产命名空间
-  （`nkdhrd/src/namespaces/canvas.rs`）。键值使用 xkbcommon 名称，每项结合一个固定
-  修饰键；这足以证明热重载，不提前构造尚无其他使用方的通用组合解析器。
-  `nkdhrd` 只校验非空等通用规则，不依赖 xkbcommon 判断真实键名；无法识别的名称
-  可在存储中往返，合成器会记录警告并退回自己的内置默认值，而非此前值。五项设置
-  通过一个 `Config1.Changed` watcher 热重载；无效网格间距在到达合成器前被拒绝。
-
-Phase 2 有意保持狭窄的按键配置面。项目所有者决定把类型化 action registry、中央
-dispatcher、完整键/修饰键/手势配置，以及工具包支持的交互反馈，一并放到 Phase 3
-（UI-6）设计，而不是在合成器原型边界只做一半架构。因此固定手势仍由 `input.rs`
-直接识别；配置只指定三项 keysym 与网格策略，且任何配置值都不会执行代码。
+- **交互设置**：UI-6 新增有 1 MiB 上限的标量 `canvas.bindings`，其 schema-v1 JSON
+  由 `nkdhr-ui` 编译为键盘/按钮/手势触发器及类型化 action 调用。空值选择完整标准
+  文档，并把三个旧按键叶子作为迁移输入；非空文档具有最高权威。`nkdhrd` 只负责
+  标量大小边界；领域校验、冲突分析、设备/能力可用性、最后有效代次和结构化诊断均
+  属于合成器/共享 UI 编译器。`canvas.snap_to_grid` 与 `canvas.grid_size` 仍是普通
+  类型化叶子。watcher 原子发布整个候选；`input.rs` 只规范化事件并查询编译结果，
+  `actions.rs` 集中把稳定 action ID 映射到画布操作。任何配置值都不会执行代码。
 
 **实机验证记录**：在临时 headless Weston 与运行中的 `nkdhrd` 下同时启动 12 个
 `weston-simple-shm` 客户端，它们按设计落到 10 个不同世界位置并循环，无崩溃。
@@ -238,14 +234,15 @@ dispatcher、完整键/修饰键/手势配置，以及工具包支持的交互�
     motion 仍会更新 Smithay `PointerHandle` 位置并使用 `focus = None`。相对输入后端
     从该位置计算下一点；若只改视口不更新指针，每个事件都会从原按下点起算，
     触控板拖动看起来就会冻结。
-  - 触控板：TTY/libinput 后端中，恰好三指的 `GestureSwipeBegin`/`Update`/`End`
-    由合成器占用，并将 delta 转换为 `viewport.center` 移动。双指滚动仍是普通
+  - 触控板：类型化默认映射把恰好三指滑动注册为 `canvas.viewport.pan`，把恰好
+    三指捏合注册为 `canvas.viewport.pinch`。滑动把 delta 转为 `viewport.center`
+    移动；捏合在改变 zoom 时，让开始时的世界锚点保持在移动中的逻辑中心下。双指滚动仍是普通
     `InputEvent::PointerAxis`，在固定节点优先处理后原样发给当前指针焦点客户端，
     等同鼠标滚轮。早期把所有 axis 当成画布平移，导致 GTK 列表无法滚动，首次真实
-    TTY 测试后被否决。其他指头数量通过标准 pointer-gestures 协议保留给应用。
+    TTY 测试后被否决。其他未绑定指头数量通过标准 pointer-gestures 协议保留给应用。
     嵌套 winit 把原生 gesture 类型视为 `UnusedEvent`，因此三指画布平移是 TTY
     功能；普通应用滚动两个后端都支持。
-  - 键盘：`super+方向键` 每次移动固定 `PAN_STEP` 世界单位，并使用短暂 ease-out。
+  - 键盘：`super+方向键` 或标准 Vim H/J/K/L 每次移动固定 `PAN_STEP` 世界单位，并使用短暂 ease-out。
     新按键从当前显示视口开始，却把步长叠加到前一个动画目标，连续快速输入会合并，
     不丢距离也不闪过断裂位置。不能使用裸方向键，因为焦点客户端的文本光标等需要它；
     Smithay 普通键盘 repeat 会产生重复按下，无需合成器计时器。

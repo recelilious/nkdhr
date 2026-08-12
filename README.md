@@ -97,8 +97,15 @@ values cannot replace built-ins or carry code, and invalid groups preserve the
 last-good snapshot. Registry-aware Settings/library transactions and retained
 widgets use the same immutable values. Multi-root tests prove that displays
 sharing one runtime still synchronize only at their own local activity
-boundaries, including direct jumps across skipped generations. The standalone/
-in-compositor window hosts still belong to later milestones.
+boundaries, including direct jumps across skipped generations. UI-5 now runs
+the identical retained Settings surface through both a compositor-owned direct
+display list and a standalone Wayland/EGL window. UI-6 completes the typed
+interaction foundation: bounded hot-reloadable key/button/gesture documents,
+validated named actions, last-known-good snapshots, conflict diagnostics and
+one central instant/continuous dispatcher now own the existing canvas input
+vocabulary. Settings consumes the same effective snapshot rather than
+reconstructing it. Phase 3 next moves to UI-7's owner-guided professional
+motion editor design.
 
 ## Documentation
 
@@ -114,6 +121,12 @@ in-compositor window hosts still belong to later milestones.
   [中文](docs/canvas/EXTENDING_zh_CN.md)
 - [Theme extension tokens](docs/theme/EXTENDING.md) ·
   [中文](docs/theme/EXTENDING_zh_CN.md)
+- [Shared UI user and application guide](docs/ui/USAGE.md) ·
+  [中文](docs/ui/USAGE_zh_CN.md)
+- [Shared UI internals](docs/ui/INTERNALS.md) ·
+  [中文](docs/ui/INTERNALS_zh_CN.md)
+- [Shared UI extension rules](docs/ui/EXTENDING.md) ·
+  [中文](docs/ui/EXTENDING_zh_CN.md)
 
 ## License
 

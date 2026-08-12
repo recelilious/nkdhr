@@ -219,10 +219,13 @@ pub struct App {
     /// The in-progress `super+drag` move/resize interaction, if any —
     /// `input.rs` is the only thing that reads or writes this.
     pub drag: Option<Drag>,
-    /// Whether the current libinput swipe belongs to the compositor's
-    /// exactly-three-finger canvas-pan gesture. Other swipe counts are
-    /// forwarded through the Wayland pointer-gestures protocol.
-    pub canvas_swipe_active: bool,
+    pub pinch_state: Option<crate::actions::PinchState>,
+    pub pointer_action: Option<nkdhr_ui::InteractionId>,
+    pub gesture_action: Option<nkdhr_ui::InteractionId>,
+    pub suppress_pointer_release: bool,
+    pub suppress_gesture_remainder: bool,
+    pub action_dispatcher: Option<crate::actions::CanvasActionDispatcher>,
+    pub binding_generation: u64,
     /// Hot-reloadable keybindings and grid policy from CTRL-5's `canvas`
     /// namespace, shared with the `Config1.Changed` watcher.
     pub interaction_settings: Arc<Mutex<InteractionSettings>>,
@@ -243,6 +246,7 @@ impl App {
         let mut seat = seat_state.new_wl_seat(display_handle, "nkdhr-canvas");
         seat.add_keyboard(Default::default(), 200, 200)?;
         seat.add_pointer();
+        seat.add_touch();
 
         let marks = crate::canvas::marks::load();
         let mark_count = marks.values().map(|marks| marks.len()).sum::<usize>();
@@ -269,6 +273,13 @@ impl App {
             GroupView::new(DEFAULT_CANVAS.to_owned()),
         )]);
 
+        let interaction_settings = crate::settings::watch();
+        let binding_generation = interaction_settings
+            .lock()
+            .unwrap()
+            .binding_snapshot()
+            .generation();
+
         Ok(Self {
             start_time: Instant::now(),
             display_handle: display_handle.clone(),
@@ -288,8 +299,14 @@ impl App {
             visible_canvases: BTreeSet::new(),
             active_group: DEFAULT_GROUP.to_owned(),
             drag: None,
-            canvas_swipe_active: false,
-            interaction_settings: crate::settings::watch(),
+            pinch_state: None,
+            pointer_action: None,
+            gesture_action: None,
+            suppress_pointer_release: false,
+            suppress_gesture_remainder: false,
+            action_dispatcher: Some(crate::actions::dispatcher()),
+            binding_generation,
+            interaction_settings,
             marks,
             vt_switching_enabled: false,
             pending_vt_switch: None,
@@ -298,6 +315,10 @@ impl App {
 
     pub fn enable_vt_switching(&mut self) {
         self.vt_switching_enabled = true;
+        self.interaction_settings
+            .lock()
+            .unwrap()
+            .enable_tty_capabilities();
     }
 
     pub fn vt_switching_enabled(&self) -> bool {
@@ -349,9 +370,9 @@ impl App {
 
     pub fn activate_group(&mut self, group: &str) {
         if self.group_views.contains_key(group) && self.active_group != group {
+            crate::actions::cancel(self, nkdhr_ui::TerminalReason::FocusChanged);
             let focus = self.group_views[group].keyboard_focus.clone();
             self.active_group = group.to_owned();
-            self.drag = None;
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, focus, smithay::utils::SERIAL_COUNTER.next_serial());
             }
@@ -440,7 +461,7 @@ impl App {
             Drag::Move { surface, .. } | Drag::Resize { surface, .. } => !surface.is_alive(),
             Drag::Pan { .. } => false,
         }) {
-            self.drag = None;
+            crate::actions::cancel(self, nkdhr_ui::TerminalReason::TargetDestroyed);
         }
         if self
             .dnd_icon
@@ -677,6 +698,17 @@ impl XdgShellHandler for App {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        if self.drag.as_ref().is_some_and(|drag| match drag {
+            Drag::Move {
+                surface: target, ..
+            }
+            | Drag::Resize {
+                surface: target, ..
+            } => target == surface.wl_surface(),
+            Drag::Pan { .. } => false,
+        }) {
+            crate::actions::cancel(self, nkdhr_ui::TerminalReason::TargetDestroyed);
+        }
         for canvas in self.canvases.values_mut() {
             canvas.unmap(surface.wl_surface());
         }
@@ -704,6 +736,9 @@ impl SeatHandler for App {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocusTarget>) {
+        if self.pointer_action.is_some() || self.gesture_action.is_some() {
+            crate::actions::cancel(self, nkdhr_ui::TerminalReason::FocusChanged);
+        }
         if !self.session_locked() {
             self.active_view_mut().keyboard_focus = focused.cloned();
         }

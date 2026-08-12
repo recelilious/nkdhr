@@ -241,8 +241,7 @@ impl SessionLockHandler for App {
         self.protocols.lock.confirmation = Some(confirmation);
         self.protocols.lock.presented_outputs.clear();
         self.protocols.lock.surfaces.clear();
-        self.drag = None;
-        self.canvas_swipe_active = false;
+        crate::actions::cancel(self, nkdhr_ui::TerminalReason::SessionLocked);
         self.dnd_icon = None;
 
         if let Some(keyboard) = self.seat.get_keyboard() {

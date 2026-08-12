@@ -10,7 +10,13 @@ use crate::backends::config_store::Namespace;
 /// position marks — related concerns of the same component, not enough
 /// distinct structure between them to earn separate namespaces.
 ///
-/// `close_window`/`cycle_focus`/`overview` are xkbcommon key names (e.g.
+/// `bindings` is the authoritative UI-6 schema-v1 JSON document compiled by
+/// `nkdhr-ui`. The daemon keeps it as one bounded scalar because CTRL-5 does
+/// not yet expose arrays/tables as D-Bus leaves and deliberately does not take
+/// on compositor action-domain validation. An empty value selects the
+/// compositor's complete built-in document. `close_window`/`cycle_focus`/
+/// `overview` remain migration inputs for an empty document and are xkbcommon
+/// key names (e.g.
 /// `"q"`, `"Tab"`, `"F4"` — the same names `xkb::keysym_from_name`
 /// accepts), each combined with a fixed modifier `nkdhr-canvas` itself
 /// decides (Super for `close_window`/`overview`, Alt for `cycle_focus`) —
@@ -52,6 +58,7 @@ use crate::backends::config_store::Namespace;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CanvasSettings {
+    pub bindings: String,
     pub close_window: String,
     pub cycle_focus: String,
     pub overview: String,
@@ -68,7 +75,8 @@ pub struct CanvasSettings {
 impl Default for CanvasSettings {
     fn default() -> Self {
         Self {
-            close_window: "q".to_owned(),
+            bindings: String::new(),
+            close_window: "Escape".to_owned(),
             cycle_focus: "Tab".to_owned(),
             overview: "o".to_owned(),
             snap_to_grid: true,
@@ -83,6 +91,9 @@ impl Namespace for CanvasSettings {
     const NAME: &'static str = "canvas";
 
     fn validate(&self) -> Result<(), String> {
+        if self.bindings.len() > 1_048_576 {
+            return Err("bindings must not exceed 1 MiB".to_owned());
+        }
         if self.close_window.trim().is_empty() {
             return Err("close_window must not be empty".to_owned());
         }

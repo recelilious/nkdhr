@@ -145,7 +145,7 @@ nkdhrctl config set canvas.grid_size 64
 - **焦点**：单击窗口使其获得焦点并升到其他窗口上方，同时点击事件仍会传给实际
   单击的内容；`alt+tab` 在所有已映射窗口间循环焦点，不受指针位置影响。
   焦点不会跟随鼠标。
-- **关闭窗口**：`super+q`（无需寻找关闭按钮——目前没有，理由与上述移动/缩放相同）。
+- **关闭窗口**：`super+escape`（无需寻找关闭按钮——目前没有，理由与上述移动/缩放相同）。
 
 ## 多画布与多显示器
 
@@ -188,23 +188,25 @@ connector 名称就是输出连接时 nkdhr-canvas 打印的 DRM 名称。坐标
 
 ## 快捷键
 
-三项按键与网格策略可配置。按键配置只指定键本身，并分别结合固定修饰键
-（关闭/总览用 Super，循环焦点用 Alt）：
+UI-6 已用一个类型化 schema-v1 文档取代固定修饰键的旧叶子。键盘、鼠标和触控板
+绑定都把规范化触发器映射到已注册 action 与校验后的标量参数。CTRL-5 目前只支持
+标量叶子，因此完整文档以 JSON 字符串保存：
 
 ```
-nkdhrctl config set canvas.close_window <key>    # 默认 q，与 Super 同按
-nkdhrctl config set canvas.cycle_focus <key>     # 默认 Tab，与 Alt 同按
-nkdhrctl config set canvas.overview <key>        # 默认 o，与 Super 同按
+nkdhrctl config set canvas.bindings '<schema-v1-json>'
 nkdhrctl config set canvas.snap_to_grid <bool>   # 默认 true
 nkdhrctl config set canvas.grid_size <integer>   # 默认 32
 ```
 
-`<key>` 是 xkbcommon 键名（`q`、`Tab`、`F4` 等）。运行中的 nkdhr-canvas
-会立即应用更改，无需重启。无法识别的键名会被记录并忽略（继续使用内置默认值），
-不会破坏绑定。平移（`super+方向键`、空白画布左键拖动、三指滑动）、移动/缩放
-（`super+拖动`/`super+右键拖动`）、标记设置/跳转
-（`super+shift+<0-9>`/`super+<0-9>`）和 `Esc` 暂不可配置。
-上述按键和网格设置都通过 CTRL-5 管理。
+默认空值会选择完整的内置结构化映射，并在迁移期间继续读取三个旧按键叶子；非空
+文档则具有最高权威。只有完整候选通过校验才会即时发布，无需重启。未知 action、
+错误参数、重复 ID 或触发器冲突会拒绝整个候选并保留完全相同的上一代有效映射；
+缺少 TTY/触控板能力则显示为“不支持”诊断，而不是静默产生死快捷键。
+
+默认包括 Super+Escape 关闭、Alt+Tab 切换焦点、Super+O 总览、Super+方向键或标准
+Vim H/J/K/L 平移画布、Super+Shift+方向移动聚焦窗口、Super+Ctrl+方向调整聚焦窗口
+右/下边，以及原有标记绑定。指针移动/缩放/空白画布平移与 TTY 三指滑动/捏合也在
+同一文档内。客户端两指滚动和完整触屏序列不会被捕获。精确 JSON 语法见 UI 栈指南。
 
 ## 故障排查
 
@@ -221,5 +223,6 @@ nkdhrctl config set canvas.grid_size <integer>   # 默认 32
 - 窗口无法移动、缩放或获得焦点：查看 `nkdhrctl watch session`；若会话报告
   `locked: true`，画布输入正按设计只路由到锁屏。
 - 位置标记或快捷键重启后未保留：查看 `nkdhrctl config get canvas.marks`
-  及 `canvas.overview` 等单独按键叶子。外部编辑若校验失败会保留最后有效值；
+  与 `canvas.bindings`。合成器拒绝的绑定候选会保留上一代有效映射；命名空间外部
+  编辑校验失败会保留最后有效值；
   如何查找拒绝原因见 control-plane 用户指南的故障排查部分。

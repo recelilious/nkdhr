@@ -16,8 +16,7 @@ nkdhr-render = { version = "0.1.0", path = "../nkdhr-render" }
 nkdhr-theme = { version = "0.1.0", path = "../nkdhr-theme" }
 nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
 oxitext-raster = "0.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 unicode-segmentation = "1.13.3"
 zbus = "5.18.0"
-
-[dev-dependencies]
-serde_json = "1.0.151"
