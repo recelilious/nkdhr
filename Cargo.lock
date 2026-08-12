@@ -1520,7 +1520,9 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "nkdhr-render",
+ "nkdhr-theme",
  "nkdhr-ui",
+ "serde_json",
 ]
 
 [[package]]

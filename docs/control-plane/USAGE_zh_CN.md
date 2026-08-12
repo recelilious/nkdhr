@@ -93,13 +93,15 @@ key 是以点分隔的路径(例如 `theme.profile`、`canvas.grid_size` 和
 生效,不通过则拒绝(保留上一个有效值)并在 journal 中记录诊断信息。
 
 目前已注册的 namespace 是 `canvas` 和 `theme`。UI-4 把完整可移植主题保存为
-单个标量叶子 `theme.profile`:其中是一份带版本的 JSON 文档,由不可变内置/壁纸
-基础和稀疏显式覆盖组成。使用单叶子能让导入、校验、发布和 `Changed` 通知成为
-同一个原子事务。壁纸主题始终携带冻结后的完整调色板,所以导出后即使没有原壁纸
-仍可使用;实时重新生成只替换基础,不会改写显式覆盖对象。可用
-`nkdhrctl config get theme.profile` 查看,或用 `nkdhrctl config watch theme`
-监听。通常应通过设置应用编辑;直接 `config set` 主要用于导入一份已经准备好的
-JSON 文档。
+标量叶子 `theme.profile`:其中是一份带版本的 JSON 文档,由不可变内置/壁纸基础
+和稀疏显式覆盖组成。相邻标量叶子 `theme.library` 则是带版本且经过完整校验的
+用户已保存主题集合。每项操作都保持在一个叶子内,因此各自的导入、校验、发布和
+`Changed` 通知都是同一个原子事务。壁纸主题始终携带冻结后的完整调色板,所以
+导出后即使没有原壁纸仍可使用;实时重新生成只替换基础,不会改写显式覆盖对象。
+可用 `nkdhrctl config get theme.profile`、`nkdhrctl config get theme.library`
+查看,或用 `nkdhrctl config watch theme` 监听。设置应用提供即时预览、取消、保存、
+复制和有界 JSON 导入/导出;直接 `config set` 主要用于导入一份已经准备好且通过
+校验的 JSON 文档。
 
 ## 故障排查
 

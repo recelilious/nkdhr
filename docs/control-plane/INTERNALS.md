@@ -224,10 +224,12 @@ from real console input this session has no way to generate remotely
 CTRL-5 originally shipped with no namespace because CTRL-1 … CTRL-4 had no
 real persisted setting and defining later schemas early would have been
 speculative. COMP-3 subsequently registered `canvas`; UI-4 now registers
-`theme`. The latter contains one scalar `profile` leaf whose JSON payload is
-resolved and fully validated by the shared `nkdhr-theme` data crate before the
-namespace can commit. One leaf is intentional: sparse overrides contain arrays
-and nested structures, while the active theme must change as one atomic unit.
+`theme`. The latter contains scalar `profile` and `library` leaves whose JSON
+payloads are fully validated by the shared `nkdhr-theme` data crate before the
+namespace can commit; the active profile is additionally resolved through all
+inheritance and cross-field rules. One leaf per operation is intentional:
+sparse overrides and saved collections contain arrays and nested structures,
+while an active-theme or library edit must change as one atomic unit.
 The original generic engine remains covered by the test-only namespace in
 `nkdhrd/src/backends/config_store.rs`, and each real namespace adds its own
 validation/last-known-good tests. A later phase registers another namespace by

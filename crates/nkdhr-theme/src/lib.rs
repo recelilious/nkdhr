@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;
+pub const THEME_LIBRARY_SCHEMA_VERSION: u32 = 1;
+pub const MAX_THEME_LIBRARY_PROFILES: usize = 256;
 const MAX_PROFILE_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_THEME_LIBRARY_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -674,6 +677,137 @@ impl ThemeProfile {
     }
 }
 
+/// Versioned collection of user-saved profiles.
+///
+/// Built-in profiles are resolved by the application and do not need to be
+/// copied into this collection. Library mutations validate a complete
+/// candidate before replacing the current value, which gives callers the same
+/// all-or-nothing behavior as the `theme.profile` CTRL-5 leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeProfileLibrary {
+    pub schema_version: u32,
+    pub profiles: Vec<ThemeProfile>,
+}
+
+impl Default for ThemeProfileLibrary {
+    fn default() -> Self {
+        Self {
+            schema_version: THEME_LIBRARY_SCHEMA_VERSION,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+impl ThemeProfileLibrary {
+    pub fn from_json(text: &str) -> Result<Self, ThemeLibraryError> {
+        if text.len() > MAX_THEME_LIBRARY_TEXT_BYTES {
+            return Err(ThemeLibraryError::TooLarge);
+        }
+        let library: Self = serde_json::from_str(text)
+            .map_err(|error| ThemeLibraryError::Syntax(error.to_string()))?;
+        library.validate()?;
+        Ok(library)
+    }
+
+    pub fn to_json(&self) -> Result<String, ThemeLibraryError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|error| ThemeLibraryError::Syntax(error.to_string()))
+    }
+
+    pub fn to_json_pretty(&self) -> Result<String, ThemeLibraryError> {
+        self.validate()?;
+        serde_json::to_string_pretty(self)
+            .map_err(|error| ThemeLibraryError::Syntax(error.to_string()))
+    }
+
+    pub fn validate(&self) -> Result<(), ThemeLibraryError> {
+        if self.schema_version != THEME_LIBRARY_SCHEMA_VERSION {
+            return Err(ThemeLibraryError::UnsupportedVersion(self.schema_version));
+        }
+        if self.profiles.len() > MAX_THEME_LIBRARY_PROFILES {
+            return Err(ThemeLibraryError::TooManyProfiles);
+        }
+        let mut ids = BTreeSet::new();
+        for profile in &self.profiles {
+            profile.resolve().map_err(ThemeLibraryError::Profile)?;
+            if !ids.insert(profile.id.clone()) {
+                return Err(ThemeLibraryError::DuplicateId(profile.id.clone()));
+            }
+        }
+        let size = serde_json::to_vec(self)
+            .map_err(|error| ThemeLibraryError::Syntax(error.to_string()))?
+            .len();
+        if size > MAX_THEME_LIBRARY_TEXT_BYTES {
+            return Err(ThemeLibraryError::TooLarge);
+        }
+        Ok(())
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ThemeProfile> {
+        self.profiles.iter().find(|profile| profile.id == id)
+    }
+
+    /// Insert a profile or replace the saved profile with the same identity.
+    /// The collection is unchanged if the resulting library is invalid.
+    pub fn save(&mut self, profile: ThemeProfile) -> Result<bool, ThemeLibraryError> {
+        profile.resolve().map_err(ThemeLibraryError::Profile)?;
+        let mut candidate = self.clone();
+        let replaced = if let Some(saved) = candidate
+            .profiles
+            .iter_mut()
+            .find(|saved| saved.id == profile.id)
+        {
+            *saved = profile;
+            true
+        } else {
+            candidate.profiles.push(profile);
+            false
+        };
+        candidate.validate()?;
+        *self = candidate;
+        Ok(replaced)
+    }
+
+    /// Copy a saved profile under an explicit new identity and display name.
+    pub fn copy(
+        &mut self,
+        source_id: &str,
+        new_id: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Result<ThemeProfile, ThemeLibraryError> {
+        let mut profile = self
+            .get(source_id)
+            .cloned()
+            .ok_or_else(|| ThemeLibraryError::MissingProfile(source_id.into()))?;
+        profile.id = new_id.into();
+        profile.name = new_name.into();
+        if self.get(&profile.id).is_some() {
+            return Err(ThemeLibraryError::DuplicateId(profile.id));
+        }
+        self.save(profile.clone())?;
+        Ok(profile)
+    }
+
+    pub fn remove(&mut self, id: &str) -> bool {
+        let previous_len = self.profiles.len();
+        self.profiles.retain(|profile| profile.id != id);
+        self.profiles.len() != previous_len
+    }
+
+    pub fn import_profile_json(&mut self, text: &str) -> Result<bool, ThemeLibraryError> {
+        let profile = ThemeProfile::from_json(text).map_err(ThemeLibraryError::Profile)?;
+        self.save(profile)
+    }
+
+    pub fn export_profile_json(&self, id: &str) -> Result<String, ThemeLibraryError> {
+        self.get(id)
+            .ok_or_else(|| ThemeLibraryError::MissingProfile(id.into()))?
+            .to_json_pretty()
+            .map_err(ThemeLibraryError::Profile)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenImpact {
     Paint,
@@ -899,6 +1033,41 @@ impl fmt::Display for ThemeProfileError {
 
 impl std::error::Error for ThemeProfileError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeLibraryError {
+    TooLarge,
+    TooManyProfiles,
+    Syntax(String),
+    UnsupportedVersion(u32),
+    DuplicateId(String),
+    MissingProfile(String),
+    Profile(ThemeProfileError),
+}
+
+impl fmt::Display for ThemeLibraryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge => formatter.write_str("theme library exceeds 4 MiB"),
+            Self::TooManyProfiles => write!(
+                formatter,
+                "theme library exceeds {MAX_THEME_LIBRARY_PROFILES} profiles"
+            ),
+            Self::Syntax(error) => write!(formatter, "invalid theme library JSON: {error}"),
+            Self::UnsupportedVersion(version) => {
+                write!(
+                    formatter,
+                    "unsupported theme library schema version {version}"
+                )
+            }
+            Self::DuplicateId(id) => write!(formatter, "duplicate theme profile id: {id}"),
+            Self::MissingProfile(id) => write!(formatter, "theme profile not found: {id}"),
+            Self::Profile(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ThemeLibraryError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,5 +1178,60 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(diff(&short.data, &explicit_alpha.data).is_empty());
+    }
+
+    #[test]
+    fn library_save_copy_and_profile_round_trip_are_atomic() {
+        let mut library = ThemeProfileLibrary::default();
+        let profile = ThemeProfile {
+            id: "night-work".into(),
+            name: "Night Work".into(),
+            overrides: json!({"palette": {"accent": "#123456ff"}}),
+            ..ThemeProfile::default()
+        };
+        assert!(!library.save(profile.clone()).unwrap());
+        assert!(library.save(profile).unwrap());
+        let copied = library
+            .copy("night-work", "night-work-copy", "Night Work Copy")
+            .unwrap();
+        assert_eq!(copied.id, "night-work-copy");
+
+        let exported = library.export_profile_json("night-work-copy").unwrap();
+        let mut imported = ThemeProfileLibrary::default();
+        assert!(!imported.import_profile_json(&exported).unwrap());
+        assert_eq!(imported.get("night-work-copy"), Some(&copied));
+
+        let whole_library =
+            ThemeProfileLibrary::from_json(&library.to_json_pretty().unwrap()).unwrap();
+        assert_eq!(whole_library, library);
+    }
+
+    #[test]
+    fn invalid_or_duplicate_library_candidate_preserves_last_good_value() {
+        let valid = ThemeProfile {
+            id: "valid".into(),
+            name: "Valid".into(),
+            ..ThemeProfile::default()
+        };
+        let mut library = ThemeProfileLibrary::default();
+        library.save(valid.clone()).unwrap();
+        let before = library.clone();
+        let invalid = ThemeProfile {
+            id: "broken".into(),
+            name: "Broken".into(),
+            overrides: json!({"materials": {"content_surface": {"opacity": 9.0}}}),
+            ..ThemeProfile::default()
+        };
+        assert!(library.save(invalid).is_err());
+        assert_eq!(library, before);
+
+        let duplicate = ThemeProfileLibrary {
+            schema_version: THEME_LIBRARY_SCHEMA_VERSION,
+            profiles: vec![valid.clone(), valid],
+        };
+        assert_eq!(
+            duplicate.validate().unwrap_err(),
+            ThemeLibraryError::DuplicateId("valid".into())
+        );
     }
 }

@@ -194,10 +194,11 @@ Power、Network、Session 的监听器已确认能无错误地完成订阅,并�
 
 CTRL-5 最初没有注册 namespace,因为 CTRL-1 … CTRL-4 没有真正需要持久化的
 设置,提前定义后续 schema 只会变成臆测。COMP-3 随后注册了 `canvas`,UI-4
-现在注册了 `theme`。后者只有一个标量 `profile` 叶子;其中的 JSON payload
-必须先由共享的纯数据 crate `nkdhr-theme` 完成继承解析和完整校验,namespace
-才能提交。使用单叶子是有意为之:稀疏覆盖包含数组和嵌套结构,而活动主题必须作为
-一个原子整体切换。原本的通用引擎仍由
+现在注册了 `theme`。后者包含标量 `profile` 与 `library` 叶子;其中的 JSON
+payload 必须先由共享的纯数据 crate `nkdhr-theme` 完成完整校验,活动 profile
+还要完成全部继承解析和跨字段校验,namespace 才能提交。每项操作使用一个叶子是
+有意为之:稀疏覆盖和已保存集合都包含数组与嵌套结构,而一次活动主题或资料库编辑
+必须作为一个原子整体切换。原本的通用引擎仍由
 `nkdhrd/src/backends/config_store.rs` 中仅供测试的 namespace 覆盖,每个真实
 namespace 还会补充自己的校验和 last-known-good 测试。后续阶段要注册新的
 namespace,做法是在一个 `serde` 派生的结构体

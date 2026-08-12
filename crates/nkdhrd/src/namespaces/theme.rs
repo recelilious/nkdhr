@@ -1,20 +1,22 @@
-use nkdhr_theme::ThemeProfile;
+use nkdhr_theme::{ThemeProfile, ThemeProfileLibrary};
 use serde::{Deserialize, Serialize};
 
 use crate::backends::config_store::Namespace;
 
 /// UI-4's atomic CTRL-5 theme namespace.
 ///
-/// The portable profile remains one JSON string leaf because a theme edit must
-/// validate and publish as one transaction. It also keeps imported sparse
-/// overrides, font-family arrays and future profile metadata intact while
-/// CTRL-5's generic D-Bus leaf contract remains scalar-only. `theme.toml` is
-/// still directly editable; the daemon parses the profile and resolves every
-/// inherited token before accepting a write or external reload.
+/// The active portable profile and saved-profile library each remain one JSON
+/// string leaf because either edit must validate and publish as one
+/// transaction. This also keeps imported sparse overrides, font-family arrays
+/// and future profile metadata intact while CTRL-5's generic D-Bus leaf
+/// contract remains scalar-only. `theme.toml` is still directly editable; the
+/// daemon validates both leaves and resolves every inherited token before
+/// accepting a write or external reload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ThemeSettings {
     pub profile: String,
+    pub library: String,
 }
 
 impl Default for ThemeSettings {
@@ -22,6 +24,8 @@ impl Default for ThemeSettings {
         Self {
             profile: serde_json::to_string(&ThemeProfile::default())
                 .expect("the built-in default theme profile always serializes"),
+            library: serde_json::to_string(&ThemeProfileLibrary::default())
+                .expect("the empty theme profile library always serializes"),
         }
     }
 }
@@ -32,6 +36,8 @@ impl Namespace for ThemeSettings {
     fn validate(&self) -> Result<(), String> {
         ThemeProfile::from_json(&self.profile)
             .and_then(|profile| profile.resolve())
+            .map_err(|error| error.to_string())?;
+        ThemeProfileLibrary::from_json(&self.library)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -59,6 +65,18 @@ mod tests {
     }
 
     #[test]
+    fn pre_library_theme_file_receives_the_empty_library_default() {
+        let profile = serde_json::to_string(&ThemeProfile::default()).unwrap();
+        let legacy = format!("profile = '{}'\n", profile.replace('\'', "''"));
+        let settings: ThemeSettings = toml::from_str(&legacy).unwrap();
+        assert_eq!(
+            ThemeProfileLibrary::from_json(&settings.library).unwrap(),
+            ThemeProfileLibrary::default()
+        );
+        settings.validate().unwrap();
+    }
+
+    #[test]
     fn rejects_an_invalid_import_as_one_atomic_leaf() {
         let profile = ThemeProfile {
             overrides: json!({"materials": {"content_surface": {"opacity": 2.0}}}),
@@ -66,6 +84,7 @@ mod tests {
         };
         let settings = ThemeSettings {
             profile: serde_json::to_string(&profile).unwrap(),
+            ..ThemeSettings::default()
         };
         assert!(settings.validate().is_err());
     }
@@ -84,6 +103,7 @@ mod tests {
         };
         ThemeSettings {
             profile: serde_json::to_string(&profile).unwrap(),
+            ..ThemeSettings::default()
         }
         .validate()
         .unwrap();
@@ -122,6 +142,44 @@ mod tests {
         ));
         assert_eq!(
             store.get("theme.profile").unwrap(),
+            serde_json::Value::String(valid)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_store_rejection_preserves_the_last_good_library() {
+        let dir = std::env::temp_dir().join(format!(
+            "nkdhr-theme-library-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let schemas = Box::leak(vec![NamespaceSchema::of::<ThemeSettings>()].into_boxed_slice());
+        let store = ConfigStore::open(dir.clone(), schemas).unwrap();
+
+        let mut valid = ThemeProfileLibrary::default();
+        valid
+            .save(ThemeProfile {
+                id: "saved".into(),
+                name: "Saved".into(),
+                ..ThemeProfile::default()
+            })
+            .unwrap();
+        let valid = valid.to_json().unwrap();
+        store
+            .set("theme.library", serde_json::Value::String(valid.clone()))
+            .unwrap();
+
+        let invalid = r#"{"schema_version":1,"profiles":[{"broken":true}]}"#;
+        assert!(matches!(
+            store.set("theme.library", serde_json::Value::String(invalid.into())),
+            Err(ConfigError::Invalid(_))
+        ));
+        assert_eq!(
+            store.get("theme.library").unwrap(),
             serde_json::Value::String(valid)
         );
         let _ = fs::remove_dir_all(dir);

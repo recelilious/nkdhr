@@ -77,7 +77,14 @@ palette; `nkdhrd` validates and publishes the complete profile as one CTRL-5
 leaf; `nkdhr-ui` exposes immutable generation snapshots, typed semantic token
 reads and exact paint/layout diffs. Live roots synchronize at retained-tree
 boundaries, so valid color and metric changes apply without restart while an
-invalid candidate preserves the last-known-good generation. The standalone/
+invalid candidate preserves the last-known-good generation. Appearance
+Settings now owns a host-independent profile-editing transaction: complete
+profiles preview through that runtime immediately, cancellation restores the
+saved baseline, and generation-ordered host requests commit through CTRL-5
+without blocking the UI thread. A separately atomic `theme.library` stores
+validated user profiles and supports save, copy and bounded JSON import/export;
+failed writes retain local work, while external changes are adopted or surfaced
+as conflicts instead of silently overwriting a preview. The standalone/
 in-compositor window hosts still belong to later milestones.
 
 ## Documentation

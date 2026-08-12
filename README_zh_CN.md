@@ -55,8 +55,12 @@ generation 排序 begin/complete token 支持并发等待，并阻止同一项�
 显式覆盖并始终携带冻结回退调色板；`nkdhrd` 把完整 profile 作为一个 CTRL-5 叶子
 校验和发布；`nkdhr-ui` 提供不可变 generation 快照、类型化语义 token 读取和精确的
 paint/layout 差异。live root 会在 retained tree 的安全边界同步，所以有效的颜色/尺寸
-变更无需重启即可生效，无效候选则保留上一个已知有效 generation。独立 Wayland/合成器
-内窗口宿主仍属于后续里程碑。
+变更无需重启即可生效，无效候选则保留上一个已知有效 generation。外观设置现已持有
+宿主无关的 profile 编辑事务：完整主题会立即通过同一 runtime 预览，取消时恢复已保存
+基线，generation 排序的宿主请求则通过 CTRL-5 异步提交，不会阻塞 UI 线程。另一个原子
+叶子 `theme.library` 保存经过完整校验的用户主题，并支持保存、复制和有界 JSON 导入/
+导出；写入失败会保留本地工作，外部变更则会被采用或显式标为冲突，不会静默覆盖预览。
+独立 Wayland/合成器内窗口宿主仍属于后续里程碑。
 
 ## 文档
 

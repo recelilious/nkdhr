@@ -102,16 +102,19 @@ and either applies it or rejects it (keeping the last-known-good value
 active) with a diagnostic in the journal.
 
 The currently registered namespaces are `canvas` and `theme`. UI-4 stores a
-complete portable profile in the single scalar leaf `theme.profile`: one
-versioned JSON document containing an immutable built-in or wallpaper base
-plus sparse explicit overrides. Keeping it one leaf makes import, validation,
-publication and `Changed` delivery one atomic transaction. Wallpaper profiles
-always carry a frozen resolved palette, so an export remains usable without
-the source image; a live regeneration replaces only the base and preserves
-the explicit override object. Use `nkdhrctl config get theme.profile` or
-`nkdhrctl config watch theme` to inspect it. Settings is the normal editor;
-direct `config set` is chiefly useful for importing an already validated JSON
-document.
+complete portable profile in the scalar leaf `theme.profile`: one versioned
+JSON document containing an immutable built-in or wallpaper base plus sparse
+explicit overrides. The sibling scalar `theme.library` is a versioned,
+validated collection of user-saved profiles. Keeping each operation in one
+leaf makes its import, validation, publication and `Changed` delivery one
+atomic transaction. Wallpaper profiles always carry a frozen resolved palette,
+so an export remains usable without the source image; a live regeneration
+replaces only the base and preserves the explicit override object. Use
+`nkdhrctl config get theme.profile`, `nkdhrctl config get theme.library` or
+`nkdhrctl config watch theme` to inspect them. Settings is the normal editor
+and provides immediate preview, cancel, save, copy and bounded JSON
+import/export. Direct `config set` is chiefly useful for importing an already
+validated JSON document.
 
 ## Troubleshooting
 

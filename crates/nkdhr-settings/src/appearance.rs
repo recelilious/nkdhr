@@ -15,13 +15,19 @@ use std::{
 };
 
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
+use nkdhr_theme::{BuiltInTheme, ThemeBase, ThemeProfile};
 use nkdhr_ui::{
     Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, Constraints,
     CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
     ListItem, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, MotionFamily,
     Padding, PaintCtx, Reactive, ScalarMotion, Scroll, ScrollOffset, SemanticRole, Semantics,
     SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme, ThemeReadSet,
-    Toggle, UiError, UpdateCtx, Widget,
+    ThemeRuntime, Toggle, UiError, UpdateCtx, Widget,
+};
+
+use crate::{
+    ThemeEditorError, ThemeEditorFeedback, ThemePersistenceRequest, ThemePersistenceTarget,
+    ThemePersistenceToken, ThemeProfileEditor,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -367,7 +373,10 @@ pub struct AppearanceSnapshot {
 
 #[derive(Debug, Clone)]
 enum UndoAction {
-    Scheme(ColorScheme),
+    Scheme {
+        scheme: ColorScheme,
+        profile: ThemeProfile,
+    },
     WallpaperAdaptive(bool),
     BackgroundBlur(bool),
     ContentOpacity(f32),
@@ -379,6 +388,7 @@ enum UndoAction {
 }
 
 struct AppearanceState {
+    theme_profiles: ThemeProfileEditor,
     professional_mode: Reactive<bool>,
     search: Reactive<String>,
     scope: Reactive<SettingsScope>,
@@ -423,13 +433,19 @@ impl Default for AppearanceSettings {
 
 impl AppearanceSettings {
     pub fn new() -> Self {
+        Self::with_theme_profiles(ThemeProfileEditor::default())
+    }
+
+    pub fn with_theme_profiles(theme_profiles: ThemeProfileEditor) -> Self {
+        let scheme = scheme_for_profile(&theme_profiles.snapshot().committed_profile);
         Self {
             state: Rc::new(AppearanceState {
+                theme_profiles,
                 professional_mode: Reactive::new(false),
                 search: Reactive::new(String::new()),
                 scope: Reactive::new(SettingsScope::Global),
                 page: Reactive::new(SettingsPage::Appearance),
-                scheme: Reactive::new(ColorScheme::TokyoNight),
+                scheme: Reactive::new(scheme),
                 wallpaper_adaptive: Reactive::new(true),
                 background_blur: Reactive::new(true),
                 content_opacity: Reactive::new(86.0),
@@ -455,6 +471,135 @@ impl AppearanceSettings {
                 font_tracker: RefCell::new("Noto Sans".to_owned()),
             }),
         }
+    }
+
+    /// Runtime a host attaches to its [`nkdhr_ui::UiRoot`]. Profile previews
+    /// are published here immediately; persistence remains an async host job.
+    pub fn theme_runtime(&self) -> ThemeRuntime {
+        self.state.theme_profiles.runtime()
+    }
+
+    pub fn theme_profiles(&self) -> ThemeProfileEditor {
+        self.state.theme_profiles.clone()
+    }
+
+    pub fn preview_theme_profile(&self, profile: ThemeProfile) -> Result<(), ThemeEditorError> {
+        self.state.theme_profiles.preview(profile.clone())?;
+        self.state.scheme.set(scheme_for_profile(&profile));
+        self.sync_theme_editor_feedback();
+        Ok(())
+    }
+
+    pub fn preview_theme_profile_json(&self, text: &str) -> Result<(), ThemeEditorError> {
+        let profile = ThemeProfile::from_json(text)?;
+        self.preview_theme_profile(profile)
+    }
+
+    pub fn cancel_theme_preview(&self) -> Result<bool, ThemeEditorError> {
+        let cancelled = self.state.theme_profiles.cancel_preview()?;
+        if cancelled {
+            let snapshot = self.state.theme_profiles.snapshot();
+            self.state
+                .scheme
+                .set(scheme_for_profile(&snapshot.committed_profile));
+            self.sync_theme_editor_feedback();
+        }
+        Ok(cancelled)
+    }
+
+    pub fn begin_theme_profile_commit(&self) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+        let request = self.state.theme_profiles.begin_profile_commit()?;
+        self.sync_theme_editor_feedback();
+        Ok(request)
+    }
+
+    pub fn begin_save_current_theme_profile(
+        &self,
+    ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+        let request = self.state.theme_profiles.begin_save_current()?;
+        self.sync_theme_editor_feedback();
+        Ok(request)
+    }
+
+    pub fn begin_copy_saved_theme_profile(
+        &self,
+        source_id: &str,
+        new_id: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+        let request = self
+            .state
+            .theme_profiles
+            .begin_copy_saved(source_id, new_id, new_name)?;
+        self.sync_theme_editor_feedback();
+        Ok(request)
+    }
+
+    pub fn begin_import_theme_profile(
+        &self,
+        text: &str,
+    ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+        let request = self.state.theme_profiles.begin_import_profile(text)?;
+        self.sync_theme_editor_feedback();
+        Ok(request)
+    }
+
+    pub fn begin_import_theme_library(
+        &self,
+        text: &str,
+    ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
+        let request = self.state.theme_profiles.begin_import_library(text)?;
+        self.sync_theme_editor_feedback();
+        Ok(request)
+    }
+
+    pub fn export_current_theme_profile(&self) -> Result<String, ThemeEditorError> {
+        self.state.theme_profiles.export_current_profile()
+    }
+
+    pub fn export_saved_theme_profile(&self, id: &str) -> Result<String, ThemeEditorError> {
+        self.state.theme_profiles.export_saved_profile(id)
+    }
+
+    pub fn export_theme_library(&self) -> Result<String, ThemeEditorError> {
+        self.state.theme_profiles.export_library()
+    }
+
+    pub fn complete_theme_persistence(
+        &self,
+        token: ThemePersistenceToken,
+        result: Result<String, String>,
+    ) -> bool {
+        let completed = self
+            .state
+            .theme_profiles
+            .complete_persistence(token, result);
+        if completed {
+            self.sync_theme_editor_feedback();
+        }
+        completed
+    }
+
+    pub fn accept_external_theme_profile_json(&self, text: &str) -> Result<(), ThemeEditorError> {
+        self.state
+            .theme_profiles
+            .accept_external_profile_json(text)?;
+        let snapshot = self.state.theme_profiles.snapshot();
+        if snapshot.preview_profile.is_none() {
+            self.state
+                .scheme
+                .set(scheme_for_profile(&snapshot.committed_profile));
+        }
+        self.sync_theme_editor_feedback();
+        Ok(())
+    }
+
+    pub fn accept_external_theme_library_json(&self, text: &str) -> Result<(), ThemeEditorError> {
+        self.state
+            .theme_profiles
+            .accept_external_library_json(text)?;
+        self.sync_theme_editor_feedback();
+        Ok(())
     }
 
     /// Structural changes increment this value. A host reconciles the view
@@ -490,6 +635,19 @@ impl AppearanceSettings {
     }
 
     pub fn snapshot(&self) -> AppearanceSnapshot {
+        let mut pending_settings: Vec<_> =
+            self.state.pending_apply.borrow().keys().copied().collect();
+        if self
+            .state
+            .theme_profiles
+            .snapshot()
+            .pending
+            .contains(&ThemePersistenceTarget::ActiveProfile)
+            && !pending_settings.contains(&AppearanceSetting::Scheme)
+        {
+            pending_settings.push(AppearanceSetting::Scheme);
+            pending_settings.sort_unstable();
+        }
         AppearanceSnapshot {
             professional_mode: self.state.professional_mode.get(),
             search: self.state.search.get(),
@@ -506,7 +664,7 @@ impl AppearanceSettings {
             has_local_opacity_override: self.state.opacity_override.get(),
             feedback: self.state.feedback.get(),
             feedback_setting: self.state.feedback_setting.get(),
-            pending_settings: self.state.pending_apply.borrow().keys().copied().collect(),
+            pending_settings,
             status: self.state.status.get(),
         }
     }
@@ -1478,15 +1636,40 @@ impl AppearanceSettings {
                     } else {
                         ButtonVariant::Quiet
                     })
-                    .pending(self.is_pending(AppearanceSetting::Scheme))
+                    .pending(
+                        self.is_pending(AppearanceSetting::Scheme)
+                            || self
+                                .state
+                                .theme_profiles
+                                .snapshot()
+                                .pending
+                                .contains(&ThemePersistenceTarget::ActiveProfile),
+                    )
                     .capabilities(capabilities)
                     .on_activate(move || {
                         let previous = model.state.scheme.get();
-                        model.state.scheme.set(choice);
-                        model.record(
-                            UndoAction::Scheme(previous),
-                            format!("配色方案已预览为{}", choice.label()),
-                        );
+                        let editor = model.state.theme_profiles.snapshot();
+                        let previous_profile =
+                            editor.preview_profile.unwrap_or(editor.committed_profile);
+                        if let Some(profile) = profile_for_scheme(choice) {
+                            if let Err(error) = model.preview_theme_profile(profile) {
+                                model.state.feedback.set(SettingsFeedbackKind::Error);
+                                model
+                                    .state
+                                    .feedback_setting
+                                    .set(Some(AppearanceSetting::Scheme));
+                                model.state.status.set(format!("主题预览失败：{error}"));
+                                model.request_reconcile();
+                                return;
+                            }
+                        } else {
+                            model.state.scheme.set(choice);
+                        }
+                        model.state.undo.replace(Some(UndoAction::Scheme {
+                            scheme: previous,
+                            profile: previous_profile,
+                        }));
+                        model.set_status(format!("配色方案已预览为{}", choice.label()));
                         model.request_reconcile();
                     }),
             )
@@ -1678,6 +1861,37 @@ impl AppearanceSettings {
         self.request_reconcile();
     }
 
+    fn sync_theme_editor_feedback(&self) {
+        let snapshot = self.state.theme_profiles.snapshot();
+        let feedback = match snapshot.feedback {
+            ThemeEditorFeedback::Idle | ThemeEditorFeedback::Previewing => {
+                SettingsFeedbackKind::Informational
+            }
+            ThemeEditorFeedback::Pending => SettingsFeedbackKind::Pending,
+            ThemeEditorFeedback::Success => SettingsFeedbackKind::Success,
+            ThemeEditorFeedback::Error | ThemeEditorFeedback::Conflict => {
+                SettingsFeedbackKind::Error
+            }
+        };
+        let setting = snapshot
+            .pending
+            .contains(&ThemePersistenceTarget::ActiveProfile)
+            .then_some(AppearanceSetting::Scheme)
+            .or_else(|| {
+                matches!(
+                    snapshot.feedback,
+                    ThemeEditorFeedback::Previewing
+                        | ThemeEditorFeedback::Error
+                        | ThemeEditorFeedback::Conflict
+                )
+                .then_some(AppearanceSetting::Scheme)
+            });
+        self.state.feedback.set(feedback);
+        self.state.feedback_setting.set(setting);
+        self.state.status.set(snapshot.status);
+        self.request_reconcile();
+    }
+
     fn set_status(&self, status: impl Into<String>) {
         if self.state.pending_apply.borrow().is_empty() {
             self.state.status.set(status.into());
@@ -1697,7 +1911,18 @@ impl AppearanceSettings {
             return;
         };
         match action {
-            UndoAction::Scheme(value) => self.state.scheme.set(value),
+            UndoAction::Scheme { scheme, profile } => {
+                self.state.scheme.set(scheme);
+                if let Err(error) = self.state.theme_profiles.preview(profile) {
+                    self.state.feedback.set(SettingsFeedbackKind::Error);
+                    self.state
+                        .feedback_setting
+                        .set(Some(AppearanceSetting::Scheme));
+                    self.state.status.set(format!("主题撤销失败：{error}"));
+                    self.request_reconcile();
+                    return;
+                }
+            }
             UndoAction::WallpaperAdaptive(value) => self.state.wallpaper_adaptive.set(value),
             UndoAction::BackgroundBlur(value) => self.state.background_blur.set(value),
             UndoAction::ContentOpacity(value) => {
@@ -1720,6 +1945,38 @@ impl AppearanceSettings {
         self.state.feedback.set(SettingsFeedbackKind::Success);
         self.state.feedback_setting.set(None);
         self.request_reconcile();
+    }
+}
+
+fn profile_for_scheme(scheme: ColorScheme) -> Option<ThemeProfile> {
+    match scheme {
+        ColorScheme::TokyoNight => Some(ThemeProfile::default()),
+        ColorScheme::Nord => Some(ThemeProfile {
+            id: "nord".into(),
+            name: "Nord".into(),
+            base: ThemeBase::BuiltIn {
+                preset: BuiltInTheme::Nord,
+            },
+            ..ThemeProfile::default()
+        }),
+        ColorScheme::Wallpaper | ColorScheme::Custom => None,
+    }
+}
+
+fn scheme_for_profile(profile: &ThemeProfile) -> ColorScheme {
+    let has_overrides = profile
+        .overrides
+        .as_object()
+        .is_none_or(|overrides| !overrides.is_empty());
+    match &profile.base {
+        ThemeBase::BuiltIn {
+            preset: BuiltInTheme::TokyoNight,
+        } if profile.id == "tokyo-night" && !has_overrides => ColorScheme::TokyoNight,
+        ThemeBase::BuiltIn {
+            preset: BuiltInTheme::Nord,
+        } if profile.id == "nord" && !has_overrides => ColorScheme::Nord,
+        ThemeBase::BuiltIn { .. } => ColorScheme::Custom,
+        ThemeBase::Wallpaper { .. } => ColorScheme::Wallpaper,
     }
 }
 
@@ -2356,5 +2613,44 @@ mod tests {
             assert!(pixels.contains(&0));
             assert!(pixels.iter().any(|coverage| *coverage > 0));
         }
+    }
+
+    #[test]
+    fn appearance_bridge_previews_and_commits_the_same_atomic_profile() {
+        let model = AppearanceSettings::new();
+        let nord = profile_for_scheme(ColorScheme::Nord).unwrap();
+        model.preview_theme_profile(nord.clone()).unwrap();
+        assert_eq!(model.snapshot().scheme, ColorScheme::Nord);
+        assert_eq!(
+            model.theme_runtime().snapshot().resolved().profile,
+            nord.clone()
+        );
+
+        let request = model.begin_theme_profile_commit().unwrap();
+        assert_eq!(request.key(), crate::ACTIVE_THEME_PROFILE_KEY);
+        assert!(
+            model
+                .snapshot()
+                .pending_settings
+                .contains(&AppearanceSetting::Scheme)
+        );
+        assert!(model.complete_theme_persistence(request.token(), Ok("主题配置已保存".into())));
+        assert_eq!(model.snapshot().feedback, SettingsFeedbackKind::Success);
+        assert_eq!(model.theme_profiles().snapshot().committed_profile, nord);
+    }
+
+    #[test]
+    fn built_in_based_overrides_keep_their_custom_identity() {
+        let custom = ThemeProfile {
+            id: "my-tokyo".into(),
+            name: "My Tokyo".into(),
+            overrides: serde_json::json!({"palette": {"accent": "#010203ff"}}),
+            ..ThemeProfile::default()
+        };
+        assert_eq!(scheme_for_profile(&custom), ColorScheme::Custom);
+        let model = AppearanceSettings::new();
+        model.preview_theme_profile(custom.clone()).unwrap();
+        assert_eq!(model.snapshot().scheme, ColorScheme::Custom);
+        assert_eq!(model.theme_runtime().snapshot().resolved().profile, custom);
     }
 }
