@@ -105,6 +105,12 @@ world, sits behind windows, captures pointer input and logs each press. The
 environment variable is deliberately a diagnostic switch, not user widget
 configuration, and is unset in normal sessions.
 
+UI-5 adds a second opt-in diagnostic, `NKDHR_CANVAS_DEMO_UI=1`. It mounts the
+real retained Appearance Settings application as an above-window world node,
+using its display list directly rather than a screenshot. This exercises the
+same application surface used by the standalone `nkdhr-settings` Wayland
+window; it is likewise disabled in normal sessions.
+
 ## The canvas model
 
 There is one infinite 2D plane per canvas. Windows may overlap and may be

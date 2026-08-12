@@ -85,6 +85,10 @@ crates/nkdhr-canvas/tools/soak-test.sh start --pid <canvas-pid> \
 下方、捕获指针输入，并记录每次按下。该环境变量只是诊断开关，不是用户组件配置，
 正常会话中不设置。
 
+UI-5 另提供 `NKDHR_CANVAS_DEMO_UI=1` 诊断开关。它把真实的保留式“外观设置”
+应用挂载为窗口上方的世界节点，直接使用 display list，而不是截图。这与独立
+`nkdhr-settings` Wayland 窗口使用同一个应用 surface；正常会话同样不会启用。
+
 ## 画布模型
 
 每张画布是一张无限二维平面。窗口可以重叠，可以位于任意正、负世界坐标，

@@ -6,6 +6,7 @@ mod protocols;
 mod render;
 mod settings;
 mod state;
+mod ui_render;
 mod widget_host;
 
 use backends::Backend;

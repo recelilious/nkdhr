@@ -481,22 +481,29 @@ DnD 已通过。可观察 idle inhibit 与有效 PAM 解锁仍属于后续环境
 
 这是 Phase 3/4（先 `nkdhr-ui`，后 shell）使用的接口。**固定节点**是任何拥有世界
 空间位置但不是客户端窗口的对象，例如时钟、系统监视器及后续 shell chrome。
-`widget_host.rs` 的接口有意保持极小且 object-safe；Phase 2 中 `nkdhr-ui` 尚未实现，
-因此接口不依赖它：
+`widget_host.rs` 的接口仍有意保持极小且 object-safe。UI-5 扩展了与 renderer 无关
+的 payload 和输入钩子，但没有把具体 renderer 或窗口系统事件带进世界模型：
 
 ```rust
-pub trait PinnedNode: Send {
+pub trait PinnedNode {
     fn id(&self) -> &str;
     fn world_rect(&self) -> Rectangle<f64, World>;
     fn layer(&self) -> PinnedLayer;
     fn render_data(&self) -> PinnedRenderData<'_>;
     fn pointer_event(&mut self, event: PinnedPointerEvent) -> InputHandled;
+    fn prepare_frame(&mut self, output_scale: f32) -> Result<(), String>;
+    fn keyboard_event(&mut self, event: &UiEvent) -> InputHandled;
 }
 
 pub enum PinnedRenderData<'a> {
     Memory {
         buffer: &'a MemoryRenderBuffer,
         source_size: Size<i32, Logical>,
+    },
+    NkdhrUi {
+        display_list: &'a DisplayList,
+        textures: &'a TextureStore,
+        commit: u64,
     },
 }
 
@@ -506,14 +513,19 @@ pub enum PinnedLayer { BehindWindows, AboveWindows }
 trait 返回与 renderer 无关的**数据**，而非泛型 `CanvasRenderElement<R>`。泛型 render
 方法无法用作 `dyn PinnedNode`，固定成 `GlesRenderer` 又会破坏 TTY multi-GPU
 renderer。画布宿主用任一后端提供的 renderer 把 `PinnedRenderData` 转换成通用
-render element list。Phase 3 可以为 `nkdhr-ui` 增加新的 data variant 或 adapter，
-节点实现和世界/输入约定不变。
+render element list。`UiPinnedNode` 现在可适配任意 object-safe `UiSurface`。每个
+`(node, GLES context)` 都有自己的 context-bound `GlesBackend`；不可变 display list
+在保留树外叠加 viewport 平移/缩放，并以完整 output target 进行 prepare。直接
+`GlesRenderer` 与 TTY `MultiRenderer` frame 走同一条路径，不会生成中间 CPU 图片。
 
 分层和 hit-test 使用相同两个显式 band。`AboveWindows` 节点先于窗口渲染和收取输入，
 `BehindWindows` 在窗口之后；cursor 与 DnD icon 始终高于两者。指针事件携带节点局部
 坐标和归一化 button/motion 数据，绝不传 `InputEvent<WinitInput>`，否则共享宿主会
 暗中依赖 nested 后端。返回 `Captured` 后，同一事件不再进入客户端 surface，也不会
 开始画布平移。
+指针 capture 在离开节点边界后仍会继续路由。按下的保留式控件也可以取得画布局部
+键盘焦点；点击其他位置会清除此焦点，从而让 toolkit 按键/文本与合成器或客户端
+绑定互斥。
 
 COMP-7 只交付一个永久开发测试件来端到端证明接口：设置
 `NKDHR_CANVAS_DEMO_PINNED_IMAGE=1`，在默认画布固定世界坐标注册生成的 RGBA
@@ -521,6 +533,10 @@ COMP-7 只交付一个永久开发测试件来端到端证明接口：设置
 对渲染、分层与输入的标准，又不在 Phase 3/4 前添加临时工具包或产品组件。后续真实
 TTY 测试确认它在平移/总览中的世界位置正确，behind-window 层级保持，空白部分接收
 点击，而上方窗口内容仍优先获得输入。
+
+UI-5 还在 nested 合成器中实时测试了可选的“外观设置”节点：真实保留式 display
+list 在画布世界变换下完成记录和绘制，没有 GLES 错误。独立 Wayland/EGL 二进制
+使用完全相同的 `AppearanceSurface` 模型、root 与 display-list 路径。
 
 ## COMP-8：稳定化
 

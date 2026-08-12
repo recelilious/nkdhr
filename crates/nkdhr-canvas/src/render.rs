@@ -20,15 +20,19 @@ use smithay::wayland::fractional_scale::with_fractional_scale;
 
 use crate::canvas::world::{Canvas, ManagedWindow, Viewport};
 use crate::state::App;
+use crate::ui_render::{
+    GlesTargetRenderer, PinnedGlesRenderer, PlacementSignature, UiRenderElement,
+};
 use crate::widget_host::{PinnedLayer, PinnedRenderData};
 
 smithay::backend::renderer::element::render_elements! {
     /// Unified element list for client surfaces and compositor-owned
     /// server-side decoration chrome.
-    pub CanvasRenderElement<R> where R: ImportAll + ImportMem;
+    pub CanvasRenderElement<R> where R: ImportAll + ImportMem + GlesTargetRenderer;
     Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
     Decoration=SolidColorRenderElement,
+    NkdhrUi=UiRenderElement,
 }
 
 /// Advance viewport and compositor-owned window-position animations once
@@ -146,21 +150,35 @@ where
 /// Adapt renderer-independent pinned-node payloads to the concrete renderer
 /// used by either backend. Elements are returned front-to-back, matching the
 /// ordering expected by Smithay's render helpers.
+#[derive(Debug, Clone, Copy)]
+pub struct PinnedOutputPlacement {
+    pub viewport: Viewport,
+    pub canvas_anchor: Point<f64, Logical>,
+    pub output_group_location: Point<i32, Logical>,
+    pub output_scale: f64,
+    pub target: smithay::utils::Size<i32, smithay::utils::Physical>,
+}
+
 pub fn pinned_render_elements<R>(
+    ui_renderer: &mut PinnedGlesRenderer,
     renderer: &mut R,
-    canvas: &Canvas,
+    canvas: &mut Canvas,
     layer: PinnedLayer,
-    viewport: Viewport,
-    canvas_anchor: Point<f64, Logical>,
-    output_group_location: Point<i32, Logical>,
-    output_scale: f64,
+    placement: PinnedOutputPlacement,
 ) -> Vec<CanvasRenderElement<R>>
 where
-    R: Renderer + ImportAll + ImportMem,
+    R: Renderer + ImportAll + ImportMem + GlesTargetRenderer,
     R::TextureId: Clone + Send + 'static,
 {
+    let PinnedOutputPlacement {
+        viewport,
+        canvas_anchor,
+        output_group_location,
+        output_scale,
+        target,
+    } = placement;
     canvas
-        .pinned_nodes()
+        .pinned_nodes_mut()
         .rev()
         .filter(|node| node.layer() == layer)
         .filter_map(|node| {
@@ -174,6 +192,13 @@ where
             let group_point = viewport.to_group_logical(rect.loc, canvas_anchor);
             let local = group_point - output_group_location.to_f64();
             let offset = local.to_physical(output_scale);
+            if let Err(error) = node.prepare_frame((viewport.zoom * output_scale) as f32) {
+                eprintln!(
+                    "nkdhr-canvas: retained UI node {:?} frame failed: {error}",
+                    node.id()
+                );
+                return None;
+            }
             match node.render_data() {
                 PinnedRenderData::Memory {
                     buffer,
@@ -189,6 +214,55 @@ where
                 )
                 .map(CanvasRenderElement::from)
                 .ok(),
+                PinnedRenderData::NkdhrUi {
+                    display_list,
+                    textures,
+                    commit,
+                } => {
+                    let placement =
+                        nkdhr_render::Transform::translation(local.x as f32, local.y as f32)
+                            .concat(nkdhr_render::Transform::scale(
+                                viewport.zoom as f32,
+                                viewport.zoom as f32,
+                            ));
+                    let placed = match display_list.transformed(placement) {
+                        Ok(placed) => placed,
+                        Err(error) => {
+                            eprintln!(
+                                "nkdhr-canvas: retained UI node {:?} placement failed: {error}",
+                                node.id()
+                            );
+                            return None;
+                        }
+                    };
+                    let geometry = Rectangle::new(offset.to_i32_round(), (width, height).into());
+                    let signature = PlacementSignature {
+                        node_commit: commit,
+                        geometry,
+                        target,
+                        logical_x_bits: local.x.to_bits(),
+                        logical_y_bits: local.y.to_bits(),
+                        zoom_bits: viewport.zoom.to_bits(),
+                        output_scale_bits: output_scale.to_bits(),
+                    };
+                    ui_renderer
+                        .prepare(
+                            renderer,
+                            node.id(),
+                            &placed,
+                            textures,
+                            signature,
+                            output_scale as f32,
+                        )
+                        .map(CanvasRenderElement::from)
+                        .map_err(|error| {
+                            eprintln!(
+                                "nkdhr-canvas: retained UI node {:?} prepare failed: {error}",
+                                node.id()
+                            );
+                        })
+                        .ok()
+                }
             }
         })
         .collect()

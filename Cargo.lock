@@ -1481,6 +1481,9 @@ name = "nkdhr-canvas"
 version = "0.1.0"
 dependencies = [
  "nkdhr-ipc",
+ "nkdhr-render",
+ "nkdhr-settings",
+ "nkdhr-ui",
  "smithay",
  "smithay-drm-extras",
  "thiserror 2.0.19",
@@ -1523,6 +1526,8 @@ dependencies = [
  "nkdhr-theme",
  "nkdhr-ui",
  "serde_json",
+ "smithay",
+ "wayland-egl",
 ]
 
 [[package]]

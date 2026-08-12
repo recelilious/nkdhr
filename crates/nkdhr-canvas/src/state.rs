@@ -256,6 +256,13 @@ impl App {
             );
             default_canvas.add_pinned(node);
         }
+        if let Some(node) = crate::widget_host::ui_demo_node_from_env()? {
+            println!(
+                "nkdhr-canvas: enabling opt-in UI-5 retained Settings fixture {:?}",
+                node.id()
+            );
+            default_canvas.add_pinned(node);
+        }
         let canvases = BTreeMap::from([(DEFAULT_CANVAS.to_owned(), default_canvas)]);
         let group_views = BTreeMap::from([(
             DEFAULT_GROUP.to_owned(),

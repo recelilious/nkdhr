@@ -24,6 +24,7 @@ use crate::input;
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
+use crate::ui_render::PinnedGlesRenderer;
 use crate::widget_host::PinnedLayer;
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
@@ -131,6 +132,7 @@ fn run() -> BackendResult {
     println!("nkdhr-canvas: listening on WAYLAND_DISPLAY={socket_name}");
     let mut frame_count: u32 = 0;
     let mut fps_window_start = Instant::now();
+    let mut pinned_ui_renderer = PinnedGlesRenderer::default();
 
     loop {
         let mut should_exit = false;
@@ -204,13 +206,14 @@ fn run() -> BackendResult {
                 .group_views
                 .get(&group.name)
                 .expect("resolved output group must have view state");
+            let canvas_name = view.canvas.clone();
+            let viewport = view.viewport;
             let canvas = app
                 .canvases
-                .get(&view.canvas)
+                .get(&canvas_name)
                 .expect("resolved output group must have a canvas");
             for window in canvas.windows() {
-                let window_rect =
-                    render::window_group_rect(window, view.viewport, group.canvas_anchor);
+                let window_rect = render::window_group_rect(window, viewport, group.canvas_anchor);
                 let output_rect = Rectangle::new(resolved.group_location, resolved.logical_size);
                 let overlap = window_rect.intersection(output_rect).map(|intersection| {
                     Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
@@ -252,32 +255,46 @@ fn run() -> BackendResult {
                 ));
             } else {
                 elements.extend(render::pinned_render_elements(
+                    &mut pinned_ui_renderer,
                     renderer,
-                    canvas,
+                    app.canvases
+                        .get_mut(&canvas_name)
+                        .expect("resolved output group must have a canvas"),
                     PinnedLayer::AboveWindows,
-                    view.viewport,
-                    group.canvas_anchor,
-                    resolved.group_location,
-                    resolved.scale,
+                    render::PinnedOutputPlacement {
+                        viewport,
+                        canvas_anchor: group.canvas_anchor,
+                        output_group_location: resolved.group_location,
+                        output_scale: resolved.scale,
+                        target: size,
+                    },
                 ));
-                elements.extend(canvas.windows().iter().rev().flat_map(|window| {
-                    render::window_render_elements(
-                        renderer,
-                        window,
-                        view.viewport,
-                        group.canvas_anchor,
-                        resolved.group_location,
-                        resolved.scale,
-                    )
-                }));
+                elements.extend(app.canvases[&canvas_name].windows().iter().rev().flat_map(
+                    |window| {
+                        render::window_render_elements(
+                            renderer,
+                            window,
+                            viewport,
+                            group.canvas_anchor,
+                            resolved.group_location,
+                            resolved.scale,
+                        )
+                    },
+                ));
                 elements.extend(render::pinned_render_elements(
+                    &mut pinned_ui_renderer,
                     renderer,
-                    canvas,
+                    app.canvases
+                        .get_mut(&canvas_name)
+                        .expect("resolved output group must have a canvas"),
                     PinnedLayer::BehindWindows,
-                    view.viewport,
-                    group.canvas_anchor,
-                    resolved.group_location,
-                    resolved.scale,
+                    render::PinnedOutputPlacement {
+                        viewport,
+                        canvas_anchor: group.canvas_anchor,
+                        output_group_location: resolved.group_location,
+                        output_scale: resolved.scale,
+                        target: size,
+                    },
                 ));
             }
 

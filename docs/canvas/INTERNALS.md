@@ -853,23 +853,30 @@ on `PATH`.
 The seam Phase 3/4 (`nkdhr-ui`, then the shell) build on. A **pinned
 node** is anything with a world-space position that isn't a client
 window: a clock, a system monitor, eventually shell chrome. The host
-interface (`widget_host.rs`) is deliberately tiny and object-safe — it
-doesn't know what `nkdhr-ui` is yet, since that crate has no implementation
-during Phase 2:
+interface (`widget_host.rs`) remains deliberately tiny and object-safe. UI-5
+extended its renderer-independent payload and input hooks without putting a
+concrete renderer or window-system event into the world model:
 
 ```rust
-pub trait PinnedNode: Send {
+pub trait PinnedNode {
     fn id(&self) -> &str;
     fn world_rect(&self) -> Rectangle<f64, World>;
     fn layer(&self) -> PinnedLayer;
     fn render_data(&self) -> PinnedRenderData<'_>;
     fn pointer_event(&mut self, event: PinnedPointerEvent) -> InputHandled;
+    fn prepare_frame(&mut self, output_scale: f32) -> Result<(), String>;
+    fn keyboard_event(&mut self, event: &UiEvent) -> InputHandled;
 }
 
 pub enum PinnedRenderData<'a> {
     Memory {
         buffer: &'a MemoryRenderBuffer,
         source_size: Size<i32, Logical>,
+    },
+    NkdhrUi {
+        display_list: &'a DisplayList,
+        textures: &'a TextureStore,
+        commit: u64,
     },
 }
 
@@ -881,8 +888,11 @@ The trait deliberately returns renderer-independent **data**, not a generic
 as `dyn PinnedNode`, while fixing it to `GlesRenderer` breaks the TTY
 multi-GPU renderer. The canvas host translates `PinnedRenderData` into its
 generic render-element list using the renderer supplied by either backend.
-Phase 3 may add another render-data variant or adapter for `nkdhr-ui`; node
-implementations and the world/input contract remain unchanged.
+`UiPinnedNode` now adapts any object-safe `UiSurface`. Each `(node, GLES
+context)` owns one context-bound `GlesBackend`; immutable lists receive the
+viewport translation/zoom outside the retained tree and are prepared against
+the complete output target. The same path works through direct `GlesRenderer`
+and TTY `MultiRenderer` frames, so no intermediate CPU image is created.
 
 Layering and hit-testing use the same two explicit bands. `AboveWindows`
 nodes render and receive pointer input before windows; `BehindWindows`
@@ -891,6 +901,9 @@ events carry local node coordinates plus normalized button/motion data —
 never `InputEvent<WinitInput>`, which would quietly make the supposedly
 shared host depend on the nested backend. Returning `Captured` prevents the
 same event from reaching a client surface or starting a canvas pan.
+Pointer capture remains routed beyond node bounds. A pressed retained control
+may also claim canvas-local keyboard focus; clicking elsewhere clears it, so
+toolkit keys/text and compositor/client bindings remain mutually exclusive.
 
 COMP-7 ships exactly one permanent developer fixture to prove the interface
 end to end: setting `NKDHR_CANVAS_DEMO_PINNED_IMAGE=1` registers a generated
@@ -904,6 +917,11 @@ The fixture was subsequently exercised on the real TTY backend: its world
 position remained correct under pan and overview transitions, the intended
 behind-window layer held, and its empty-area input target reported presses
 while window content above it retained input priority.
+
+UI-5 additionally live-tested the opt-in Appearance Settings node in the
+nested compositor. It recorded and drew the real retained list under the
+canvas world transform with no GLES error. The standalone Wayland/EGL binary
+uses the identical `AppearanceSurface` model/root and display-list path.
 
 ## COMP-8: stabilization
 

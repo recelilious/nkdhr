@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
+use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::desktop::{Window, WindowSurfaceType};
@@ -137,6 +138,8 @@ impl ManagedWindow {
 pub struct Canvas {
     windows: Vec<ManagedWindow>,
     pinned_nodes: Vec<Box<dyn PinnedNode>>,
+    pinned_pointer_focus: Option<String>,
+    pinned_keyboard_focus: Option<String>,
 }
 
 impl Canvas {
@@ -197,6 +200,33 @@ impl Canvas {
         self.pinned_nodes.iter().map(Box::as_ref)
     }
 
+    pub fn pinned_nodes_mut(
+        &mut self,
+    ) -> impl DoubleEndedIterator<Item = &mut (dyn PinnedNode + '_)> {
+        self.pinned_nodes
+            .iter_mut()
+            .map(|node| node.as_mut() as &mut (dyn PinnedNode + '_))
+    }
+
+    pub fn clear_pinned_keyboard_focus(&mut self) {
+        self.pinned_keyboard_focus = None;
+    }
+
+    pub fn dispatch_pinned_keyboard(&mut self, event: &nkdhr_ui::UiEvent) -> InputHandled {
+        let Some(focused) = self.pinned_keyboard_focus.as_deref() else {
+            return InputHandled::Ignored;
+        };
+        let Some(node) = self
+            .pinned_nodes
+            .iter_mut()
+            .find(|node| node.id() == focused)
+        else {
+            self.pinned_keyboard_focus = None;
+            return InputHandled::Ignored;
+        };
+        node.keyboard_event(event)
+    }
+
     /// Dispatch to the topmost node in `layer` at `point`. Ignored events
     /// continue through lower nodes in that layer before falling through to
     /// the normal window/canvas input path.
@@ -206,17 +236,59 @@ impl Canvas {
         layer: PinnedLayer,
         event: impl Fn(Point<f64, crate::widget_host::PinnedLocal>) -> PinnedPointerEvent,
     ) -> InputHandled {
-        for node in self.pinned_nodes.iter_mut().rev() {
-            let rect = node.world_rect();
-            if node.layer() != layer || !rect.contains(point) {
+        for index in (0..self.pinned_nodes.len()).rev() {
+            let rect = self.pinned_nodes[index].world_rect();
+            if self.pinned_nodes[index].layer() != layer
+                || (!self.pinned_nodes[index].pointer_capture_active() && !rect.contains(point))
+            {
                 continue;
             }
             let local = (point.x - rect.loc.x, point.y - rect.loc.y).into();
-            if node.pointer_event(event(local)) == InputHandled::Captured {
+            let event = event(local);
+            let activates = matches!(
+                event,
+                PinnedPointerEvent::Button {
+                    state: ButtonState::Pressed,
+                    ..
+                }
+            );
+            let moves = matches!(event, PinnedPointerEvent::Motion { .. });
+            let handled = self.pinned_nodes[index].pointer_event(event);
+            if handled == InputHandled::Captured {
+                let node_id = self.pinned_nodes[index].id().to_owned();
+                if moves {
+                    let previous = self.pinned_pointer_focus.replace(node_id.clone());
+                    if let Some(previous) = previous.filter(|previous| previous != &node_id)
+                        && let Some(previous_index) = self
+                            .pinned_nodes
+                            .iter()
+                            .position(|node| node.id() == previous)
+                    {
+                        self.pinned_nodes[previous_index].pointer_event(PinnedPointerEvent::Leave);
+                    }
+                }
+                if activates {
+                    self.pinned_keyboard_focus = self.pinned_nodes[index]
+                        .keyboard_focus_active()
+                        .then_some(node_id);
+                }
                 return InputHandled::Captured;
             }
         }
+        self.leave_pinned_pointer_focus(layer);
         InputHandled::Ignored
+    }
+
+    pub fn leave_pinned_pointer_focus(&mut self, layer: PinnedLayer) {
+        let leaving = self.pinned_pointer_focus.as_ref().and_then(|focused| {
+            self.pinned_nodes
+                .iter()
+                .position(|node| node.id() == focused && node.layer() == layer)
+        });
+        if let Some(index) = leaving {
+            self.pinned_nodes[index].pointer_event(PinnedPointerEvent::Leave);
+            self.pinned_pointer_focus = None;
+        }
     }
 
     /// The topmost window whose rect contains `point`, for click-to-focus
@@ -693,6 +765,7 @@ mod tests {
                 PinnedPointerEvent::Motion { position, .. }
                 | PinnedPointerEvent::Button { position, .. }
                 | PinnedPointerEvent::Axis { position, .. } => position,
+                PinnedPointerEvent::Leave | PinnedPointerEvent::Cancel => (0.0, 0.0).into(),
             };
             self.events.lock().unwrap().push(position);
             self.result

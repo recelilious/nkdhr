@@ -1,6 +1,7 @@
 //! Shared retained UI toolkit for nkdhr.
 
 mod animation;
+mod host;
 mod input;
 mod layout;
 mod motion;
@@ -13,6 +14,7 @@ mod tree;
 mod widgets;
 
 pub use animation::{Clock, ManualClock, SystemClock, Timeline, lerp};
+pub use host::{UiHost, UiHostFrame, UiSurface};
 pub use input::{ClipboardRequest, Key, Modifiers, PointerButton, ScrollPhase, UiEvent};
 pub use layout::{
     Align, Alignment, Axis, Clip, Constraints, CrossAxisAlignment, Flex, Insets, MainAxisAlignment,

@@ -14,6 +14,8 @@ workspace = true
 nkdhr-render = { version = "0.1.0", path = "../nkdhr-render" }
 nkdhr-theme = { version = "0.1.0", path = "../nkdhr-theme" }
 nkdhr-ui = { version = "0.1.0", path = "../nkdhr-ui" }
+smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "renderer_gl"] }
+wayland-egl = "0.32.11"
 
 [dependencies.serde_json]
 version = "1.0.151"

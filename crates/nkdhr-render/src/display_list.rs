@@ -98,6 +98,50 @@ impl DisplayList {
     pub fn len(&self) -> usize {
         self.primitives.len()
     }
+
+    /// Return the same immutable commands under one additional outer
+    /// transform. Host adapters use this to place a node-local list in an
+    /// output without teaching the retained tree about world coordinates.
+    pub fn transformed(&self, transform: Transform) -> Result<Self, BuildError> {
+        if !transform.is_finite() {
+            return Err(BuildError::NonFiniteGeometry);
+        }
+        if transform.inverse().is_none() {
+            return Err(BuildError::SingularTransform);
+        }
+        if !transform.is_axis_aligned()
+            && self.primitives.iter().any(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.clip.is_some(),
+                Primitive::Texture(texture) => texture.clip.is_some(),
+                Primitive::BackdropBlur(blur) => blur.clip.is_some(),
+            })
+        {
+            return Err(BuildError::NonAxisAlignedClip);
+        }
+        let primitives = self
+            .primitives
+            .iter()
+            .copied()
+            .map(|primitive| match primitive {
+                Primitive::Shape(mut shape) => {
+                    shape.transform = transform.concat(shape.transform);
+                    shape.clip = shape.clip.map(|clip| transform.map_rect_bounds(clip));
+                    Primitive::Shape(shape)
+                }
+                Primitive::Texture(mut texture) => {
+                    texture.transform = transform.concat(texture.transform);
+                    texture.clip = texture.clip.map(|clip| transform.map_rect_bounds(clip));
+                    Primitive::Texture(texture)
+                }
+                Primitive::BackdropBlur(mut blur) => {
+                    blur.transform = transform.concat(blur.transform);
+                    blur.clip = blur.clip.map(|clip| transform.map_rect_bounds(clip));
+                    Primitive::BackdropBlur(blur)
+                }
+            })
+            .collect();
+        Ok(Self { primitives })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -484,5 +528,27 @@ mod tests {
         };
         assert_eq!(blur.radius, 6.0);
         assert_eq!(blur.transform, Transform::translation(4.0, 5.0));
+    }
+
+    #[test]
+    fn immutable_list_accepts_one_host_placement_transform() {
+        let mut builder = DisplayListBuilder::new();
+        builder
+            .with_clip(Rect::new(0.0, 0.0, 20.0, 10.0), |builder| {
+                builder.with_transform(Transform::translation(2.0, 3.0), |builder| {
+                    builder.rect(Rect::new(0.0, 0.0, 4.0, 5.0), Color::WHITE)
+                })
+            })
+            .unwrap();
+        let outer = Transform::translation(10.0, 20.0).concat(Transform::scale(2.0, 2.0));
+        let placed = builder.finish().transformed(outer).unwrap();
+        let Primitive::Shape(shape) = placed.primitives()[0] else {
+            panic!("test list contains one shape")
+        };
+        assert_eq!(
+            shape.transform,
+            outer.concat(Transform::translation(2.0, 3.0))
+        );
+        assert_eq!(shape.clip, Some(Rect::new(10.0, 20.0, 40.0, 20.0)));
     }
 }

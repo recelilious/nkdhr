@@ -104,7 +104,7 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
         }
         InputEvent::PointerAxis { event } => {
             if let Some(group) = active_group(app, layout) {
-                handle_pointer_axis::<B>(app, &pointer, &group, &event);
+                handle_pointer_axis::<B>(app, &keyboard, &pointer, &group, &event);
             }
         }
         InputEvent::GestureSwipeBegin { event } => {
@@ -549,6 +549,8 @@ fn dispatch_pinned_pointer(
         return InputHandled::Captured;
     }
     if app.active_canvas().window_at(world_pos).is_some() {
+        app.active_canvas_mut()
+            .leave_pinned_pointer_focus(PinnedLayer::BehindWindows);
         return InputHandled::Ignored;
     }
     app.active_canvas_mut()
@@ -595,6 +597,38 @@ fn handle_keyboard<B: InputBackend>(
             let sym = keysym.modified_sym();
             let raw_syms = keysym.raw_syms();
             let pressed = key_state == KeyState::Pressed;
+
+            let ui_modifiers = ui_modifiers(*modifiers);
+            let ui_key = ui_key(sym);
+            let key_event = if pressed {
+                nkdhr_ui::UiEvent::KeyDown {
+                    key: ui_key,
+                    modifiers: ui_modifiers,
+                    repeat: false,
+                }
+            } else {
+                nkdhr_ui::UiEvent::KeyUp {
+                    key: ui_key,
+                    modifiers: ui_modifiers,
+                }
+            };
+            let mut ui_handled = app.active_canvas_mut().dispatch_pinned_keyboard(&key_event)
+                == InputHandled::Captured;
+            if pressed
+                && !ui_modifiers.control
+                && !ui_modifiers.alt
+                && !ui_modifiers.logo
+                && let Some(character) = sym.key_char()
+                && !character.is_control()
+            {
+                ui_handled |= app
+                    .active_canvas_mut()
+                    .dispatch_pinned_keyboard(&nkdhr_ui::UiEvent::TextInput(character.to_string()))
+                    == InputHandled::Captured;
+            }
+            if ui_handled {
+                return FilterResult::Intercept(());
+            }
 
             if handle_vt_switch(app, modifiers, sym, &raw_syms, pressed) {
                 return FilterResult::Intercept(());
@@ -848,12 +882,16 @@ fn handle_pointer_button<B: InputBackend>(
     }
 
     let pointer_pos = pointer.current_location();
+    if button_state == ButtonState::Pressed {
+        app.active_canvas_mut().clear_pinned_keyboard_focus();
+    }
     if !has_active_pointer_constraint(pointer)
         && dispatch_pinned_pointer(app, group, pointer_pos, |position| {
             PinnedPointerEvent::Button {
                 position,
                 button: button_code,
                 state: button_state,
+                modifiers: ui_modifiers(keyboard.modifier_state()),
                 time: event.time_msec(),
             }
         }) == InputHandled::Captured
@@ -947,6 +985,7 @@ fn handle_pointer_button<B: InputBackend>(
 
 fn handle_pointer_axis<B: InputBackend>(
     app: &mut App,
+    keyboard: &KeyboardHandle<App>,
     pointer: &PointerHandle<App>,
     group: &InputGroup,
     event: &B::PointerAxisEvent,
@@ -971,6 +1010,7 @@ fn handle_pointer_axis<B: InputBackend>(
                 position,
                 horizontal: dx,
                 vertical: dy,
+                modifiers: ui_modifiers(keyboard.modifier_state()),
                 time: event.time_msec(),
             }
         }) == InputHandled::Captured
@@ -979,6 +1019,38 @@ fn handle_pointer_axis<B: InputBackend>(
     }
     pointer.axis(app, axis_frame::<B>(event));
     pointer.frame(app);
+}
+
+fn ui_modifiers(state: smithay::input::keyboard::ModifiersState) -> nkdhr_ui::Modifiers {
+    nkdhr_ui::Modifiers {
+        shift: state.shift,
+        control: state.ctrl,
+        alt: state.alt,
+        logo: state.logo,
+    }
+}
+
+fn ui_key(sym: Keysym) -> nkdhr_ui::Key {
+    match sym {
+        Keysym::Tab => nkdhr_ui::Key::Tab,
+        Keysym::Return | Keysym::KP_Enter => nkdhr_ui::Key::Enter,
+        Keysym::space => nkdhr_ui::Key::Space,
+        Keysym::Escape => nkdhr_ui::Key::Escape,
+        Keysym::Left => nkdhr_ui::Key::ArrowLeft,
+        Keysym::Right => nkdhr_ui::Key::ArrowRight,
+        Keysym::Up => nkdhr_ui::Key::ArrowUp,
+        Keysym::Down => nkdhr_ui::Key::ArrowDown,
+        Keysym::Home => nkdhr_ui::Key::Home,
+        Keysym::End => nkdhr_ui::Key::End,
+        Keysym::Page_Up => nkdhr_ui::Key::PageUp,
+        Keysym::Page_Down => nkdhr_ui::Key::PageDown,
+        Keysym::BackSpace => nkdhr_ui::Key::Backspace,
+        Keysym::Delete => nkdhr_ui::Key::Delete,
+        _ => sym.key_char().map_or_else(
+            || nkdhr_ui::Key::Named(format!("{sym:?}")),
+            |character| nkdhr_ui::Key::Character(character.to_string()),
+        ),
+    }
 }
 
 fn axis_frame<B: InputBackend>(event: &B::PointerAxisEvent) -> AxisFrame {

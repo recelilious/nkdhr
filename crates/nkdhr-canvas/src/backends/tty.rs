@@ -51,6 +51,7 @@ use crate::input;
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
 use crate::state::{App, ClientState};
+use crate::ui_render::PinnedGlesRenderer;
 use crate::widget_host::PinnedLayer;
 
 const CANVAS_BACKGROUND: Color32F = Color32F::new(0.11, 0.12, 0.16, 1.0);
@@ -142,6 +143,7 @@ struct TtyState {
     output_layout: OutputLayout,
     drm_paused: bool,
     running: bool,
+    pinned_ui_renderer: PinnedGlesRenderer,
 }
 
 fn run() -> BackendResult {
@@ -188,6 +190,7 @@ fn run() -> BackendResult {
         output_layout: OutputLayout::default(),
         drm_paused: false,
         running: true,
+        pinned_ui_renderer: PinnedGlesRenderer::default(),
     };
 
     state.start_xwayland()?;
@@ -965,26 +968,30 @@ impl TtyState {
         let Some(view) = self.app.group_views.get(&group.name) else {
             return;
         };
-        let Some(canvas) = self.app.canvases.get(&view.canvas) else {
-            return;
-        };
-        for window in canvas.windows() {
-            let window_rect = render::window_group_rect(window, view.viewport, group.canvas_anchor);
-            let output_rect =
-                Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
-            let overlap = window_rect.intersection(output_rect).map(|intersection| {
-                Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
-            });
-            let preferred_scale = group
-                .outputs
-                .iter()
-                .filter(|candidate| {
-                    Rectangle::new(candidate.group_location, candidate.logical_size)
-                        .overlaps(window_rect)
-                })
-                .map(|candidate| candidate.scale)
-                .fold(resolved_output.scale, f64::max);
-            render::update_window_output(window, &surface.output, overlap, preferred_scale);
+        let canvas_name = view.canvas.clone();
+        let viewport = view.viewport;
+        {
+            let Some(canvas) = self.app.canvases.get(&canvas_name) else {
+                return;
+            };
+            for window in canvas.windows() {
+                let window_rect = render::window_group_rect(window, viewport, group.canvas_anchor);
+                let output_rect =
+                    Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
+                let overlap = window_rect.intersection(output_rect).map(|intersection| {
+                    Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
+                });
+                let preferred_scale = group
+                    .outputs
+                    .iter()
+                    .filter(|candidate| {
+                        Rectangle::new(candidate.group_location, candidate.logical_size)
+                            .overlaps(window_rect)
+                    })
+                    .map(|candidate| candidate.scale)
+                    .fold(resolved_output.scale, f64::max);
+                render::update_window_output(window, &surface.output, overlap, preferred_scale);
+            }
         }
         let locked = self.app.session_locked();
         let lock_surface = self.app.lock_surface_for_output(&output_name);
@@ -1021,32 +1028,52 @@ impl TtyState {
             ));
         } else {
             elements.extend(render::pinned_render_elements(
+                &mut self.pinned_ui_renderer,
                 &mut renderer,
-                canvas,
+                self.app
+                    .canvases
+                    .get_mut(&canvas_name)
+                    .expect("resolved output group must have a canvas"),
                 PinnedLayer::AboveWindows,
-                view.viewport,
-                group.canvas_anchor,
-                resolved_output.group_location,
-                resolved_output.scale,
+                render::PinnedOutputPlacement {
+                    viewport,
+                    canvas_anchor: group.canvas_anchor,
+                    output_group_location: resolved_output.group_location,
+                    output_scale: resolved_output.scale,
+                    target: resolved_output.physical_size,
+                },
             ));
-            elements.extend(canvas.windows().iter().rev().flat_map(|window| {
-                render::window_render_elements(
-                    &mut renderer,
-                    window,
-                    view.viewport,
-                    group.canvas_anchor,
-                    resolved_output.group_location,
-                    resolved_output.scale,
-                )
-            }));
+            elements.extend(
+                self.app.canvases[&canvas_name]
+                    .windows()
+                    .iter()
+                    .rev()
+                    .flat_map(|window| {
+                        render::window_render_elements(
+                            &mut renderer,
+                            window,
+                            viewport,
+                            group.canvas_anchor,
+                            resolved_output.group_location,
+                            resolved_output.scale,
+                        )
+                    }),
+            );
             elements.extend(render::pinned_render_elements(
+                &mut self.pinned_ui_renderer,
                 &mut renderer,
-                canvas,
+                self.app
+                    .canvases
+                    .get_mut(&canvas_name)
+                    .expect("resolved output group must have a canvas"),
                 PinnedLayer::BehindWindows,
-                view.viewport,
-                group.canvas_anchor,
-                resolved_output.group_location,
-                resolved_output.scale,
+                render::PinnedOutputPlacement {
+                    viewport,
+                    canvas_anchor: group.canvas_anchor,
+                    output_group_location: resolved_output.group_location,
+                    output_scale: resolved_output.scale,
+                    target: resolved_output.physical_size,
+                },
             ));
         }
 
@@ -1156,7 +1183,7 @@ impl TtyState {
                 if let Some(lock_surface) = lock_surface {
                     render::send_frame_callbacks(&lock_surface, frame_time);
                 } else if !locked {
-                    for window in canvas.windows() {
+                    for window in self.app.canvases[&canvas_name].windows() {
                         if let Some(window_surface) = window.wl_surface() {
                             render::send_frame_callbacks(&window_surface, frame_time);
                         }
