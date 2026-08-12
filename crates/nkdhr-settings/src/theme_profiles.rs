@@ -4,11 +4,11 @@
 //! returned as opaque requests so a Wayland or compositor host can execute
 //! D-Bus work away from the UI thread and report the result later.
 
-use std::{cell::RefCell, fmt, rc::Rc};
+use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
 
 use nkdhr_theme::{
-    PaletteData, ThemeLibraryError, ThemeProfile, ThemeProfileError, ThemeProfileLibrary,
-    WallpaperPaletteError, regenerate_live_wallpaper_profile,
+    PaletteData, ThemeExtensionRegistry, ThemeLibraryError, ThemeProfile, ThemeProfileError,
+    ThemeProfileLibrary, WallpaperPaletteError, regenerate_live_wallpaper_profile,
 };
 use nkdhr_ui::{ThemeRuntime, ThemeRuntimeError};
 
@@ -122,6 +122,7 @@ struct PendingWallpaperRegeneration {
 
 struct ThemeEditorState {
     runtime: ThemeRuntime,
+    extensions: Arc<ThemeExtensionRegistry>,
     committed_profile: ThemeProfile,
     preview_profile: Option<ThemeProfile>,
     library: ThemeProfileLibrary,
@@ -152,11 +153,25 @@ impl ThemeProfileEditor {
         committed_profile: ThemeProfile,
         library: ThemeProfileLibrary,
     ) -> Result<Self, ThemeEditorError> {
-        library.validate()?;
-        let runtime = ThemeRuntime::new(committed_profile.clone())?;
+        Self::new_with_extensions(
+            committed_profile,
+            library,
+            Arc::new(ThemeExtensionRegistry::default()),
+        )
+    }
+
+    pub fn new_with_extensions(
+        committed_profile: ThemeProfile,
+        library: ThemeProfileLibrary,
+        extensions: Arc<ThemeExtensionRegistry>,
+    ) -> Result<Self, ThemeEditorError> {
+        library.validate_with_extensions(&extensions)?;
+        let runtime =
+            ThemeRuntime::new_with_extensions(committed_profile.clone(), Arc::clone(&extensions))?;
         Ok(Self {
             state: Rc::new(RefCell::new(ThemeEditorState {
                 runtime,
+                extensions,
                 committed_profile,
                 preview_profile: None,
                 library,
@@ -386,7 +401,7 @@ impl ThemeProfileEditor {
             .clone()
             .unwrap_or_else(|| state.committed_profile.clone());
         let mut candidate = state.library.clone();
-        candidate.save(current)?;
+        candidate.save_with_extensions(current, &state.extensions)?;
         begin_library_write(&mut state, candidate, "正在保存配色方案到资料库")
     }
 
@@ -398,7 +413,7 @@ impl ThemeProfileEditor {
     ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
         let mut state = self.state.borrow_mut();
         let mut candidate = state.library.clone();
-        candidate.copy(source_id, new_id, new_name)?;
+        candidate.copy_with_extensions(source_id, new_id, new_name, &state.extensions)?;
         begin_library_write(&mut state, candidate, "正在复制配色方案")
     }
 
@@ -407,10 +422,10 @@ impl ThemeProfileEditor {
         text: &str,
     ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
         let profile = ThemeProfile::from_json(text)?;
-        profile.resolve()?;
         let mut state = self.state.borrow_mut();
+        profile.resolve_with_extensions(&state.extensions)?;
         let mut candidate = state.library.clone();
-        candidate.save(profile)?;
+        candidate.save_with_extensions(profile, &state.extensions)?;
         begin_library_write(&mut state, candidate, "正在导入配色方案")
     }
 
@@ -418,7 +433,8 @@ impl ThemeProfileEditor {
         &self,
         text: &str,
     ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
-        let candidate = ThemeProfileLibrary::from_json(text)?;
+        let extensions = Arc::clone(&self.state.borrow().extensions);
+        let candidate = ThemeProfileLibrary::from_json_with_extensions(text, &extensions)?;
         let mut state = self.state.borrow_mut();
         begin_library_write(&mut state, candidate, "正在导入配色资料库")
     }
@@ -442,10 +458,10 @@ impl ThemeProfileEditor {
     }
 
     pub fn export_library(&self) -> Result<String, ThemeEditorError> {
-        self.state
-            .borrow()
+        let state = self.state.borrow();
+        state
             .library
-            .to_json_pretty()
+            .to_json_pretty_with_extensions(&state.extensions)
             .map_err(ThemeEditorError::from)
     }
 
@@ -524,7 +540,7 @@ impl ThemeProfileEditor {
         &self,
         profile: ThemeProfile,
     ) -> Result<ThemeExternalOutcome, ThemeEditorError> {
-        profile.resolve()?;
+        profile.resolve_with_extensions(&self.state.borrow().extensions)?;
         let mut state = self.state.borrow_mut();
         if state
             .pending_profile
@@ -583,7 +599,7 @@ impl ThemeProfileEditor {
         &self,
         library: ThemeProfileLibrary,
     ) -> Result<ThemeExternalOutcome, ThemeEditorError> {
-        library.validate()?;
+        library.validate_with_extensions(&self.state.borrow().extensions)?;
         let mut state = self.state.borrow_mut();
         if state
             .pending_library
@@ -622,7 +638,11 @@ impl ThemeProfileEditor {
         &self,
         text: &str,
     ) -> Result<ThemeExternalOutcome, ThemeEditorError> {
-        self.accept_external_library(ThemeProfileLibrary::from_json(text)?)
+        let extensions = Arc::clone(&self.state.borrow().extensions);
+        self.accept_external_library(ThemeProfileLibrary::from_json_with_extensions(
+            text,
+            &extensions,
+        )?)
     }
 }
 
@@ -653,8 +673,8 @@ fn begin_library_write(
     candidate: ThemeProfileLibrary,
     status: &str,
 ) -> Result<ThemePersistenceRequest, ThemeEditorError> {
-    candidate.validate()?;
-    let value = candidate.to_json()?;
+    candidate.validate_with_extensions(&state.extensions)?;
+    let value = candidate.to_json_with_extensions(&state.extensions)?;
     let token = next_token(state, ThemePersistenceTarget::Library);
     state.pending_library = Some(PendingLibrary { token, candidate });
     state.feedback = ThemeEditorFeedback::Pending;
@@ -726,7 +746,10 @@ impl From<WallpaperPaletteError> for ThemeEditorError {
 
 #[cfg(test)]
 mod tests {
-    use nkdhr_theme::{BuiltInTheme, ThemeBase};
+    use nkdhr_theme::{
+        BuiltInTheme, ExtensionTokenDescriptor, ExtensionTokenGroup, ExtensionTokenType,
+        ExtensionValue, ThemeBase, TokenImpact,
+    };
     use serde_json::json;
 
     use super::*;
@@ -1047,5 +1070,61 @@ mod tests {
             panic!("preview remains wallpaper-based")
         };
         assert_eq!(wallpaper_id, "wallpaper:newer");
+    }
+
+    #[test]
+    fn editor_uses_one_extension_registry_for_preview_and_library_transactions() {
+        let mut registry = ThemeExtensionRegistry::default();
+        registry
+            .register(ExtensionTokenGroup::new(
+                "extension.com.example.widget",
+                [ExtensionTokenDescriptor::new(
+                    "enabled",
+                    ExtensionTokenType::Boolean,
+                    ExtensionValue::Boolean(true),
+                    TokenImpact::Paint,
+                )],
+            ))
+            .unwrap();
+        let registry = Arc::new(registry);
+        let editor = ThemeProfileEditor::new_with_extensions(
+            ThemeProfile::default(),
+            ThemeProfileLibrary::default(),
+            Arc::clone(&registry),
+        )
+        .unwrap();
+        editor
+            .preview(ThemeProfile {
+                overrides: json!({
+                    "extension": {"com.example.widget": {"enabled": false}}
+                }),
+                ..ThemeProfile::default()
+            })
+            .unwrap();
+        assert_eq!(
+            editor
+                .runtime()
+                .snapshot()
+                .resolved()
+                .extension("extension.com.example.widget", "enabled"),
+            Some(&ExtensionValue::Boolean(false))
+        );
+        let request = editor.begin_save_current().unwrap();
+        let library =
+            ThemeProfileLibrary::from_json_with_extensions(request.value(), &registry).unwrap();
+        assert_eq!(library.profiles.len(), 1);
+
+        let accepted = editor.runtime().snapshot();
+        assert!(
+            editor
+                .preview(ThemeProfile {
+                    overrides: json!({
+                        "extension": {"com.example.widget": {"enabled": "not-a-boolean"}}
+                    }),
+                    ..ThemeProfile::default()
+                })
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&accepted, &editor.runtime().snapshot()));
     }
 }

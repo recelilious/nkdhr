@@ -12,8 +12,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
 
+mod extensions;
 mod wallpaper;
 
+pub use extensions::*;
 pub use wallpaper::*;
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;
@@ -608,7 +610,17 @@ impl Default for ThemeProfile {
 pub struct ResolvedTheme {
     pub profile: ThemeProfile,
     pub data: ThemeData,
+    pub extensions: ResolvedExtensionTokens,
     pub explicit_overrides: BTreeSet<String>,
+}
+
+impl ResolvedTheme {
+    pub fn extension(&self, group: &str, token: &str) -> Option<&ExtensionValue> {
+        self.extensions
+            .get(group)
+            .and_then(|tokens| tokens.get(token))
+            .map(ResolvedExtensionToken::value)
+    }
 }
 
 impl ThemeProfile {
@@ -625,6 +637,13 @@ impl ThemeProfile {
     }
 
     pub fn resolve(&self) -> Result<ResolvedTheme, ThemeProfileError> {
+        self.resolve_with_extensions(&ThemeExtensionRegistry::default())
+    }
+
+    pub fn resolve_with_extensions(
+        &self,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<ResolvedTheme, ThemeProfileError> {
         if serde_json::to_vec(self)
             .map_err(|error| ThemeProfileError::Syntax(error.to_string()))?
             .len()
@@ -661,13 +680,16 @@ impl ThemeProfile {
             .overrides
             .as_object()
             .ok_or(ThemeProfileError::OverridesMustBeObject)?;
+        let mut built_in_overrides = overrides.clone();
+        let extension_overrides = built_in_overrides.remove("extension");
         let mut materialized = serde_json::to_value(&data)
             .map_err(|error| ThemeProfileError::Syntax(error.to_string()))?;
-        merge_json(&mut materialized, &Json::Object(overrides.clone()));
+        merge_json(&mut materialized, &Json::Object(built_in_overrides));
         data = serde_json::from_value(materialized)
             .map_err(|error| ThemeProfileError::InvalidOverride(error.to_string()))?;
         data.palette.normalize()?;
         data.validate()?;
+        let extensions = registry.resolve(extension_overrides.as_ref())?;
         let mut explicit_overrides = BTreeSet::new();
         flatten_paths(
             "",
@@ -677,6 +699,7 @@ impl ThemeProfile {
         Ok(ResolvedTheme {
             profile: self.clone(),
             data,
+            extensions,
             explicit_overrides,
         })
     }
@@ -706,27 +729,55 @@ impl Default for ThemeProfileLibrary {
 
 impl ThemeProfileLibrary {
     pub fn from_json(text: &str) -> Result<Self, ThemeLibraryError> {
+        Self::from_json_with_extensions(text, &ThemeExtensionRegistry::default())
+    }
+
+    pub fn from_json_with_extensions(
+        text: &str,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<Self, ThemeLibraryError> {
         if text.len() > MAX_THEME_LIBRARY_TEXT_BYTES {
             return Err(ThemeLibraryError::TooLarge);
         }
         let library: Self = serde_json::from_str(text)
             .map_err(|error| ThemeLibraryError::Syntax(error.to_string()))?;
-        library.validate()?;
+        library.validate_with_extensions(registry)?;
         Ok(library)
     }
 
     pub fn to_json(&self) -> Result<String, ThemeLibraryError> {
-        self.validate()?;
+        self.to_json_with_extensions(&ThemeExtensionRegistry::default())
+    }
+
+    pub fn to_json_with_extensions(
+        &self,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<String, ThemeLibraryError> {
+        self.validate_with_extensions(registry)?;
         serde_json::to_string(self).map_err(|error| ThemeLibraryError::Syntax(error.to_string()))
     }
 
     pub fn to_json_pretty(&self) -> Result<String, ThemeLibraryError> {
-        self.validate()?;
+        self.to_json_pretty_with_extensions(&ThemeExtensionRegistry::default())
+    }
+
+    pub fn to_json_pretty_with_extensions(
+        &self,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<String, ThemeLibraryError> {
+        self.validate_with_extensions(registry)?;
         serde_json::to_string_pretty(self)
             .map_err(|error| ThemeLibraryError::Syntax(error.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), ThemeLibraryError> {
+        self.validate_with_extensions(&ThemeExtensionRegistry::default())
+    }
+
+    pub fn validate_with_extensions(
+        &self,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<(), ThemeLibraryError> {
         if self.schema_version != THEME_LIBRARY_SCHEMA_VERSION {
             return Err(ThemeLibraryError::UnsupportedVersion(self.schema_version));
         }
@@ -735,7 +786,9 @@ impl ThemeProfileLibrary {
         }
         let mut ids = BTreeSet::new();
         for profile in &self.profiles {
-            profile.resolve().map_err(ThemeLibraryError::Profile)?;
+            profile
+                .resolve_with_extensions(registry)
+                .map_err(ThemeLibraryError::Profile)?;
             if !ids.insert(profile.id.clone()) {
                 return Err(ThemeLibraryError::DuplicateId(profile.id.clone()));
             }
@@ -756,7 +809,17 @@ impl ThemeProfileLibrary {
     /// Insert a profile or replace the saved profile with the same identity.
     /// The collection is unchanged if the resulting library is invalid.
     pub fn save(&mut self, profile: ThemeProfile) -> Result<bool, ThemeLibraryError> {
-        profile.resolve().map_err(ThemeLibraryError::Profile)?;
+        self.save_with_extensions(profile, &ThemeExtensionRegistry::default())
+    }
+
+    pub fn save_with_extensions(
+        &mut self,
+        profile: ThemeProfile,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<bool, ThemeLibraryError> {
+        profile
+            .resolve_with_extensions(registry)
+            .map_err(ThemeLibraryError::Profile)?;
         let mut candidate = self.clone();
         let replaced = if let Some(saved) = candidate
             .profiles
@@ -769,7 +832,7 @@ impl ThemeProfileLibrary {
             candidate.profiles.push(profile);
             false
         };
-        candidate.validate()?;
+        candidate.validate_with_extensions(registry)?;
         *self = candidate;
         Ok(replaced)
     }
@@ -781,6 +844,21 @@ impl ThemeProfileLibrary {
         new_id: impl Into<String>,
         new_name: impl Into<String>,
     ) -> Result<ThemeProfile, ThemeLibraryError> {
+        self.copy_with_extensions(
+            source_id,
+            new_id,
+            new_name,
+            &ThemeExtensionRegistry::default(),
+        )
+    }
+
+    pub fn copy_with_extensions(
+        &mut self,
+        source_id: &str,
+        new_id: impl Into<String>,
+        new_name: impl Into<String>,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<ThemeProfile, ThemeLibraryError> {
         let mut profile = self
             .get(source_id)
             .cloned()
@@ -790,7 +868,7 @@ impl ThemeProfileLibrary {
         if self.get(&profile.id).is_some() {
             return Err(ThemeLibraryError::DuplicateId(profile.id));
         }
-        self.save(profile.clone())?;
+        self.save_with_extensions(profile.clone(), registry)?;
         Ok(profile)
     }
 
@@ -801,8 +879,16 @@ impl ThemeProfileLibrary {
     }
 
     pub fn import_profile_json(&mut self, text: &str) -> Result<bool, ThemeLibraryError> {
+        self.import_profile_json_with_extensions(text, &ThemeExtensionRegistry::default())
+    }
+
+    pub fn import_profile_json_with_extensions(
+        &mut self,
+        text: &str,
+        registry: &ThemeExtensionRegistry,
+    ) -> Result<bool, ThemeLibraryError> {
         let profile = ThemeProfile::from_json(text).map_err(ThemeLibraryError::Profile)?;
-        self.save(profile)
+        self.save_with_extensions(profile, registry)
     }
 
     pub fn export_profile_json(&self, id: &str) -> Result<String, ThemeLibraryError> {
@@ -840,6 +926,13 @@ pub fn diff(previous: &ThemeData, current: &ThemeData) -> Vec<ThemeTokenChange> 
             })
         })
         .collect()
+}
+
+pub fn diff_resolved(previous: &ResolvedTheme, current: &ResolvedTheme) -> Vec<ThemeTokenChange> {
+    let mut changes = diff(&previous.data, &current.data);
+    changes.extend(diff_extensions(&previous.extensions, &current.extensions));
+    changes.sort_by(|left, right| left.path.cmp(&right.path));
+    changes
 }
 
 pub fn token_impact(path: &str) -> TokenImpact {
@@ -1011,6 +1104,7 @@ pub enum ThemeProfileError {
     InvalidOverride(String),
     InvalidToken(String),
     InvalidColor(String),
+    Extension(ThemeExtensionError),
 }
 
 impl fmt::Display for ThemeProfileError {
@@ -1032,11 +1126,18 @@ impl fmt::Display for ThemeProfileError {
             Self::InvalidColor(color) => {
                 write!(formatter, "invalid #RRGGBB or #RRGGBBAA color: {color}")
             }
+            Self::Extension(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for ThemeProfileError {}
+
+impl From<ThemeExtensionError> for ThemeProfileError {
+    fn from(value: ThemeExtensionError) -> Self {
+        Self::Extension(value)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeLibraryError {
@@ -1238,5 +1339,147 @@ mod tests {
             duplicate.validate().unwrap_err(),
             ThemeLibraryError::DuplicateId("valid".into())
         );
+    }
+
+    fn test_extension_registry() -> ThemeExtensionRegistry {
+        let mut registry = ThemeExtensionRegistry::default();
+        registry
+            .register(ExtensionTokenGroup::new(
+                "extension.com.example.widget",
+                [
+                    ExtensionTokenDescriptor::new(
+                        "enabled",
+                        ExtensionTokenType::Boolean,
+                        ExtensionValue::Boolean(true),
+                        TokenImpact::Paint,
+                    ),
+                    ExtensionTokenDescriptor::new(
+                        "gap",
+                        ExtensionTokenType::Number {
+                            min: 0.0,
+                            max: 32.0,
+                        },
+                        ExtensionValue::Number(8.0),
+                        TokenImpact::Layout,
+                    ),
+                    ExtensionTokenDescriptor::new(
+                        "accent",
+                        ExtensionTokenType::Color,
+                        ExtensionValue::Color("#112233ff".into()),
+                        TokenImpact::Paint,
+                    ),
+                ],
+            ))
+            .unwrap();
+        registry
+    }
+
+    #[test]
+    fn extension_defaults_and_sparse_overrides_resolve_in_owned_namespaces() {
+        let registry = test_extension_registry();
+        let defaults = ThemeProfile::default()
+            .resolve_with_extensions(&registry)
+            .unwrap();
+        assert_eq!(
+            defaults.extension("extension.com.example.widget", "gap"),
+            Some(&ExtensionValue::Number(8.0))
+        );
+
+        let profile = ThemeProfile {
+            overrides: json!({
+                "extension": {
+                    "com.example.widget": {
+                        "gap": 12.5,
+                        "accent": "#AABBCC"
+                    }
+                }
+            }),
+            ..ThemeProfile::default()
+        };
+        let resolved = profile.resolve_with_extensions(&registry).unwrap();
+        assert_eq!(
+            resolved.extension("extension.com.example.widget", "gap"),
+            Some(&ExtensionValue::Number(12.5))
+        );
+        assert_eq!(
+            resolved.extension("extension.com.example.widget", "accent"),
+            Some(&ExtensionValue::Color("#aabbccff".into()))
+        );
+        assert!(
+            resolved
+                .explicit_overrides
+                .contains("extension.com.example.widget.gap")
+        );
+    }
+
+    #[test]
+    fn extension_registration_and_candidates_are_strict() {
+        let mut registry = ThemeExtensionRegistry::default();
+        assert!(matches!(
+            registry.register(ExtensionTokenGroup::new(
+                "palette.widget",
+                [ExtensionTokenDescriptor::new(
+                    "enabled",
+                    ExtensionTokenType::Boolean,
+                    ExtensionValue::Boolean(true),
+                    TokenImpact::Paint,
+                )],
+            )),
+            Err(ThemeExtensionError::InvalidGroupName(_))
+        ));
+        let registry = test_extension_registry();
+        for overrides in [
+            json!({"extension": {"com.unknown.widget": {"gap": 2.0}}}),
+            json!({"extension": {"com.example.widget": {"missing": 2.0}}}),
+            json!({"extension": {"com.example.widget": {"gap": 99.0}}}),
+        ] {
+            let profile = ThemeProfile {
+                overrides,
+                ..ThemeProfile::default()
+            };
+            assert!(matches!(
+                profile.resolve_with_extensions(&registry),
+                Err(ThemeProfileError::Extension(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn extension_diff_uses_declared_impact_and_library_round_trips() {
+        let registry = test_extension_registry();
+        let old = ThemeProfile::default()
+            .resolve_with_extensions(&registry)
+            .unwrap();
+        let profile = ThemeProfile {
+            id: "extension-profile".into(),
+            name: "Extension Profile".into(),
+            overrides: json!({
+                "extension": {"com.example.widget": {"enabled": false, "gap": 14.0}}
+            }),
+            ..ThemeProfile::default()
+        };
+        let new = profile.resolve_with_extensions(&registry).unwrap();
+        assert_eq!(
+            diff_resolved(&old, &new),
+            vec![
+                ThemeTokenChange {
+                    path: "extension.com.example.widget.enabled".into(),
+                    impact: TokenImpact::Paint,
+                },
+                ThemeTokenChange {
+                    path: "extension.com.example.widget.gap".into(),
+                    impact: TokenImpact::Layout,
+                },
+            ]
+        );
+
+        let mut library = ThemeProfileLibrary::default();
+        library.save_with_extensions(profile, &registry).unwrap();
+        let text = library.to_json_pretty_with_extensions(&registry).unwrap();
+        assert_eq!(
+            ThemeProfileLibrary::from_json_with_extensions(&text, &registry).unwrap(),
+            library
+        );
+        assert!(ThemeProfileLibrary::from_json(&text).is_err());
     }
 }

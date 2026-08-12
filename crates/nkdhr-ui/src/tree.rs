@@ -223,6 +223,13 @@ pub trait Widget: AsAny + 'static {
     /// and application-private widgets remain theme-neutral by default.
     fn apply_theme(&mut self, _theme: Arc<crate::Theme>) {}
 
+    /// Replace the complete immutable theme generation. Extension widgets may
+    /// override this hook to read their registered namespaced values; the
+    /// default preserves the built-in typed-theme API used by core widgets.
+    fn apply_theme_snapshot(&mut self, snapshot: Arc<ThemeSnapshot>) {
+        self.apply_theme(snapshot.theme());
+    }
+
     /// Reconcile new descriptor data against the previous descriptor. The
     /// conservative default requests layout; implementations may override it
     /// and request a narrower pass after comparing properties.
@@ -615,13 +622,12 @@ impl UiRoot {
             runtime,
             snapshot: Arc::clone(&snapshot),
         });
-        let theme = snapshot.theme();
         for id in self.arena.ids() {
             let Some(node) = self.arena.get_mut(id) else {
                 continue;
             };
             let reads = node.widget.theme_reads();
-            node.widget.apply_theme(Arc::clone(&theme));
+            node.widget.apply_theme_snapshot(Arc::clone(&snapshot));
             if !reads.is_empty() {
                 node.dirty |= Invalidation::LAYOUT | Invalidation::SEMANTICS;
                 self.dirty |= Invalidation::LAYOUT | Invalidation::SEMANTICS;
@@ -898,7 +904,9 @@ impl UiRoot {
 
     fn mount(&mut self, mut element: Element, parent: Option<WidgetId>) -> UiResult<WidgetId> {
         if let Some(theme) = &self.theme {
-            element.widget.apply_theme(theme.snapshot.theme());
+            element
+                .widget
+                .apply_theme_snapshot(Arc::clone(&theme.snapshot));
         }
         let state = element.widget.create_state();
         let children = element.children;
@@ -967,7 +975,7 @@ impl UiRoot {
             children,
         } = element;
         if let Some(theme) = &self.theme {
-            widget.apply_theme(theme.snapshot.theme());
+            widget.apply_theme_snapshot(Arc::clone(&theme.snapshot));
         }
         let now = self.now();
         let reactivity = Rc::clone(&self.reactivity);
@@ -1087,14 +1095,13 @@ impl UiRoot {
             return;
         };
         let changes = current.changes_from(&previous);
-        let runtime_theme = current.theme();
         for id in self.arena.ids() {
             let Some(node) = self.arena.get_mut(id) else {
                 continue;
             };
             let reads = node.widget.theme_reads();
             let invalidation = reads.invalidation_for(&changes);
-            node.widget.apply_theme(Arc::clone(&runtime_theme));
+            node.widget.apply_theme_snapshot(Arc::clone(&current));
             if !invalidation.is_empty() {
                 node.dirty |= invalidation;
                 self.dirty |= invalidation;

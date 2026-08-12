@@ -50,7 +50,7 @@ Vim 方向键、由宿主时钟驱动且可中断的惯性、有界弹性反馈�
 可见 pending 边缘，后两者同时保留请求值与实际生效值。Settings 通过按设置项独立的
 generation 排序 begin/complete token 支持并发等待，并阻止同一项的旧后端结果覆盖新请求；
 全局速度会缩放控件、面板和流体运动的全部时长而不改变曲线。项目所有者已经接受静态
-与转场帧，UI-3 因此收口。UI-4 现已在不改变这些视觉的前提下开始：
+与转场帧，UI-3 因此收口。UI-4 框架现已在不改变这些视觉的前提下完成：
 `nkdhr-theme` 定义带版本、可移植的 Tokyo Night/Nord 和壁纸基础 profile，支持稀疏
 显式覆盖并始终携带冻结回退调色板；`nkdhrd` 把完整 profile 作为一个 CTRL-5 叶子
 校验和发布；`nkdhr-ui` 提供不可变 generation 快照、类型化语义 token 读取和精确的
@@ -64,6 +64,10 @@ paint/layout 差异。live root 会在 retained tree 的安全边界同步，所
 调色板，并提供自动/深色/浅色外观以及色彩强度、对比度输入。实时链接的生成任务按
 generation 排序，因此较慢的旧壁纸结果不能覆盖新结果；更新只替换冻结基础和来源，全部
 显式覆盖都会保留。干净状态会产生原子持久化请求，已有本地修改则继续明确保持未保存。
+一个有资源上限的声明式扩展 token 注册表完成了该框架：反向域名组声明类型化默认值和
+精确 paint/layout 影响，稀疏 profile 值不能替换内置项或携带代码，无效组会保留上一份
+有效快照。设置/资料库事务与 retained 组件使用同一份不可变值。多 root 测试证明共享
+runtime 的显示器仍只在各自本地活动边界同步，也覆盖直接跨过中间 generation 的情况。
 独立 Wayland/合成器内窗口宿主仍属于后续里程碑。
 
 ## 文档
@@ -78,6 +82,8 @@ generation 排序，因此较慢的旧壁纸结果不能覆盖新结果；更新
   [English](docs/canvas/INTERNALS.md)
 - [固定组件扩展接口](docs/canvas/EXTENDING_zh_CN.md) ·
   [English](docs/canvas/EXTENDING.md)
+- [主题扩展令牌](docs/theme/EXTENDING_zh_CN.md) ·
+  [English](docs/theme/EXTENDING.md)
 
 ## 协议
 

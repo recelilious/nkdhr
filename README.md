@@ -70,10 +70,10 @@ generation-ordered begin/complete feedback tokens, allowing independent
 concurrent pending states while stale same-setting replies cannot replace newer
 state; its global speed control scales every control, panel and fluid
 duration without changing the selected curves. The owner accepted the resting
-and transition frames, closing UI-3. UI-4 is now underway without changing
-those visuals: `nkdhr-theme` defines versioned portable Tokyo Night/Nord and
-wallpaper-based profiles with sparse explicit overrides and a frozen fallback
-palette; `nkdhrd` validates and publishes the complete profile as one CTRL-5
+and transition frames, closing UI-3. The UI-4 framework is now complete without
+changing those visuals: `nkdhr-theme` defines versioned portable Tokyo
+Night/Nord and wallpaper-based profiles with sparse explicit overrides and a
+frozen fallback palette; `nkdhrd` validates and publishes the complete profile as one CTRL-5
 leaf; `nkdhr-ui` exposes immutable generation snapshots, typed semantic token
 reads and exact paint/layout diffs. Live roots synchronize at retained-tree
 boundaries, so valid color and metric changes apply without restart while an
@@ -90,7 +90,14 @@ complete readable semantic palette, with Auto/Dark/Light appearance plus
 colorfulness and contrast inputs. Live-linked generations are ordered so stale
 wallpaper jobs cannot win; only the frozen base/source changes, every explicit
 override survives, and clean results produce an atomic persistence request
-while an existing local edit remains visibly unsaved. The standalone/
+while an existing local edit remains visibly unsaved. A bounded, declarative
+extension-token registry completes the framework: reverse-DNS
+groups declare typed defaults and exact paint/layout impact, sparse profile
+values cannot replace built-ins or carry code, and invalid groups preserve the
+last-good snapshot. Registry-aware Settings/library transactions and retained
+widgets use the same immutable values. Multi-root tests prove that displays
+sharing one runtime still synchronize only at their own local activity
+boundaries, including direct jumps across skipped generations. The standalone/
 in-compositor window hosts still belong to later milestones.
 
 ## Documentation
@@ -105,6 +112,8 @@ in-compositor window hosts still belong to later milestones.
   [中文](docs/canvas/INTERNALS_zh_CN.md)
 - [Pinned-widget extension seam](docs/canvas/EXTENDING.md) ·
   [中文](docs/canvas/EXTENDING_zh_CN.md)
+- [Theme extension tokens](docs/theme/EXTENDING.md) ·
+  [中文](docs/theme/EXTENDING_zh_CN.md)
 
 ## License
 

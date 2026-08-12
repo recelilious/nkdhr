@@ -9,7 +9,8 @@ use std::thread;
 use nkdhr_ipc::ConfigProxyBlocking;
 use nkdhr_render::Color;
 use nkdhr_theme::{
-    ResolvedTheme, ThemeProfile, ThemeProfileError, ThemeTokenChange, TokenImpact, diff,
+    ExtensionValue, ResolvedTheme, ThemeExtensionRegistry, ThemeProfile, ThemeProfileError,
+    ThemeTokenChange, TokenImpact, diff_resolved,
 };
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
@@ -37,12 +38,22 @@ impl ThemeSnapshot {
     }
 
     pub fn changes_from(&self, previous: &Self) -> Vec<ThemeTokenChange> {
-        diff(&previous.resolved.data, &self.resolved.data)
+        diff_resolved(&previous.resolved, &self.resolved)
     }
 
     pub fn read<T: Clone>(&self, token: ThemeToken<T>, reads: &mut ThemeReadSet) -> T {
         reads.record(token.path);
         (token.resolve)(&self.theme)
+    }
+
+    pub fn read_extension(
+        &self,
+        group: &str,
+        token: &str,
+        reads: &mut ThemeReadSet,
+    ) -> Option<ExtensionValue> {
+        reads.record(format!("{group}.{token}"));
+        self.resolved.extension(group, token).cloned()
     }
 }
 
@@ -58,6 +69,7 @@ struct RuntimeState {
 #[derive(Clone)]
 pub struct ThemeRuntime {
     state: Arc<Mutex<RuntimeState>>,
+    extensions: Arc<ThemeExtensionRegistry>,
 }
 
 impl fmt::Debug for ThemeRuntime {
@@ -65,6 +77,7 @@ impl fmt::Debug for ThemeRuntime {
         formatter
             .debug_struct("ThemeRuntime")
             .field("generation", &self.snapshot().generation())
+            .field("extension_groups", &self.extensions.group_count())
             .finish()
     }
 }
@@ -80,7 +93,12 @@ impl ThemeRuntime {
     /// A missing daemon degrades to the immutable built-in profile; a malformed
     /// value is ignored so the runtime retains its last-known-good snapshot.
     pub fn watch_ctrl5() -> Self {
-        let runtime = Self::default();
+        Self::watch_ctrl5_with_extensions(Arc::new(ThemeExtensionRegistry::default()))
+    }
+
+    pub fn watch_ctrl5_with_extensions(extensions: Arc<ThemeExtensionRegistry>) -> Self {
+        let runtime = Self::new_with_extensions(ThemeProfile::default(), extensions)
+            .expect("the built-in profile is valid");
         let Ok(connection) = Connection::session() else {
             eprintln!("nkdhr-ui: no session D-Bus, using the built-in theme");
             return runtime;
@@ -118,7 +136,14 @@ impl ThemeRuntime {
     }
 
     pub fn new(profile: ThemeProfile) -> Result<Self, ThemeRuntimeError> {
-        let resolved = profile.resolve()?;
+        Self::new_with_extensions(profile, Arc::new(ThemeExtensionRegistry::default()))
+    }
+
+    pub fn new_with_extensions(
+        profile: ThemeProfile,
+        extensions: Arc<ThemeExtensionRegistry>,
+    ) -> Result<Self, ThemeRuntimeError> {
+        let resolved = profile.resolve_with_extensions(&extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
         Ok(Self {
             state: Arc::new(Mutex::new(RuntimeState {
@@ -128,6 +153,7 @@ impl ThemeRuntime {
                     theme: Arc::new(theme),
                 }),
             })),
+            extensions,
         })
     }
 
@@ -140,7 +166,7 @@ impl ThemeRuntime {
     }
 
     pub fn publish(&self, profile: ThemeProfile) -> Result<ThemePublication, ThemeRuntimeError> {
-        let resolved = profile.resolve()?;
+        let resolved = profile.resolve_with_extensions(&self.extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
         let mut state = self.state.lock().expect("theme runtime poisoned");
         let previous = Arc::clone(&state.snapshot);
@@ -152,7 +178,7 @@ impl ThemeRuntime {
                 published: false,
             });
         }
-        let changes = diff(&previous.resolved.data, &resolved.data);
+        let changes = diff_resolved(&previous.resolved, &resolved);
         let snapshot = Arc::new(ThemeSnapshot {
             generation: previous.generation.wrapping_add(1).max(1),
             resolved: Arc::new(resolved),
@@ -205,22 +231,22 @@ impl ThemePublication {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThemeReadSet {
-    paths: BTreeSet<&'static str>,
+    paths: BTreeSet<String>,
 }
 
 impl ThemeReadSet {
-    pub fn from_paths(paths: impl IntoIterator<Item = &'static str>) -> Self {
+    pub fn from_paths<S: Into<String>>(paths: impl IntoIterator<Item = S>) -> Self {
         let mut reads = Self::default();
         reads.extend(paths);
         reads
     }
 
-    pub fn record(&mut self, path: &'static str) {
-        self.paths.insert(path);
+    pub fn record(&mut self, path: impl Into<String>) {
+        self.paths.insert(path.into());
     }
 
-    pub fn extend(&mut self, paths: impl IntoIterator<Item = &'static str>) {
-        self.paths.extend(paths);
+    pub fn extend<S: Into<String>>(&mut self, paths: impl IntoIterator<Item = S>) {
+        self.paths.extend(paths.into_iter().map(Into::into));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -341,7 +367,10 @@ mod tests {
     use std::rc::Rc;
 
     use nkdhr_render::{DisplayListBuilder, Primitive, Rect};
-    use nkdhr_theme::ThemeProfile;
+    use nkdhr_theme::{
+        ExtensionTokenDescriptor, ExtensionTokenGroup, ExtensionTokenType, ExtensionValue,
+        ThemeExtensionRegistry, ThemeProfile,
+    };
     use serde_json::json;
 
     use super::*;
@@ -353,6 +382,74 @@ mod tests {
     struct ThemeProbe {
         theme: Arc<Theme>,
         measures: Rc<Cell<u32>>,
+    }
+
+    struct ExtensionProbe {
+        token: &'static str,
+        value: Rc<Cell<i64>>,
+        measures: Rc<Cell<u32>>,
+        paints: Rc<Cell<u32>>,
+    }
+
+    impl Widget for ExtensionProbe {
+        fn theme_reads(&self) -> ThemeReadSet {
+            if self.token == "tint" {
+                ThemeReadSet::from_paths([
+                    "extension.com.example.widget.extent",
+                    "extension.com.example.widget.tint",
+                ])
+            } else {
+                ThemeReadSet::from_paths(["extension.com.example.widget.extent"])
+            }
+        }
+
+        fn apply_theme_snapshot(&mut self, snapshot: Arc<ThemeSnapshot>) {
+            let mut reads = ThemeReadSet::default();
+            let Some(ExtensionValue::Integer(value)) =
+                snapshot.read_extension("extension.com.example.widget", self.token, &mut reads)
+            else {
+                panic!("registered test extension token must resolve")
+            };
+            self.value.set(value);
+        }
+
+        fn measure(
+            &self,
+            _ctx: &mut MeasureCtx<'_>,
+            constraints: Constraints,
+        ) -> Result<Size, UiError> {
+            self.measures.set(self.measures.get() + 1);
+            Ok(constraints.constrain(Size::new(10.0, 10.0)))
+        }
+
+        fn paint(&self, _ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+            self.paints.set(self.paints.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn extension_registry() -> Arc<ThemeExtensionRegistry> {
+        let mut registry = ThemeExtensionRegistry::default();
+        registry
+            .register(ExtensionTokenGroup::new(
+                "extension.com.example.widget",
+                [
+                    ExtensionTokenDescriptor::new(
+                        "extent",
+                        ExtensionTokenType::Integer { min: 0, max: 64 },
+                        ExtensionValue::Integer(8),
+                        TokenImpact::Layout,
+                    ),
+                    ExtensionTokenDescriptor::new(
+                        "tint",
+                        ExtensionTokenType::Integer { min: 0, max: 255 },
+                        ExtensionValue::Integer(1),
+                        TokenImpact::Paint,
+                    ),
+                ],
+            ))
+            .unwrap();
+        Arc::new(registry)
     }
 
     impl Widget for ThemeProbe {
@@ -525,5 +622,103 @@ mod tests {
             )
         });
         assert!(has_compensated_fill);
+    }
+
+    #[test]
+    fn independent_roots_sync_extension_generations_only_at_local_boundaries() {
+        let runtime =
+            ThemeRuntime::new_with_extensions(ThemeProfile::default(), extension_registry())
+                .unwrap();
+        let first_value = Rc::new(Cell::new(0));
+        let first_measures = Rc::new(Cell::new(0));
+        let first_paints = Rc::new(Cell::new(0));
+        let second_value = Rc::new(Cell::new(0));
+        let second_measures = Rc::new(Cell::new(0));
+        let second_paints = Rc::new(Cell::new(0));
+        let mut first = UiRoot::new(Element::new(ExtensionProbe {
+            token: "extent",
+            value: Rc::clone(&first_value),
+            measures: Rc::clone(&first_measures),
+            paints: Rc::clone(&first_paints),
+        }))
+        .unwrap();
+        let mut second = UiRoot::new(Element::new(ExtensionProbe {
+            token: "tint",
+            value: Rc::clone(&second_value),
+            measures: Rc::clone(&second_measures),
+            paints: Rc::clone(&second_paints),
+        }))
+        .unwrap();
+        for root in [&mut first, &mut second] {
+            root.set_theme_runtime(runtime.clone());
+            root.layout(Size::new(40.0, 40.0)).unwrap();
+            root.paint(&mut DisplayListBuilder::new()).unwrap();
+        }
+        assert_eq!(first_value.get(), 8);
+        assert_eq!(second_value.get(), 1);
+        let second_measures_before_skip = second_measures.get();
+
+        runtime
+            .publish(ThemeProfile {
+                overrides: json!({
+                    "extension": {"com.example.widget": {"extent": 12}}
+                }),
+                ..ThemeProfile::default()
+            })
+            .unwrap();
+        assert!(first.invalidation().contains(Invalidation::LAYOUT));
+        assert_eq!(first.theme_snapshot().unwrap().generation(), 2);
+        assert_eq!(first_value.get(), 12);
+        assert_eq!(second.theme_snapshot().unwrap().generation(), 1);
+        assert_eq!(second_value.get(), 1);
+        first.layout(Size::new(40.0, 40.0)).unwrap();
+        first.paint(&mut DisplayListBuilder::new()).unwrap();
+
+        runtime
+            .publish(ThemeProfile {
+                overrides: json!({
+                    "extension": {"com.example.widget": {"tint": 2}}
+                }),
+                ..ThemeProfile::default()
+            })
+            .unwrap();
+
+        let second_invalidation = second.invalidation();
+        assert!(second_invalidation.contains(Invalidation::PAINT));
+        assert!(!second_invalidation.contains(Invalidation::LAYOUT));
+        assert_eq!(second.theme_snapshot().unwrap().generation(), 3);
+        assert_eq!(second_value.get(), 2);
+        second.paint(&mut DisplayListBuilder::new()).unwrap();
+        assert_eq!(second_measures.get(), second_measures_before_skip);
+        assert_eq!(first.theme_snapshot().unwrap().generation(), 2);
+        assert_eq!(first_value.get(), 12);
+
+        assert!(first.invalidation().contains(Invalidation::LAYOUT));
+        assert_eq!(first.theme_snapshot().unwrap().generation(), 3);
+        assert_eq!(first_value.get(), 8);
+    }
+
+    #[test]
+    fn invalid_extension_publication_preserves_the_last_good_snapshot() {
+        let runtime =
+            ThemeRuntime::new_with_extensions(ThemeProfile::default(), extension_registry())
+                .unwrap();
+        runtime
+            .publish(ThemeProfile {
+                overrides: json!({
+                    "extension": {"com.example.widget": {"extent": 12}}
+                }),
+                ..ThemeProfile::default()
+            })
+            .unwrap();
+        let accepted = runtime.snapshot();
+        let invalid = ThemeProfile {
+            overrides: json!({
+                "extension": {"com.example.widget": {"extent": 1000}}
+            }),
+            ..ThemeProfile::default()
+        };
+        assert!(runtime.publish(invalid).is_err());
+        assert!(Arc::ptr_eq(&accepted, &runtime.snapshot()));
     }
 }
