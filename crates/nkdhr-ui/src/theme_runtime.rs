@@ -43,7 +43,8 @@ impl ThemeSnapshot {
     }
 
     /// UI-7's independently compiled authoring/introspection hierarchy.
-    /// Component execution uses `motion_runtime` so policy remains final.
+    /// Existing widgets retain their accepted path; each future UI-7 visual
+    /// adoption must execute through `motion_runtime` so policy remains final.
     pub fn motion_style(&self) -> Arc<CompiledMotionStyle> {
         Arc::clone(&self.motion_style)
     }
