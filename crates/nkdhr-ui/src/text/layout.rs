@@ -59,7 +59,11 @@ pub struct TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
-            families: vec!["Noto Sans".to_owned()],
+            families: vec![
+                "Maple Mono NF CN".to_owned(),
+                "Maple Mono".to_owned(),
+                "Noto Sans".to_owned(),
+            ],
             weight: 400,
             slant: FontSlant::Normal,
             font_size: 16.0,

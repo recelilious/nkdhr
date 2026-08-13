@@ -8,12 +8,14 @@ attribute vec4 a_rect;
 attribute vec4 a_radii;
 attribute vec4 a_color;
 attribute vec4 a_parameters;
+attribute vec4 a_effect;
 
 varying vec2 v_local;
 varying vec4 v_rect;
 varying vec4 v_radii;
 varying vec4 v_color;
 varying vec4 v_parameters;
+varying vec4 v_effect;
 
 void main() {
     gl_Position = vec4(u_projection * vec3(a_position, 1.0), 1.0);
@@ -22,4 +24,5 @@ void main() {
     v_radii = a_radii;
     v_color = a_color;
     v_parameters = a_parameters;
+    v_effect = a_effect;
 }

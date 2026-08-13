@@ -774,6 +774,17 @@ runtime basis for the approved left/right split, return and fluid selection
 transfer, but UI-7C deliberately does not compose or restyle any existing
 component. Numerical visual tuning and component adoption remain owner-guided.
 
+The owner-approved future left-edge navigation consumer is explicitly not a
+rounded selection rectangle translated between rows. It must treat selection
+as one continuously conserved fluid mass: the mass deforms around intervening
+items, locally refracts/distorts sampled content beneath it, and retargets from
+the currently visible shape and velocity on every new input without queueing.
+Repeated navigation therefore remains phase-continuous instead of restarting a
+stock transition. The renderer must keep backdrop sampling, geometry and the
+selection envelope separate so theme/material changes do not alter hit bounds.
+Reduced and Off policy retain the same direct navigation result while removing
+distortion, topology and procedural variation as already required above.
+
 ## UI-7D: style-neutral editor state and unified targeted input
 
 `motion_editor::model` is a non-rendering authoring state machine. Its durable

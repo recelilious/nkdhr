@@ -7,10 +7,10 @@ use std::{
     time::Duration,
 };
 
-use nkdhr_render::{CornerRadii, Point, Rect};
+use nkdhr_render::{CornerRadii, Point, Rect, Shadow};
 
 use crate::text::{TextLayout, TextWrap};
-use crate::theme::with_alpha;
+use crate::theme::{mix, with_alpha};
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
     MeasureCtx, Modifiers, MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion,
@@ -18,7 +18,9 @@ use crate::{
     Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
+use super::surface::{
+    SurfaceState, paint_surface, resolve_fluid_material_tones, surface_theme_reads,
+};
 
 const DEFAULT_TYPEAHEAD_TIMEOUT: Duration = Duration::from_millis(700);
 const TREE_INDENT: f32 = 16.0;
@@ -1158,16 +1160,40 @@ fn paint_selection_mass(
         (list_rect.width - 8.0).max(0.0),
         (height - 8.0).max(0.0),
     );
+    let base = mix(theme.palette.surface, theme.palette.accent, 0.24);
+    let tones = resolve_fluid_material_tones(theme, base, true);
     ctx.builder().rounded_rect(
         mass,
         CornerRadii::all(theme.radii.control),
-        with_alpha(theme.palette.accent, 0.18 * opacity),
+        with_alpha(base, 0.58 * opacity),
+    )?;
+    ctx.builder().inset_shadow(
+        mass,
+        CornerRadii::all(theme.radii.control),
+        Shadow::new(
+            3.0,
+            3.0,
+            9.0,
+            0.0,
+            with_alpha(tones.highlight, tones.highlight_strength * 0.46 * opacity),
+        ),
+    )?;
+    ctx.builder().inset_shadow(
+        mass,
+        CornerRadii::all(theme.radii.control),
+        Shadow::new(
+            -3.0,
+            -3.0,
+            8.0,
+            0.0,
+            with_alpha(tones.shade, tones.shade_strength * 0.52 * opacity),
+        ),
     )?;
     ctx.builder().border(
         mass,
         CornerRadii::all(theme.radii.control),
         1.0,
-        with_alpha(theme.palette.accent_secondary, 0.60 * opacity),
+        with_alpha(tones.highlight, 0.045 * opacity),
     )?;
     Ok(())
 }

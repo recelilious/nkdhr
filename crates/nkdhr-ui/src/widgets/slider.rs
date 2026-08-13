@@ -9,7 +9,7 @@ use crate::{
     Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
+use super::surface::{SurfaceState, paint_fluid_surface, paint_fluid_well, surface_theme_reads};
 
 pub struct Slider {
     label: String,
@@ -253,16 +253,18 @@ impl Widget for Slider {
             (ctx.rect().width - node_size).max(0.0),
             track_height,
         );
-        let material = self
-            .theme
-            .resolve_material(MaterialTier::CompactNode, self.capabilities);
-        ctx.builder()
-            .rounded_rect(track, CornerRadii::all(track.height * 0.5), material.fill)?;
-        ctx.builder().border(
+        paint_fluid_well(
+            ctx.builder(),
             track,
             CornerRadii::all(track.height * 0.5),
-            1.0,
-            material.edge,
+            &self.theme,
+            self.capabilities,
+            SurfaceState {
+                hovered,
+                focused,
+                disabled: !self.enabled,
+                ..SurfaceState::default()
+            },
         )?;
 
         let fill_width = track.width * progress;
@@ -327,12 +329,11 @@ impl Widget for Slider {
             node_size,
             node_size,
         );
-        paint_surface(
+        paint_fluid_surface(
             ctx.builder(),
             node,
             CornerRadii::all(node_size * 0.5),
             &self.theme,
-            MaterialTier::CompactNode,
             self.capabilities,
             SurfaceState {
                 hovered,

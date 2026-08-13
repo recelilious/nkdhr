@@ -82,10 +82,19 @@ pub struct SettingsLayoutSpec {
     pub content_width: f32,
     pub inspector_is_drawer: bool,
     pub rows_are_stacked: bool,
+    pub focus_workspace: bool,
 }
 
 impl SettingsLayoutSpec {
     pub fn resolve(width: f32, professional_mode: bool) -> Self {
+        Self::resolve_internal(width, professional_mode, false)
+    }
+
+    fn resolve_focus_workspace(width: f32, professional_mode: bool) -> Self {
+        Self::resolve_internal(width, professional_mode, true)
+    }
+
+    fn resolve_internal(width: f32, professional_mode: bool, focus_workspace: bool) -> Self {
         let width = if width.is_finite() {
             width.max(0.0)
         } else {
@@ -94,14 +103,22 @@ impl SettingsLayoutSpec {
         let mode = SettingsLayoutMode::for_width(width);
         let inner = (width - LAYOUT_INSET * 2.0).max(0.0);
         let navigation_width = match mode {
+            SettingsLayoutMode::ThreeColumn | SettingsLayoutMode::NavigationAndContent
+                if focus_workspace =>
+            {
+                COMPACT_NAVIGATION_WIDTH.min(inner)
+            }
             SettingsLayoutMode::ThreeColumn | SettingsLayoutMode::NavigationAndContent => {
                 NAVIGATION_WIDTH.min(inner)
             }
             SettingsLayoutMode::CompactNavigation => COMPACT_NAVIGATION_WIDTH.min(inner),
             SettingsLayoutMode::SingleColumn => 0.0,
         };
-        let inspector_is_drawer = mode != SettingsLayoutMode::ThreeColumn;
-        let persistent_inspector = if professional_mode && mode == SettingsLayoutMode::ThreeColumn {
+        let fixed_inspector_leaves_graph =
+            inner - navigation_width - LAYOUT_GAP - INSPECTOR_WIDTH - LAYOUT_GAP >= 640.0;
+        let inspector_is_drawer = mode != SettingsLayoutMode::ThreeColumn
+            || (focus_workspace && !fixed_inspector_leaves_graph);
+        let persistent_inspector = if professional_mode && !inspector_is_drawer {
             INSPECTOR_WIDTH.min(inner)
         } else {
             0.0
@@ -115,14 +132,19 @@ impl SettingsLayoutSpec {
         } else {
             0.0
         };
-        let content_width = (inner - navigation_width - persistent_inspector - gaps)
-            .clamp(0.0, CONTENT_IDEAL_MAX_WIDTH);
+        let available_content = inner - navigation_width - persistent_inspector - gaps;
+        let content_width = if focus_workspace {
+            available_content.max(0.0)
+        } else {
+            available_content.clamp(0.0, CONTENT_IDEAL_MAX_WIDTH)
+        };
         Self {
             mode,
             navigation_width,
             content_width,
             inspector_is_drawer,
             rows_are_stacked: content_width < STACKED_ROW_BREAKPOINT,
+            focus_workspace,
         }
     }
 }
@@ -171,6 +193,7 @@ impl SettingsScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     Appearance,
+    MotionEditor,
     Wallpaper,
     EdgeComponents,
     Windows,
@@ -185,6 +208,7 @@ impl SettingsPage {
     const fn identity(self) -> u64 {
         match self {
             Self::Appearance => 1,
+            Self::MotionEditor => 10,
             Self::Wallpaper => 2,
             Self::EdgeComponents => 3,
             Self::Windows => 4,
@@ -199,6 +223,7 @@ impl SettingsPage {
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "外观与配色",
+            Self::MotionEditor => "动画工作室",
             Self::Wallpaper => "壁纸与画布",
             Self::EdgeComponents => "边缘组件",
             Self::Windows => "窗口与 workspace",
@@ -452,7 +477,7 @@ impl AppearanceSettings {
                 content_opacity: Reactive::new(86.0),
                 motion: Reactive::new(MotionPreference::Standard),
                 motion_speed: Reactive::new(100.0),
-                font_family: Reactive::new("Noto Sans".to_owned()),
+                font_family: Reactive::new("Maple Mono NF CN".to_owned()),
                 font_status: Reactive::new(TextInputStatus::Idle),
                 density: Reactive::new(ComponentDensity::Standard),
                 opacity_override: Reactive::new(false),
@@ -469,7 +494,7 @@ impl AppearanceSettings {
                 undo: RefCell::new(None),
                 opacity_tracker: RefCell::new(86.0),
                 speed_tracker: RefCell::new(100.0),
-                font_tracker: RefCell::new("Noto Sans".to_owned()),
+                font_tracker: RefCell::new("Maple Mono NF CN".to_owned()),
             }),
         }
     }
@@ -645,9 +670,33 @@ impl AppearanceSettings {
     }
 
     pub fn set_professional_mode(&self, enabled: bool) {
-        if self.state.professional_mode.set_if_changed(enabled) {
+        let changed = self.state.professional_mode.set_if_changed(enabled);
+        let closed_editor = !enabled && self.state.page.get() == SettingsPage::MotionEditor;
+        if closed_editor {
+            self.state.page.set(SettingsPage::Appearance);
+            self.state
+                .navigation_selection
+                .set(Some(SettingsPage::Appearance.identity()));
+        }
+        if changed || closed_editor {
             self.request_reconcile();
         }
+    }
+
+    /// Enter the UI-7E professional motion workspace without changing any
+    /// authored value. The global professional switch remains the authority.
+    pub fn open_motion_editor(&self) {
+        self.state.professional_mode.set(true);
+        self.state.page.set(SettingsPage::MotionEditor);
+        self.state
+            .navigation_selection
+            .set(Some(SettingsPage::Appearance.identity()));
+        self.state
+            .status
+            .set("动画曲线已在本地预览；尚未保存".to_owned());
+        self.state.feedback.set(SettingsFeedbackKind::Success);
+        self.state.feedback_setting.set(None);
+        self.request_reconcile();
     }
 
     pub fn search_query(&self) -> String {
@@ -780,6 +829,7 @@ impl AppearanceSettings {
         if !viewport.is_valid() {
             return Err(SettingsViewError::InvalidViewport);
         }
+        let motion_editor = self.state.page.get() == SettingsPage::MotionEditor;
         let mut resolved_theme = (*theme).clone();
         resolved_theme.content_surface.opacity =
             (self.state.content_opacity.get() / 100.0).clamp(0.0, 1.0);
@@ -812,12 +862,29 @@ impl AppearanceSettings {
             ..capabilities
         };
         let professional_mode = self.state.professional_mode.get();
-        let spec = SettingsLayoutSpec::resolve(viewport.width, professional_mode);
+        let spec = if motion_editor {
+            SettingsLayoutSpec::resolve_focus_workspace(viewport.width, professional_mode)
+        } else {
+            SettingsLayoutSpec::resolve(viewport.width, professional_mode)
+        };
         let nested = nested_capabilities(capabilities);
         let header = self.header(Arc::clone(&theme), nested, spec.mode);
-        let navigation = self.navigation(Arc::clone(&theme), nested, spec.mode, assets)?;
+        let navigation = self.navigation(Arc::clone(&theme), nested, spec, assets)?;
+        let navigation = if motion_editor {
+            crate::motion_editor_view::navigation_shell(Arc::clone(&theme), nested, navigation)
+        } else {
+            navigation
+        };
         let content = self.content(Arc::clone(&theme), nested, spec)?;
-        let inspector = self.inspector(Arc::clone(&theme), nested, spec.inspector_is_drawer);
+        let inspector = if motion_editor {
+            crate::motion_editor_view::inspector(
+                Arc::clone(&theme),
+                nested,
+                spec.inspector_is_drawer,
+            )?
+        } else {
+            self.inspector(Arc::clone(&theme), nested, spec.inspector_is_drawer)
+        };
         let body = Element::new(Padding {
             insets: Insets::all(LAYOUT_INSET),
         })
@@ -834,7 +901,7 @@ impl AppearanceSettings {
         );
         let status = self.status_bar(Arc::clone(&theme), nested);
         let shell = Element::new(SettingsShellLayout {
-            divider: alpha(theme.palette.edge, 0.12),
+            divider: alpha(theme.palette.edge, if motion_editor { 0.045 } else { 0.12 }),
         })
         .child(header)
         .child(body)
@@ -966,12 +1033,12 @@ impl AppearanceSettings {
             .on_change({
                 let model = self.clone();
                 move |enabled| {
+                    model.set_professional_mode(enabled);
                     model.set_status(if enabled {
                         "专业控制已展开，现有配置保持不变"
                     } else {
                         "专业控制已隐藏，现有配置保持不变"
                     });
-                    model.request_reconcile();
                 }
             }),
         ));
@@ -1009,10 +1076,10 @@ impl AppearanceSettings {
         &self,
         theme: Arc<Theme>,
         capabilities: MaterialCapabilities,
-        mode: SettingsLayoutMode,
+        spec: SettingsLayoutSpec,
         assets: &SettingsAssets,
     ) -> Result<Element, SettingsViewError> {
-        let compact = mode == SettingsLayoutMode::CompactNavigation;
+        let compact = spec.navigation_width <= COMPACT_NAVIGATION_WIDTH;
         let groups = [
             (
                 "个性化",
@@ -1066,7 +1133,7 @@ impl AppearanceSettings {
                     color: theme.palette.text_primary,
                 });
                 let content = if compact {
-                    icon
+                    Element::new(CompactNavigationSlot).child(icon)
                 } else {
                     Element::new(Flex {
                         axis: Axis::Horizontal,
@@ -1139,6 +1206,8 @@ impl AppearanceSettings {
         let page = self.state.page.get();
         let body = if page == SettingsPage::Appearance {
             self.appearance_page(Arc::clone(&theme), capabilities, spec.rows_are_stacked)?
+        } else if page == SettingsPage::MotionEditor {
+            return crate::motion_editor_view::workspace(theme, capabilities).map_err(Into::into);
         } else {
             self.placeholder_page(page, Arc::clone(&theme))
         };
@@ -1526,7 +1595,7 @@ impl AppearanceSettings {
                         .enabled(self.state.professional_mode.get())
                         .on_activate({
                             let model = self.clone();
-                            move || model.set_status("动画曲线编辑器将在专业模式中打开")
+                            move || model.open_motion_editor()
                         }),
                 ),
                 &theme,
@@ -2326,9 +2395,14 @@ impl SettingsBodyLayout {
                 0.0
             };
             let inspector_occupancy = (INSPECTOR_WIDTH + LAYOUT_GAP) * inspector_openness;
-            content.width =
+            let available =
                 (rect.width - self.spec.navigation_width - first_gap - inspector_occupancy)
-                    .clamp(0.0, CONTENT_IDEAL_MAX_WIDTH);
+                    .max(0.0);
+            content.width = if self.spec.focus_workspace {
+                available
+            } else {
+                available.min(CONTENT_IDEAL_MAX_WIDTH)
+            };
         }
         let inspector = if self.spec.inspector_is_drawer {
             let width = INSPECTOR_WIDTH.min(rect.width);
@@ -2552,6 +2626,39 @@ struct Divider {
 #[derive(Debug, Clone, Copy)]
 struct InputBarrier;
 
+/// Makes a compact navigation glyph consume the row's available content slot
+/// before centering its fixed-size mask. `ListItem` keeps its standard 16 px
+/// label inset for keyboard and pointer consistency, so centering the raw icon
+/// directly would place it eight pixels left of the 64 px rail center.
+#[derive(Debug, Clone, Copy)]
+struct CompactNavigationSlot;
+
+impl Widget for CompactNavigationSlot {
+    fn measure(&self, ctx: &mut MeasureCtx<'_>, constraints: Constraints) -> Result<Size, UiError> {
+        if ctx.child_count() != 1 {
+            return Err(UiError::ChildCountMismatch {
+                expected: 1,
+                actual: ctx.child_count(),
+            });
+        }
+        let child = ctx.measure_child(0, Constraints::new(Size::ZERO, constraints.max())?)?;
+        Ok(constraints.constrain(Size::new(constraints.max().width, child.height)))
+    }
+
+    fn arrange(&self, ctx: &mut ArrangeCtx<'_>, rect: Rect) -> Result<(), UiError> {
+        let child = ctx.child_size(0)?;
+        ctx.arrange_child(
+            0,
+            Rect::new(
+                rect.x + (rect.width - child.width).max(0.0) * 0.5,
+                rect.y + (rect.height - child.height).max(0.0) * 0.5,
+                child.width.min(rect.width),
+                child.height.min(rect.height),
+            ),
+        )
+    }
+}
+
 impl Widget for InputBarrier {
     fn accepts_pointer(&self) -> bool {
         true
@@ -2643,6 +2750,29 @@ mod tests {
         let medium = SettingsLayoutSpec::resolve(1_000.0, true);
         assert!(medium.inspector_is_drawer);
         assert_eq!(medium.content_width, 720.0);
+    }
+
+    #[test]
+    fn motion_focus_workspace_preserves_the_graph_before_the_inspector() {
+        let wide = SettingsLayoutSpec::resolve_focus_workspace(1_160.0, true);
+        assert_eq!(wide.navigation_width, 64.0);
+        assert_eq!(wide.content_width, 744.0);
+        assert!(!wide.inspector_is_drawer);
+
+        let medium = SettingsLayoutSpec::resolve_focus_workspace(1_000.0, true);
+        assert_eq!(medium.navigation_width, 64.0);
+        assert_eq!(medium.content_width, 888.0);
+        assert!(medium.inspector_is_drawer);
+
+        let compact = SettingsLayoutSpec::resolve_focus_workspace(760.0, true);
+        assert_eq!(compact.navigation_width, 64.0);
+        assert_eq!(compact.content_width, 648.0);
+        assert!(compact.inspector_is_drawer);
+
+        let minimum = SettingsLayoutSpec::resolve_focus_workspace(640.0, true);
+        assert_eq!(minimum.navigation_width, 0.0);
+        assert_eq!(minimum.content_width, 608.0);
+        assert!(minimum.inspector_is_drawer);
     }
 
     #[test]

@@ -182,6 +182,27 @@ impl SoftwareRenderer {
                     };
                     (shadow.color, coverage)
                 }
+                ShapeStyle::InsetShadow(shadow) => {
+                    let outer = edge_coverage(distance, effective_scale);
+                    let inset_rect = primitive.rect.inset(shadow.spread);
+                    let density = if inset_rect.is_empty() {
+                        1.0
+                    } else {
+                        let shifted =
+                            Point::new(local.x - shadow.offset_x, local.y - shadow.offset_y);
+                        let inset_distance = rounded_distance(
+                            shifted,
+                            inset_rect,
+                            primitive.radii.inset(shadow.spread).normalized(inset_rect),
+                        );
+                        if shadow.blur_radius <= 0.0 || inset_distance >= 0.0 {
+                            (inset_distance >= 0.0) as u8 as f32
+                        } else {
+                            (-0.5 * (inset_distance / shadow.blur_radius).powi(2)).exp()
+                        }
+                    };
+                    (shadow.color, outer * density)
+                }
             }
         });
     }
@@ -579,6 +600,33 @@ mod tests {
             .render(&builder.finish(), &TextureStore::new(), 1.0)
             .unwrap();
         assert!(renderer.rgba8()[(4 * 16 + 4) * 4 + 3] > 0);
+    }
+
+    #[test]
+    fn inset_shadow_stays_inside_and_respects_css_offset_direction() {
+        let mut renderer = SoftwareRenderer::new(16, 16).unwrap();
+        let mut builder = DisplayListBuilder::new();
+        builder
+            .inset_shadow(
+                Rect::new(2.0, 2.0, 12.0, 12.0),
+                CornerRadii::all(4.0),
+                Shadow::new(-3.0, -3.0, 2.0, 0.0, Color::from_srgba8(255, 255, 255, 255)),
+            )
+            .unwrap();
+        renderer
+            .render(&builder.finish(), &TextureStore::new(), 1.0)
+            .unwrap();
+        let pixels = renderer.rgba8();
+        let alpha = |x: usize, y: usize| pixels[(y * 16 + x) * 4 + 3];
+        assert_eq!(alpha(0, 8), 0, "inset density must not escape its shape");
+        assert!(
+            alpha(12, 8) > alpha(3, 8),
+            "negative X must place inset density on the right"
+        );
+        assert!(
+            alpha(8, 12) > alpha(8, 3),
+            "negative Y must place inset density on the bottom"
+        );
     }
 
     #[test]

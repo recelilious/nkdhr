@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nkdhr_render::{CornerRadii, Rect, Shadow};
+use nkdhr_render::{Color, CornerRadii, Rect, Shadow};
 
 use crate::theme::{mix, with_alpha};
 use crate::{
@@ -19,6 +19,45 @@ pub struct SurfaceState {
     pub selected: bool,
     pub disabled: bool,
     pub destructive: bool,
+}
+
+/// Theme-derived colors for one fluid material surface. The tones are mixed
+/// from the actual base, wallpaper/theme accents and contrast anchors rather
+/// than assuming that every theme uses white highlights and black shadows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FluidMaterialTones {
+    pub base: Color,
+    pub highlight: Color,
+    pub shade: Color,
+    pub highlight_strength: f32,
+    pub shade_strength: f32,
+}
+
+pub fn resolve_fluid_material_tones(
+    theme: &Theme,
+    base: Color,
+    accented: bool,
+) -> FluidMaterialTones {
+    let [red, green, blue, _] = base.components();
+    let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    let dark = luminance < 0.46;
+    let highlight_target = if accented {
+        mix(theme.palette.edge, theme.palette.accent, 0.28)
+    } else {
+        mix(theme.palette.edge, theme.palette.surface_raised, 0.24)
+    };
+    let shade_target = if accented {
+        mix(theme.palette.shadow, theme.palette.accent_secondary, 0.20)
+    } else {
+        mix(theme.palette.shadow, theme.palette.backdrop, 0.30)
+    };
+    FluidMaterialTones {
+        base,
+        highlight: mix(base, highlight_target, if dark { 0.34 } else { 0.58 }),
+        shade: mix(base, shade_target, if dark { 0.62 } else { 0.46 }),
+        highlight_strength: if dark { 0.40 } else { 0.58 },
+        shade_strength: if dark { 0.47 } else { 0.40 },
+    }
 }
 
 /// A calm frosted-glass container. Capable hosts receive a real painter-order
@@ -236,7 +275,7 @@ pub(crate) fn paint_surface(
             rect,
             radii,
             Shadow::new(
-                0.0,
+                shadow.offset_y,
                 shadow.offset_y,
                 shadow.blur,
                 0.0,
@@ -290,6 +329,170 @@ pub(crate) fn paint_surface(
             CornerRadii::all(radii.top_left + 3.0),
             2.0,
             with_alpha(theme.palette.accent_secondary, 0.80),
+        )?;
+    }
+    Ok(())
+}
+
+/// Paint a recessed, border-light fluid well for text fields, control tracks
+/// and bounded editors. Concave lighting is deliberately opposite to raised
+/// controls: shade enters from the top-left and the lower-right catches light.
+pub fn paint_fluid_well(
+    builder: &mut nkdhr_render::DisplayListBuilder,
+    rect: Rect,
+    radii: CornerRadii,
+    theme: &Theme,
+    capabilities: MaterialCapabilities,
+    state: SurfaceState,
+) -> Result<(), nkdhr_render::BuildError> {
+    let material = theme.resolve_material(MaterialTier::CompactNode, capabilities);
+    let radii = CornerRadii::all(radii.top_left.min(rect.height * 0.5));
+    let accented = state.accented || state.selected;
+    let base_tint = if accented {
+        mix(theme.palette.surface, theme.palette.accent, 0.26)
+    } else {
+        mix(theme.palette.surface, theme.palette.backdrop, 0.18)
+    };
+    let tones = resolve_fluid_material_tones(theme, base_tint, accented);
+    let depth = (rect.height.min(rect.width) * 0.10).clamp(1.0, 4.0);
+    let blur = (depth * 2.4).clamp(3.0, 11.0);
+    if material.backdrop_blur > 0.0 {
+        builder.backdrop_blur(rect, radii, material.backdrop_blur)?;
+    }
+    builder.rounded_rect(
+        rect,
+        radii,
+        with_alpha(tones.base, material.fill.components()[3]),
+    )?;
+    if !capabilities.high_contrast {
+        builder.inset_shadow(
+            rect,
+            radii,
+            Shadow::new(
+                depth,
+                depth,
+                blur,
+                0.0,
+                with_alpha(tones.shade, tones.shade_strength * 0.86),
+            ),
+        )?;
+        builder.inset_shadow(
+            rect,
+            radii,
+            Shadow::new(
+                -depth,
+                -depth,
+                blur * 1.12,
+                0.0,
+                with_alpha(tones.highlight, tones.highlight_strength * 0.48),
+            ),
+        )?;
+    }
+    if state.disabled {
+        builder.rounded_rect(rect, radii, with_alpha(theme.palette.backdrop, 0.28))?;
+    }
+    let edge = if state.focused {
+        with_alpha(theme.palette.accent, 0.44)
+    } else if capabilities.high_contrast {
+        with_alpha(theme.palette.edge, 0.86)
+    } else {
+        with_alpha(tones.highlight, 0.035)
+    };
+    builder.border(
+        rect,
+        radii,
+        if capabilities.high_contrast { 2.0 } else { 1.0 },
+        edge,
+    )?;
+    Ok(())
+}
+
+/// Paint a compact clay-and-glass hybrid from one outer shadow and two true
+/// inset shadows. This mirrors the open clay.css model while retaining nkdhr's
+/// real backdrop blur and interaction-driven compression.
+pub(crate) fn paint_fluid_surface(
+    builder: &mut nkdhr_render::DisplayListBuilder,
+    rect: Rect,
+    radii: CornerRadii,
+    theme: &Theme,
+    capabilities: MaterialCapabilities,
+    state: SurfaceState,
+) -> Result<(), nkdhr_render::BuildError> {
+    let radii = CornerRadii::all(radii.top_left.min(rect.height * 0.5));
+    let material = theme.resolve_material(MaterialTier::CompactNode, capabilities);
+    let hover = state.hovered.clamp(0.0, 1.0);
+    let press = state.pressed.clamp(0.0, 1.0);
+    let depth = (rect.height * 0.16).clamp(3.0, 7.0) * (1.0 - press * 0.62);
+    let blur = (rect.height * 0.36).clamp(8.0, 18.0);
+    let base_tint = if state.destructive {
+        mix(theme.palette.surface, theme.palette.error, 0.34)
+    } else if state.accented {
+        mix(theme.palette.surface, theme.palette.accent, 0.42)
+    } else if state.selected {
+        mix(theme.palette.surface, theme.palette.accent_secondary, 0.30)
+    } else {
+        mix(theme.palette.surface, theme.palette.surface_raised, 0.16)
+    };
+    let tones = resolve_fluid_material_tones(
+        theme,
+        base_tint,
+        state.selected || state.accented || state.destructive,
+    );
+    let base = with_alpha(tones.base, (material.fill.components()[3] + 0.16).min(0.82));
+    let outer_depth = (1.5 + hover * 1.5) * (1.0 - press * 0.72);
+
+    builder.shadow(
+        rect,
+        radii,
+        Shadow::new(
+            outer_depth,
+            outer_depth,
+            blur * 0.92,
+            0.0,
+            with_alpha(tones.shade, 0.14 + hover * 0.05),
+        ),
+    )?;
+    if material.backdrop_blur > 0.0 {
+        builder.backdrop_blur(rect, radii, material.backdrop_blur)?;
+    }
+    builder.rounded_rect(rect, radii, base)?;
+    if !capabilities.high_contrast {
+        builder.inset_shadow(
+            rect,
+            radii,
+            Shadow::new(
+                -depth,
+                -depth,
+                blur,
+                0.0,
+                with_alpha(tones.shade, tones.shade_strength * (0.88 + press * 0.12)),
+            ),
+        )?;
+        builder.inset_shadow(
+            rect,
+            radii,
+            Shadow::new(
+                depth * 0.82,
+                depth * 0.82,
+                blur * 1.28,
+                0.0,
+                with_alpha(
+                    tones.highlight,
+                    tones.highlight_strength * (0.78 - press * 0.20),
+                ),
+            ),
+        )?;
+    }
+    if state.disabled {
+        builder.rounded_rect(rect, radii, with_alpha(theme.palette.backdrop, 0.24))?;
+    }
+    builder.border(rect, radii, 1.0, with_alpha(tones.highlight, 0.035))?;
+    if state.focused {
+        builder.border(
+            rect.expand(3.0),
+            CornerRadii::all(radii.top_left + 3.0),
+            2.0,
+            with_alpha(theme.palette.accent, 0.74),
         )?;
     }
     Ok(())
@@ -393,5 +596,54 @@ mod tests {
             })
             .unwrap();
         assert!(blur_index < fill_index);
+    }
+
+    #[test]
+    fn fluid_tones_follow_the_theme_and_do_not_reuse_one_fixed_pair() {
+        let dark = Theme::default();
+        let dark_tones = resolve_fluid_material_tones(&dark, dark.palette.surface, false);
+        assert_ne!(dark_tones.highlight, dark_tones.shade);
+
+        let mut light = dark.clone();
+        light.palette.backdrop = Color::from_srgba8(225, 235, 244, 255);
+        light.palette.surface = Color::from_srgba8(240, 246, 250, 255);
+        light.palette.surface_raised = Color::WHITE;
+        light.palette.edge = Color::WHITE;
+        light.palette.shadow = Color::from_srgba8(75, 104, 128, 255);
+        let light_tones = resolve_fluid_material_tones(&light, light.palette.surface, false);
+        assert_ne!(dark_tones.highlight, light_tones.highlight);
+        assert_ne!(dark_tones.shade, light_tones.shade);
+        assert!(light_tones.highlight_strength > dark_tones.highlight_strength);
+    }
+
+    #[test]
+    fn fluid_well_uses_concave_insets_without_an_attached_drop_shadow() {
+        let theme = Theme::default();
+        let mut builder = DisplayListBuilder::new();
+        paint_fluid_well(
+            &mut builder,
+            Rect::new(0.0, 0.0, 120.0, 36.0),
+            CornerRadii::all(10.0),
+            &theme,
+            MaterialCapabilities::default(),
+            SurfaceState::default(),
+        )
+        .unwrap();
+        let list = builder.finish();
+        assert_eq!(
+            list.primitives()
+                .iter()
+                .filter(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape(shape)
+                        if matches!(shape.style, ShapeStyle::InsetShadow(_))
+                ))
+                .count(),
+            2
+        );
+        assert!(!list.primitives().iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Shape(shape) if matches!(shape.style, ShapeStyle::Shadow(_))
+        )));
     }
 }

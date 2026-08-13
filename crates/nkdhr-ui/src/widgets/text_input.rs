@@ -12,7 +12,7 @@ use crate::{
     Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
+use super::surface::{SurfaceState, paint_fluid_well, surface_theme_reads};
 
 type TextCallback = Rc<dyn Fn(&str)>;
 type FormatterCallback = Rc<dyn Fn(TextInputEdit) -> TextInputEdit>;
@@ -644,12 +644,11 @@ impl Widget for TextInput {
             ctx.request_animation_frame();
         }
         let rect = ctx.rect();
-        paint_surface(
+        paint_fluid_well(
             ctx.builder(),
             rect,
             CornerRadii::all(self.theme.radii.control),
             &self.theme,
-            MaterialTier::CompactNode,
             self.capabilities,
             SurfaceState {
                 focused,

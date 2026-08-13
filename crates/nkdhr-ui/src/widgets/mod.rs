@@ -18,7 +18,9 @@ pub use scroll::{
     Scroll, ScrollAnchor, ScrollAxis, ScrollError, ScrollOffset, ScrollReveal, ScrollbarPolicy,
 };
 pub use slider::{Slider, SliderError};
-pub use surface::{GlassSurface, SurfaceState};
+pub use surface::{
+    FluidMaterialTones, GlassSurface, SurfaceState, paint_fluid_well, resolve_fluid_material_tones,
+};
 pub use text::Text;
 pub use text_input::{
     PasswordCopyPolicy, TextInput, TextInputEdit, TextInputEnterBehavior, TextInputError,

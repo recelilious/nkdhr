@@ -117,12 +117,15 @@ impl Default for FontStacks {
     fn default() -> Self {
         Self {
             ui: vec![
+                "Maple Mono NF CN".to_owned(),
+                "Maple Mono".to_owned(),
                 "Noto Sans".to_owned(),
                 "Noto Sans CJK SC".to_owned(),
                 "system-ui".to_owned(),
                 "Noto Color Emoji".to_owned(),
             ],
             mono: vec![
+                "Maple Mono NF CN".to_owned(),
                 "Maple Mono".to_owned(),
                 "Noto Sans Mono".to_owned(),
                 "monospace".to_owned(),
@@ -466,7 +469,7 @@ impl Theme {
         let edge_alpha = if capabilities.high_contrast {
             0.86
         } else {
-            0.28
+            0.10
         };
         let inverse_alpha = if capabilities.high_contrast {
             0.56
@@ -476,7 +479,7 @@ impl Theme {
         let inner_alpha = if capabilities.high_contrast {
             0.32
         } else {
-            0.10
+            0.04
         };
         ResolvedMaterial {
             fill: with_alpha(self.palette.surface, opacity),

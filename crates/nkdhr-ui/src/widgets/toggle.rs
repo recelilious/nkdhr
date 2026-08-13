@@ -9,7 +9,7 @@ use crate::{
     SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
+use super::surface::{SurfaceState, paint_fluid_surface, paint_fluid_well, surface_theme_reads};
 
 pub struct Toggle {
     label: String,
@@ -205,17 +205,17 @@ impl Widget for Toggle {
             metrics.toggle_width,
             metrics.toggle_height,
         );
-        paint_surface(
+        paint_fluid_well(
             ctx.builder(),
             track,
             CornerRadii::all(track.height * 0.5),
             &self.theme,
-            MaterialTier::CompactNode,
             self.capabilities,
             SurfaceState {
                 hovered,
                 pressed,
                 focused,
+                selected: value,
                 disabled: !self.enabled,
                 ..SurfaceState::default()
             },
@@ -253,21 +253,20 @@ impl Widget for Toggle {
             )?;
         }
 
-        let node_color = if value || transition_active {
-            self.theme.palette.accent
-        } else {
-            self.theme.palette.text_secondary
-        };
-        ctx.builder().rounded_rect(
+        paint_fluid_surface(
+            ctx.builder(),
             node_rect,
             CornerRadii::all(node_size * 0.5),
-            with_alpha(node_color, if self.enabled { 0.96 } else { 0.52 }),
-        )?;
-        ctx.builder().border(
-            node_rect,
-            CornerRadii::all(node_size * 0.5),
-            1.0,
-            with_alpha(self.theme.palette.edge, 0.34),
+            &self.theme,
+            self.capabilities,
+            SurfaceState {
+                hovered,
+                pressed,
+                focused,
+                accented: value || transition_active,
+                disabled: !self.enabled,
+                ..SurfaceState::default()
+            },
         )?;
         if pending {
             let width = (track.width * 0.22).clamp(5.0, 9.0).min(track.width);

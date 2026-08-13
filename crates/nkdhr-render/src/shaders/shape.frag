@@ -7,6 +7,7 @@ varying vec4 v_rect;
 varying vec4 v_radii;
 varying vec4 v_color;
 varying vec4 v_parameters;
+varying vec4 v_effect;
 
 float corner_radius(vec2 point, vec4 rect, vec4 radii) {
     vec2 center = rect.xy + rect.zw * 0.5;
@@ -36,7 +37,31 @@ void main() {
     float distance;
     float alpha;
 
-    if (kind > 2.5) {
+    if (kind > 3.5) {
+        distance = rounded_distance(v_local, v_rect, v_radii);
+        float outer = coverage(distance, effective_scale);
+        float spread = v_effect.z;
+        vec4 inset_rect = vec4(
+            v_rect.xy + vec2(spread),
+            max(v_rect.zw - vec2(spread * 2.0), 0.0)
+        );
+        vec4 inset_radii = max(v_radii - vec4(spread), 0.0);
+        float inset_distance = rounded_distance(
+            v_local - v_effect.xy,
+            inset_rect,
+            inset_radii
+        );
+        float density;
+        if (blur_radius <= 0.0) {
+            density = step(0.0, inset_distance);
+        } else if (inset_distance >= 0.0) {
+            density = 1.0;
+        } else {
+            float normalized = inset_distance / blur_radius;
+            density = exp(-0.5 * normalized * normalized);
+        }
+        alpha = outer * density;
+    } else if (kind > 2.5) {
         vec2 lower = v_rect.xy - v_local;
         vec2 upper = v_local - (v_rect.xy + v_rect.zw);
         distance = max(max(lower.x, lower.y), max(upper.x, upper.y));

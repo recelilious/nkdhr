@@ -32,8 +32,18 @@ impl Shadow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeStyle {
     Fill(Color),
-    Border { width: f32, color: Color },
+    Border {
+        width: f32,
+        color: Color,
+    },
     Shadow(Shadow),
+    /// A blurred shadow cast inward from the rounded shape boundary.
+    ///
+    /// The offset follows CSS inset-shadow semantics: negative X/Y places
+    /// density on the right/bottom, while positive X/Y places it on the
+    /// left/top. Keeping this renderer-native avoids approximating soft
+    /// volume with stacks of visibly nested rectangles.
+    InsetShadow(Shadow),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +298,34 @@ impl DisplayListBuilder {
             return Err(BuildError::InvalidShadow);
         }
         self.shape(rect, radii, ShapeStyle::Shadow(shadow))
+    }
+
+    pub fn inset_shadow(
+        &mut self,
+        rect: Rect,
+        radii: CornerRadii,
+        shadow: Shadow,
+    ) -> Result<(), BuildError> {
+        validate_rect(rect)?;
+        if !radii.is_valid() {
+            return Err(BuildError::InvalidRadius);
+        }
+        if ![
+            shadow.offset_x,
+            shadow.offset_y,
+            shadow.blur_radius,
+            shadow.spread,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+            || shadow.blur_radius < 0.0
+        {
+            return Err(BuildError::InvalidShadow);
+        }
+        if rect.is_empty() {
+            return Ok(());
+        }
+        self.shape(rect, radii, ShapeStyle::InsetShadow(shadow))
     }
 
     pub fn texture(

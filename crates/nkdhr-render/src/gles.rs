@@ -179,6 +179,7 @@ struct ShapeVertex {
     radii: [f32; 4],
     color: [f32; 4],
     parameters: [f32; 4],
+    effect: [f32; 4],
 }
 
 #[repr(C)]
@@ -304,6 +305,7 @@ struct ShapeProgram {
     radii: u32,
     color: u32,
     parameters: u32,
+    effect: u32,
 }
 
 #[derive(Debug)]
@@ -647,7 +649,7 @@ fn backdrop_vertices(
 
 fn shape_vertices(primitive: ShapePrimitive, target_scale: f32) -> Vec<ShapeVertex> {
     let scale = effective_scale(primitive, target_scale);
-    let (shape_rect, radii, draw_rects, color, parameters) = match primitive.style {
+    let (shape_rect, radii, draw_rects, color, parameters, effect) = match primitive.style {
         ShapeStyle::Fill(color) => {
             let kind = if primitive.radii == CornerRadii::ZERO {
                 3.0
@@ -660,6 +662,7 @@ fn shape_vertices(primitive: ShapePrimitive, target_scale: f32) -> Vec<ShapeVert
                 vec![primitive.rect],
                 color,
                 [kind, 0.0, 0.0, scale],
+                [0.0; 4],
             )
         }
         ShapeStyle::Border { width, color } => (
@@ -668,6 +671,7 @@ fn shape_vertices(primitive: ShapePrimitive, target_scale: f32) -> Vec<ShapeVert
             border_draw_rects(primitive.rect, primitive.radii, width, scale),
             color,
             [1.0, width, 0.0, scale],
+            [0.0; 4],
         ),
         ShapeStyle::Shadow(shadow) => {
             let rect = Rect::new(
@@ -687,8 +691,17 @@ fn shape_vertices(primitive: ShapePrimitive, target_scale: f32) -> Vec<ShapeVert
                 vec![rect.expand(shadow.blur_radius * 3.0 + 1.0 / target_scale)],
                 shadow.color,
                 [2.0, 0.0, shadow.blur_radius, scale],
+                [0.0; 4],
             )
         }
+        ShapeStyle::InsetShadow(shadow) => (
+            primitive.rect,
+            primitive.radii,
+            vec![primitive.rect],
+            shadow.color,
+            [4.0, 0.0, shadow.blur_radius, scale],
+            [shadow.offset_x, shadow.offset_y, shadow.spread, 0.0],
+        ),
     };
     let rect = [
         shape_rect.x,
@@ -710,6 +723,7 @@ fn shape_vertices(primitive: ShapePrimitive, target_scale: f32) -> Vec<ShapeVert
                     radii,
                     color,
                     parameters,
+                    effect,
                 }
             })
         })
@@ -863,6 +877,7 @@ fn create_resources(
             radii: attribute(gl, shape_id, "a_radii")?,
             color: attribute(gl, shape_id, "a_color")?,
             parameters: attribute(gl, shape_id, "a_parameters")?,
+            effect: attribute(gl, shape_id, "a_effect")?,
         };
         let texture = TextureProgram {
             id: texture_id,
@@ -1506,6 +1521,13 @@ fn draw_shape_batch(
             4,
             buffer_offset + offset_of!(ShapeVertex, parameters),
         );
+        enable_attribute::<ShapeVertex>(
+            gl,
+            resources.reset_attribute_divisors,
+            program.effect,
+            4,
+            buffer_offset + offset_of!(ShapeVertex, effect),
+        );
         gl.DrawArrays(ffi::TRIANGLES, 0, vertex_count as i32);
         for attribute in [
             program.position,
@@ -1514,6 +1536,7 @@ fn draw_shape_batch(
             program.radii,
             program.color,
             program.parameters,
+            program.effect,
         ] {
             gl.DisableVertexAttribArray(attribute);
         }

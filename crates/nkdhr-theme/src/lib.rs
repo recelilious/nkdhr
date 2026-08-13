@@ -256,12 +256,15 @@ impl Default for TypographyData {
     fn default() -> Self {
         Self {
             ui_families: vec![
+                "Maple Mono NF CN".into(),
+                "Maple Mono".into(),
                 "Noto Sans".into(),
                 "Noto Sans CJK SC".into(),
                 "system-ui".into(),
                 "Noto Color Emoji".into(),
             ],
             mono_families: vec![
+                "Maple Mono NF CN".into(),
                 "Maple Mono".into(),
                 "Noto Sans Mono".into(),
                 "monospace".into(),

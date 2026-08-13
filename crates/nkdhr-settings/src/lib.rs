@@ -3,6 +3,7 @@
 mod appearance;
 mod host;
 mod interaction;
+mod motion_editor_view;
 mod motion_presets;
 mod theme_profiles;
 

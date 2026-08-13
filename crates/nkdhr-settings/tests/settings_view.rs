@@ -20,6 +20,8 @@ const GOLDEN_HEIGHT: u32 = 760;
 fn fixture_text_resources() -> TextResources {
     let mut database = fontdb::Database::new();
     for bytes in [
+        include_bytes!("fonts/MapleMonoNF-CN.appearance.subset.ttf").as_slice(),
+        include_bytes!("fonts/MapleMonoNF-CN-Italic.appearance.subset.ttf").as_slice(),
         include_bytes!("../../nkdhr-ui/tests/fonts/NotoSansLatin.subset.ttf").as_slice(),
         include_bytes!("fonts/NotoSansCJKsc.appearance.subset.otf").as_slice(),
         include_bytes!("../../nkdhr-ui/tests/fonts/NotoColorEmoji.subset.ttf").as_slice(),
@@ -278,6 +280,72 @@ fn accepted_wide_composition_matches_the_committed_software_golden() {
         )
     });
     assert_eq!(actual, expected, "Settings composition golden changed");
+}
+
+#[test]
+fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, list) = settings_list(&model, size, capabilities());
+    let [navigation, graph_workspace, inspector] = body_children(&root);
+    assert_eq!(root.rect(navigation).unwrap().width, 64.0);
+    let navigation_rect = root.rect(navigation).unwrap();
+    let mut stack = vec![navigation];
+    let mut compact_icons = Vec::new();
+    while let Some(widget) = stack.pop() {
+        let children = root.children(widget).unwrap();
+        if children.is_empty() {
+            let rect = root.rect(widget).unwrap();
+            if (rect.width - 18.0).abs() < 0.001 && (rect.height - 18.0).abs() < 0.001 {
+                compact_icons.push(rect);
+            }
+        } else {
+            stack.extend_from_slice(children);
+        }
+    }
+    assert_eq!(compact_icons.len(), 9);
+    for icon in compact_icons {
+        assert!((icon.x + icon.width * 0.5 - (navigation_rect.x + 32.0)).abs() < 0.001);
+    }
+    assert_eq!(root.rect(graph_workspace).unwrap().width, 744.0);
+    assert_eq!(root.rect(inspector).unwrap().width, 288.0);
+    assert_eq!(root.rect(inspector).unwrap().x, 856.0);
+    let [scope_rail, graph, preview] = root.children(graph_workspace).unwrap().try_into().unwrap();
+    assert_eq!(root.rect(scope_rail).unwrap().height, 88.0);
+    assert_eq!(root.rect(graph).unwrap().height, 356.0);
+    assert_eq!(root.rect(preview).unwrap().height, 176.0);
+    assert_eq!(
+        list.primitives()
+            .iter()
+            .filter(|primitive| matches!(primitive, Primitive::BackdropBlur(_)))
+            .count(),
+        1,
+        "the continuous Settings workface owns the only backdrop blur"
+    );
+    let semantics = root.semantic_tree();
+    assert!(semantics.iter().any(|node| {
+        node.semantics.role == SemanticRole::Group
+            && node.semantics.label.as_deref() == Some("专业动画工作室")
+    }));
+    assert!(semantics.iter().any(|node| {
+        node.semantics.role == SemanticRole::Group
+            && node.semantics.label.as_deref() == Some("真实设置面板动画预览")
+    }));
+
+    if let Some(directory) = std::env::var_os("DUMP_MOTION_P1") {
+        fs::create_dir_all(&directory).unwrap();
+        let mut renderer = SoftwareRenderer::new(GOLDEN_WIDTH, GOLDEN_HEIGHT).unwrap();
+        renderer.clear(Color::from_srgba8(14, 19, 35, 255));
+        renderer
+            .render(&list, root.texture_store().unwrap(), 1.0)
+            .unwrap();
+        fs::write(
+            PathBuf::from(directory).join("motion-workspace-p1.ppm"),
+            renderer.ppm(),
+        )
+        .unwrap();
+    }
 }
 
 #[test]

@@ -9,7 +9,7 @@ use crate::{
     SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx, Widget,
 };
 
-use super::surface::{SurfaceState, paint_surface, surface_theme_reads};
+use super::surface::{SurfaceState, paint_fluid_surface, paint_surface, surface_theme_reads};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ButtonVariant {
@@ -19,6 +19,8 @@ pub enum ButtonVariant {
     Quiet,
     Destructive,
     Selected,
+    Fluid,
+    FluidSelected,
 }
 
 pub struct Button {
@@ -243,23 +245,38 @@ impl Widget for Button {
             ButtonVariant::Quiet => MaterialTier::Ghost,
             _ => MaterialTier::CompactNode,
         };
-        paint_surface(
-            ctx.builder(),
-            rect,
-            CornerRadii::all(self.theme.radii.control),
-            &self.theme,
-            tier,
-            self.capabilities,
-            SurfaceState {
-                hovered,
-                pressed,
-                focused,
-                accented: matches!(self.variant, ButtonVariant::Primary),
-                selected: matches!(self.variant, ButtonVariant::Selected),
-                disabled: !self.enabled,
-                destructive: matches!(self.variant, ButtonVariant::Destructive),
-            },
-        )?;
+        let surface_state = SurfaceState {
+            hovered,
+            pressed,
+            focused,
+            accented: matches!(self.variant, ButtonVariant::Primary),
+            selected: matches!(
+                self.variant,
+                ButtonVariant::Selected | ButtonVariant::FluidSelected
+            ),
+            disabled: !self.enabled,
+            destructive: matches!(self.variant, ButtonVariant::Destructive),
+        };
+        if self.variant != ButtonVariant::Quiet {
+            paint_fluid_surface(
+                ctx.builder(),
+                rect,
+                CornerRadii::all(self.theme.radii.control),
+                &self.theme,
+                self.capabilities,
+                surface_state,
+            )?;
+        } else {
+            paint_surface(
+                ctx.builder(),
+                rect,
+                CornerRadii::all(self.theme.radii.control),
+                &self.theme,
+                tier,
+                self.capabilities,
+                surface_state,
+            )?;
+        }
         if self.pending {
             let edge_width = (rect.width * 0.24).clamp(10.0, 32.0).min(rect.width);
             let travel = (rect.width - edge_width).max(0.0);
