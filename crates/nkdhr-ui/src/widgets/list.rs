@@ -393,6 +393,7 @@ pub struct List {
     entries: Vec<ListEntry>,
     theme: Arc<Theme>,
     material_tier: MaterialTier,
+    paint_panel_surface: bool,
     capabilities: MaterialCapabilities,
     virtual_window: ListVirtualWindow,
     page_step: usize,
@@ -438,6 +439,7 @@ impl List {
             entries,
             theme,
             material_tier: MaterialTier::ContentSurface,
+            paint_panel_surface: true,
             capabilities: MaterialCapabilities::default(),
             virtual_window: ListVirtualWindow::default(),
             page_step: 5,
@@ -457,6 +459,14 @@ impl List {
     /// List's continuous selection, focus and keyboard behavior.
     pub fn material_tier(mut self, tier: MaterialTier) -> Self {
         self.material_tier = tier;
+        self
+    }
+
+    /// Selects whether List paints its own shared panel. A list embedded in a
+    /// material-owning shell may delegate that one background while retaining
+    /// selection mass, separators, focus, scrolling and keyboard behavior.
+    pub fn panel_surface(mut self, visible: bool) -> Self {
+        self.paint_panel_surface = visible;
         self
     }
 
@@ -680,15 +690,17 @@ impl Widget for List {
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
         let selection = self.selection.watch_paint(ctx);
         let rect = ctx.rect();
-        paint_surface(
-            ctx.builder(),
-            rect,
-            CornerRadii::all(self.theme.radii.group),
-            &self.theme,
-            self.material_tier,
-            self.capabilities,
-            SurfaceState::default(),
-        )?;
+        if self.paint_panel_surface {
+            paint_surface(
+                ctx.builder(),
+                rect,
+                CornerRadii::all(self.theme.radii.group),
+                &self.theme,
+                self.material_tier,
+                self.capabilities,
+                SurfaceState::default(),
+            )?;
+        }
 
         let selected_position = selection
             .cursor()

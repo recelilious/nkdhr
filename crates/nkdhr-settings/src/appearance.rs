@@ -1198,6 +1198,7 @@ impl AppearanceSettings {
         );
         let list = List::from_entries("设置分类", selection, entries, Arc::clone(&theme))?
             .material_tier(MaterialTier::Ghost)
+            .panel_surface(self.state.page.get() != SettingsPage::MotionEditor)
             .capabilities(capabilities);
         Ok(Element::new(
             Scroll::new(
