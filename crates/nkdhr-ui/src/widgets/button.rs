@@ -180,7 +180,7 @@ impl Widget for Button {
             });
         }
         let metrics = self.theme.density_metrics();
-        let horizontal = self.theme.spacing.small + 2.0;
+        let horizontal = self.theme.spacing.small + 5.0;
         let child = if ctx.child_count() == 1 {
             ctx.measure_child(
                 0,

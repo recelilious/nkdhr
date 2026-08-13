@@ -307,7 +307,12 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
     }
     assert_eq!(compact_icons.len(), 9);
     for icon in compact_icons {
-        assert!((icon.x + icon.width * 0.5 - (navigation_rect.x + 32.0)).abs() < 0.001);
+        let icon_center = icon.x + icon.width * 0.5;
+        let navigation_center = navigation_rect.x + navigation_rect.width * 0.5;
+        assert!(
+            (icon_center - navigation_center).abs() < 0.001,
+            "navigation icon center {icon_center} drifted from panel center {navigation_center}"
+        );
     }
     assert_eq!(root.rect(graph_workspace).unwrap().width, 744.0);
     assert_eq!(root.rect(inspector).unwrap().width, 288.0);
@@ -365,7 +370,7 @@ fn professional_motion_graph_edits_the_persistent_editor_session() {
                 .is_some_and(|label| label.starts_with("动画曲线图："))
         })
         .expect("the professional graph exposes its semantic node");
-    let plot = graph.bounds.inset(18.0);
+    let plot = graph.bounds.inset(24.0);
     let before = model.motion_editor_snapshot();
     let compiled = CompiledMotionCurve::compile(&before.curve).unwrap();
     let viewport = before.viewport;

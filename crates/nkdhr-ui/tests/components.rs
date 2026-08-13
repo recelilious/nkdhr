@@ -496,7 +496,7 @@ fn settings_like_scene_composes_only_public_ui_api_at_two_widths() {
     renderer
         .render(&wide, root.texture_store().unwrap(), 1.0)
         .unwrap();
-    assert_eq!(fnv1a(&renderer.rgba8()), 1_968_117_801_567_311_312);
+    assert_eq!(fnv1a(&renderer.rgba8()), 16_050_547_116_187_463_765);
 
     let mut compact_theme = (*theme).clone();
     compact_theme.density = Density::Compact;

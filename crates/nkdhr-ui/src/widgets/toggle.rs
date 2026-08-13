@@ -221,7 +221,7 @@ impl Widget for Toggle {
             },
         )?;
 
-        let inset = 2.0;
+        let inset = 3.0;
         let node_size = (track.height - inset * 2.0).max(0.0);
         let left = track.x + inset + node_size * 0.5;
         let right = track.right() - inset - node_size * 0.5;

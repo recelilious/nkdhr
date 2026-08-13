@@ -354,8 +354,11 @@ pub fn paint_fluid_well(
         mix(theme.palette.surface, theme.palette.backdrop, 0.18)
     };
     let tones = resolve_fluid_material_tones(theme, base_tint, accented);
-    let depth = (rect.height.min(rect.width) * 0.10).clamp(1.0, 4.0);
-    let blur = (depth * 2.4).clamp(3.0, 11.0);
+    // A well's inset light is an edge thickness, not a second background
+    // layer. Keep its opacity strong enough to describe the concavity while
+    // limiting how far it can enter the content-safe center.
+    let depth = (rect.height.min(rect.width) * 0.065).clamp(1.0, 3.0);
+    let blur = (depth * 1.6).clamp(2.5, 6.5);
     if material.backdrop_blur > 0.0 {
         builder.backdrop_blur(rect, radii, material.backdrop_blur)?;
     }
@@ -422,8 +425,11 @@ pub(crate) fn paint_fluid_surface(
     let material = theme.resolve_material(MaterialTier::CompactNode, capabilities);
     let hover = state.hovered.clamp(0.0, 1.0);
     let press = state.pressed.clamp(0.0, 1.0);
-    let depth = (rect.height * 0.16).clamp(3.0, 7.0) * (1.0 - press * 0.62);
-    let blur = (rect.height * 0.36).clamp(8.0, 18.0);
+    let inner_depth = (rect.height * 0.11).clamp(2.25, 4.75) * (1.0 - press * 0.62);
+    let inner_blur = (rect.height * 0.20).clamp(5.0, 10.5);
+    // Preserve the accepted soft external elevation independently from the
+    // narrower inset band.
+    let outer_blur = (rect.height * 0.36).clamp(8.0, 18.0);
     let base_tint = if state.destructive {
         mix(theme.palette.surface, theme.palette.error, 0.34)
     } else if state.accented {
@@ -447,7 +453,7 @@ pub(crate) fn paint_fluid_surface(
         Shadow::new(
             outer_depth,
             outer_depth,
-            blur * 0.92,
+            outer_blur * 0.92,
             0.0,
             with_alpha(tones.shade, 0.14 + hover * 0.05),
         ),
@@ -461,9 +467,9 @@ pub(crate) fn paint_fluid_surface(
             rect,
             radii,
             Shadow::new(
-                -depth,
-                -depth,
-                blur,
+                -inner_depth,
+                -inner_depth,
+                inner_blur,
                 0.0,
                 with_alpha(tones.shade, tones.shade_strength * (0.88 + press * 0.12)),
             ),
@@ -472,9 +478,9 @@ pub(crate) fn paint_fluid_surface(
             rect,
             radii,
             Shadow::new(
-                depth * 0.82,
-                depth * 0.82,
-                blur * 1.28,
+                inner_depth * 0.82,
+                inner_depth * 0.82,
+                inner_blur * 1.18,
                 0.0,
                 with_alpha(
                     tones.highlight,

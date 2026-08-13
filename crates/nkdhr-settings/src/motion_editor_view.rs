@@ -32,6 +32,7 @@ const PREVIEW_HEIGHT: f32 = 176.0;
 const PREVIEW_RAIL_HEIGHT: f32 = 48.0;
 const GRAPH_TOOLBAR_HEIGHT: f32 = 40.0;
 const GRAPH_AXIS_HEIGHT: f32 = 28.0;
+const GRAPH_CONTENT_INSET: f32 = 18.0;
 
 #[derive(Clone)]
 pub(crate) struct MotionEditorSession {
@@ -242,7 +243,7 @@ pub(crate) fn navigation_shell(
         MaterialTier::CompactNode,
         capabilities,
         theme.radii.group,
-        Insets::ZERO,
+        Insets::new(7.0, 8.0, 7.0, 8.0),
         GelElevation::Raised,
     ))
     .child(navigation)
@@ -394,7 +395,7 @@ pub(crate) fn inspector(
     ));
 
     let content = Element::new(Padding {
-        insets: Insets::all(16.0),
+        insets: Insets::all(20.0),
     })
     .child(
         Element::new(Flex {
@@ -693,7 +694,7 @@ fn preview(
         MaterialTier::ExpandedPanel,
         capabilities,
         theme.radii.group,
-        Insets::all(12.0),
+        Insets::all(16.0),
         GelElevation::Embedded,
     ))
     .child(
@@ -979,11 +980,13 @@ impl Widget for GelSurface {
         let radii = CornerRadii::all(self.radius.max(0.0));
         let material = self.theme.resolve_material(self.tier, self.capabilities);
         let dimension = rect.width.min(rect.height);
-        let (depth, shadow_alpha, light_scale, dark_scale) = match self.elevation {
+        let (outer_depth, shadow_alpha, light_scale, dark_scale) = match self.elevation {
             GelElevation::Raised => ((dimension * 0.032).clamp(3.0, 6.0), 0.20, 0.48, 0.58),
             GelElevation::Embedded => ((dimension * 0.020).clamp(1.5, 3.0), 0.04, 0.23, 0.32),
         };
-        let blur = (depth * 2.2).clamp(7.0, 16.0);
+        let outer_blur = (outer_depth * 2.2).clamp(7.0, 16.0);
+        let inner_depth = (outer_depth * 0.62).clamp(1.25, 3.5);
+        let inner_blur = (inner_depth * 1.5).clamp(3.5, 7.0);
         let base_tint = mix_color(
             self.theme.palette.surface,
             self.theme.palette.surface_raised,
@@ -997,9 +1000,9 @@ impl Widget for GelSurface {
             rect,
             radii,
             Shadow::new(
-                depth,
-                depth,
-                blur * 1.45,
+                outer_depth,
+                outer_depth,
+                outer_blur * 1.45,
                 0.0,
                 with_alpha(tones.shade, shadow_alpha),
             ),
@@ -1027,9 +1030,9 @@ impl Widget for GelSurface {
                 rect,
                 radii,
                 Shadow::new(
-                    depth,
-                    depth,
-                    blur * 1.35,
+                    inner_depth,
+                    inner_depth,
+                    inner_blur,
                     0.0,
                     with_alpha(tones.highlight, tones.highlight_strength * light_scale),
                 ),
@@ -1038,9 +1041,9 @@ impl Widget for GelSurface {
                 rect,
                 radii,
                 Shadow::new(
-                    -depth,
-                    -depth,
-                    blur,
+                    -inner_depth,
+                    -inner_depth,
+                    inner_blur * 0.90,
                     0.0,
                     with_alpha(tones.shade, tones.shade_strength * dark_scale),
                 ),
@@ -1335,7 +1338,7 @@ impl Widget for MotionCurvePlot {
                 ..SurfaceState::default()
             },
         )?;
-        let plot = frame.inset(12.0);
+        let plot = frame.inset(GRAPH_CONTENT_INSET);
         let minor = with_alpha(self.theme.palette.edge, 0.022);
         let major = with_alpha(self.theme.palette.edge, 0.052);
         for index in 0..=8 {
@@ -1504,7 +1507,7 @@ impl Widget for MotionCurvePlot {
 
     fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
         let frame = ctx.rect().inset(6.0);
-        let plot = frame.inset(12.0);
+        let plot = frame.inset(GRAPH_CONTENT_INSET);
         let render = self.session.render_state();
         let viewport = render.snapshot.viewport;
         match event {

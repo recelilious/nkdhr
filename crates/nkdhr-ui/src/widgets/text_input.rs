@@ -500,8 +500,8 @@ impl Widget for TextInput {
                 actual: ctx.child_count(),
             });
         }
-        let horizontal = 12.0;
-        let vertical = 8.0;
+        let horizontal = 16.0;
+        let vertical = 10.0;
         let line_height = self
             .theme
             .typography
@@ -566,10 +566,10 @@ impl Widget for TextInput {
             ctx.arrange_child(
                 0,
                 Rect::new(
-                    rect.x + 12.0,
+                    rect.x + 16.0,
                     rect.y + (rect.height - child.height).max(0.0) * 0.5,
-                    child.width.min((rect.width - 24.0).max(0.0)),
-                    child.height.min((rect.height - 16.0).max(0.0)),
+                    child.width.min((rect.width - 32.0).max(0.0)),
+                    child.height.min((rect.height - 20.0).max(0.0)),
                 ),
             )?;
         }
@@ -579,9 +579,9 @@ impl Widget for TextInput {
             .as_ref()
             .map_or(0.0, |layout| layout.height());
         ctx.state_mut::<TextInputState>()?.text_origin = Point::new(
-            rect.x + 12.0,
+            rect.x + 16.0,
             if self.multiline {
-                rect.y + 8.0
+                rect.y + 10.0
             } else {
                 rect.y + (rect.height - layout_height).max(0.0) * 0.5
             },

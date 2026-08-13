@@ -886,6 +886,16 @@ palette, Maple Mono typography and renderer-native material treatment. Graph
 numeric property bindings, save/export persistence and the future conserved-
 liquid navigation selection remain subsequent UI-7E work.
 
+Clay/glass depth follows an explicit edge/content separation invariant. Outer
+directional shadow keeps describing the surface's elevation, while theme-aware
+inset highlight and shade occupy only a narrow edge band; their blur radius is
+never reused as the surface's outer elevation blur. Interactive content then
+receives a component-specific safe inset beyond that band. Buttons, text
+inputs, toggle thumbs, navigation cells, graph plots and inspector/drawer
+content therefore do not cover the tonal transition that communicates depth.
+Inset opacity remains strong enough to read as rounded material, but increasing
+its strength must not increase its footprint into the content area.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.
