@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
-    Color, DisplayList, DisplayListBuilder, Point, Primitive, Rect, TextureStore,
+    Color, DisplayList, DisplayListBuilder, Point, Primitive, Rect, ShapeStyle, TextureStore,
     software::SoftwareRenderer,
 };
 use nkdhr_settings::{
@@ -313,6 +313,22 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
         scroll_rect.height,
         9.0 * Theme::default().density_metrics().row_height,
         "the compact rail viewport must exactly contain all nine navigation nodes"
+    );
+    assert!(
+        list.primitives().iter().any(|primitive| {
+            matches!(
+                primitive,
+                Primitive::Shape(shape)
+                    if matches!(shape.style, ShapeStyle::Shadow(_))
+                        && (shape.rect.width - 40.0).abs() < 0.001
+                        && (shape.rect.height - 40.0).abs() < 0.001
+                        && (shape.rect.x + shape.rect.width * 0.5
+                            - (navigation_rect.x + navigation_rect.width * 0.5))
+                            .abs()
+                            < 0.001
+            )
+        }),
+        "the selected compact navigation node must be a centered elevated square"
     );
     let mut stack = vec![navigation];
     let mut compact_icons = Vec::new();

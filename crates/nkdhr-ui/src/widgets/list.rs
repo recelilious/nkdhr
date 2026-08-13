@@ -394,6 +394,7 @@ pub struct List {
     theme: Arc<Theme>,
     material_tier: MaterialTier,
     paint_panel_surface: bool,
+    square_selection_node: bool,
     capabilities: MaterialCapabilities,
     virtual_window: ListVirtualWindow,
     page_step: usize,
@@ -440,6 +441,7 @@ impl List {
             theme,
             material_tier: MaterialTier::ContentSurface,
             paint_panel_surface: true,
+            square_selection_node: false,
             capabilities: MaterialCapabilities::default(),
             virtual_window: ListVirtualWindow::default(),
             page_step: 5,
@@ -467,6 +469,13 @@ impl List {
     /// selection mass, separators, focus, scrolling and keyboard behavior.
     pub fn panel_surface(mut self, visible: bool) -> Self {
         self.paint_panel_surface = visible;
+        self
+    }
+
+    /// Uses a centered, elevated square for compact icon navigation while
+    /// preserving the default full-row selection geometry for ordinary lists.
+    pub fn square_selection_node(mut self, square: bool) -> Self {
+        self.square_selection_node = square;
         self
     }
 
@@ -781,12 +790,21 @@ impl Widget for List {
                 single_mass.1,
                 single_mass.2,
                 &self.theme,
+                self.square_selection_node,
             )?;
         } else {
             for (index, entry) in self.entries.iter().enumerate() {
                 if selection.contains(entry.identity) {
                     let row = ctx.child_rect(index)?;
-                    paint_selection_mass(ctx, rect, row.y, row.height, 1.0, &self.theme)?;
+                    paint_selection_mass(
+                        ctx,
+                        rect,
+                        row.y,
+                        row.height,
+                        1.0,
+                        &self.theme,
+                        self.square_selection_node,
+                    )?;
                 }
             }
         }
@@ -1162,43 +1180,69 @@ fn paint_selection_mass(
     height: f32,
     opacity: f32,
     theme: &Theme,
+    square: bool,
 ) -> Result<(), UiError> {
     if opacity <= 0.0 || height <= 0.0 {
         return Ok(());
     }
-    let mass = Rect::new(
-        list_rect.x + 4.0,
-        y + 4.0,
-        (list_rect.width - 8.0).max(0.0),
-        (height - 8.0).max(0.0),
-    );
+    let available_width = (list_rect.width - 8.0).max(0.0);
+    let available_height = (height - 8.0).max(0.0);
+    let mass = if square {
+        let side = available_width.min(available_height);
+        Rect::new(
+            list_rect.x + (list_rect.width - side).max(0.0) * 0.5,
+            y + (height - side).max(0.0) * 0.5,
+            side,
+            side,
+        )
+    } else {
+        Rect::new(
+            list_rect.x + 4.0,
+            y + 4.0,
+            available_width,
+            available_height,
+        )
+    };
     let base = mix(theme.palette.surface, theme.palette.accent, 0.24);
     let tones = resolve_fluid_material_tones(theme, base, true);
+    if square {
+        ctx.builder().shadow(
+            mass,
+            CornerRadii::all(theme.radii.control),
+            Shadow::new(3.0, 3.0, 7.0, 0.0, with_alpha(tones.shade, 0.22 * opacity)),
+        )?;
+    }
     ctx.builder().rounded_rect(
         mass,
         CornerRadii::all(theme.radii.control),
-        with_alpha(base, 0.58 * opacity),
+        with_alpha(base, if square { 0.72 } else { 0.58 } * opacity),
     )?;
     ctx.builder().inset_shadow(
         mass,
         CornerRadii::all(theme.radii.control),
         Shadow::new(
-            3.0,
-            3.0,
-            9.0,
+            if square { 2.0 } else { 3.0 },
+            if square { 2.0 } else { 3.0 },
+            if square { 4.5 } else { 9.0 },
             0.0,
-            with_alpha(tones.highlight, tones.highlight_strength * 0.46 * opacity),
+            with_alpha(
+                tones.highlight,
+                tones.highlight_strength * if square { 0.62 } else { 0.46 } * opacity,
+            ),
         ),
     )?;
     ctx.builder().inset_shadow(
         mass,
         CornerRadii::all(theme.radii.control),
         Shadow::new(
-            -3.0,
-            -3.0,
-            8.0,
+            if square { -2.0 } else { -3.0 },
+            if square { -2.0 } else { -3.0 },
+            if square { 4.0 } else { 8.0 },
             0.0,
-            with_alpha(tones.shade, tones.shade_strength * 0.52 * opacity),
+            with_alpha(
+                tones.shade,
+                tones.shade_strength * if square { 0.68 } else { 0.52 } * opacity,
+            ),
         ),
     )?;
     ctx.builder().border(
