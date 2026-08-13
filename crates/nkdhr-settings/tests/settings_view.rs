@@ -292,6 +292,12 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
     let [navigation, graph_workspace, inspector] = body_children(&root);
     assert_eq!(root.rect(navigation).unwrap().width, 64.0);
     let navigation_rect = root.rect(navigation).unwrap();
+    let navigation_scroll = root.children(navigation).unwrap()[0];
+    assert_eq!(
+        root.rect(navigation_scroll).unwrap(),
+        navigation_rect,
+        "the compact rail must not squeeze its rows, separators, and scroll viewport inside a second padding band"
+    );
     let mut stack = vec![navigation];
     let mut compact_icons = Vec::new();
     while let Some(widget) = stack.pop() {

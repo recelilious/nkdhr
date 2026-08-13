@@ -243,7 +243,7 @@ pub(crate) fn navigation_shell(
         MaterialTier::CompactNode,
         capabilities,
         theme.radii.group,
-        Insets::new(7.0, 8.0, 7.0, 8.0),
+        Insets::ZERO,
         GelElevation::Raised,
     ))
     .child(navigation)

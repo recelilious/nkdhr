@@ -1185,14 +1185,7 @@ impl AppearanceSettings {
         }
         let content_size = Size::new(
             if compact {
-                if self.state.page.get() == SettingsPage::MotionEditor {
-                    // UI-7E's clay shell reserves a 7 px material-safe band on
-                    // each side while keeping the 18 px glyphs on the original
-                    // 64 px rail axis.
-                    COMPACT_NAVIGATION_WIDTH - 14.0
-                } else {
-                    COMPACT_NAVIGATION_WIDTH
-                }
+                COMPACT_NAVIGATION_WIDTH
             } else {
                 NAVIGATION_WIDTH
             },
