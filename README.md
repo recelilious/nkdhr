@@ -116,8 +116,12 @@ the accepted output exactly; other approved style identities await owner-guided
 tuning. UI-7C adds the final Expressive/Standard/Reduced/Off policy runtime,
 state-and-velocity-preserving latest-target interruption, conserved multi-node
 selection mass, and deterministic endpoint-preserving semantic fluid/idle-water
-signals. These are execution foundations only: existing component visuals and
-the approved Settings editor remain later owner-guided UI-7 work.
+signals. UI-7D adds the style-neutral professional curve-editor document,
+consumer capability intersection, exact insertion, tangent/numeric editing,
+bounded transactional history, safe keyframe clipboard, normalized/real-time
+viewport, host-clock preview and unified targeted mouse/pen/touch/touchpad/
+keyboard input semantics. These are still framework foundations only: no
+Settings layout or existing component visual has been composed or restyled.
 
 ## Documentation
 

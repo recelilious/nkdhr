@@ -268,6 +268,35 @@ seed；常动水面需要稳定 component seed 与绝对时间。显式为零的
 本阶段只提供框架与执行行为。现有组件继续保持已验收外观，直到每个组件的视觉接入与
 数值调校逐项和所有者确认；这里没有开始组合 Settings 编辑器或流体组件造型。
 
+## 无样式动画编辑器（`nkdhr-ui`，UI-7D）
+
+`MotionCurveEditor` 统一拥有有效曲线、继承父值、独立 duration、字段来源、选择集、
+viewport、playhead 和有界 undo/redo。构造时传入准确继承值与
+`MotionCurveConsumerSet`。consumer set 会取所有登记属性能力的交集：只有全部 consumer
+都是 spatial 或 shape 时才允许 overshoot/reverse；opacity、color 和 bounded scalar 会
+拒绝这些权限。空集合刻意采用最保守策略。
+
+编辑继承曲线或时长会生成显式 override；`reset_curve`/`reset_duration` 只删除该覆盖，
+重新显露此刻准确的父值。双击调用 UI-7A 同一套保持形状的 De Casteljau 分割。锚点、
+automatic/continuous/broken/corner 切线及直接手柄坐标都支持数值编辑。多选拖动使用统一
+delta，受未选择邻点限制，并可分别吸附 time/progress。每个候选在发布前都完整编译，
+所以错误数值、权限或剪贴板内容不会改变最后有效文档与历史。
+
+拖动应包在 `begin_transaction`/`commit_transaction` 中，任意多中间帧只产生一个 undo
+步骤；cancel 会恢复开始时的曲线、选择、playhead、viewport 与 playback。复制粘贴使用
+带版本且最大 64 KiB 的 JSON 关键帧数据；能适应新邻点时保留显式手柄，脱离原 segment
+后无法合法放置时才解析并约束手柄，再编译整个候选。重复时间或不安全进度仍原子失败。
+
+图形内部始终保存规范化时间；`MotionEditorAxis` 只负责映射到可独立修改的真实 duration，
+不会改变曲线几何。viewport 支持有界 pan/zoom，播放只根据宿主绝对时钟推进；
+`take_preview` 把同一宿主帧前任意次编辑/playhead 更新合并为最新不可变预览。
+
+`MotionEditorInputController` 是无样式 adapter 契约，不是 widget。它接收已命中图形的
+鼠标、笔和单指直接编辑，图形内双指触摸/精密触控板 viewport 手势，以及键盘选择/编辑；
+不会注册 compositor-global 手势。方向键和标准 Vim `H/J/K/L` 分别表示左/下/上/右，
+Shift 使用粗调步长，剪贴板读写以显式请求返回。UI-7E 才会把这些语义绑定到逐项确认的
+Settings 组合。
+
 ## 验证工具
 
 `nkdhr-render` 含确定性图元 gallery；软件参考渲染器生成提交的 PPM golden，测试逐字

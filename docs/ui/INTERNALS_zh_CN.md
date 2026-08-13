@@ -331,6 +331,51 @@ Completed。完成/取消最多报告一次，从不排动画队列。
 基础，但 UI-7C 刻意没有组合或重绘任何现有组件。视觉数值校准与组件接入仍会由所有者
 逐步控制。
 
+## UI-7D：无样式编辑状态与统一定向输入
+
+`motion_editor::model` 是不负责渲染的 authored 状态机。durable `DocumentState` 只含
+可选 curve/duration override；继承值和已登记 consumer 属于宿主上下文。因此编辑继承
+字段会保存完整覆盖，reset 则删除 option 并立即跟随更新后的父值。替换父值或 consumer
+前会先校验继承与有效曲线，并清除在新上下文中可能不再合法的旧历史。
+
+`MotionCurveConsumerSet` 对最多 256 个稳定 consumer 排序去重，再保守求出 overshoot/
+reverse 能力交集。这个 authored domain 刻意比 UI-7C 的 spatial/non-spatial runtime
+policy 更细：shape 可允许二者，opacity、color、bounded scalar 则不允许。editor 会先
+经过该 gate，再调用既有解析 compiler；不存在 consumer 可忽略的纯显示权限。
+
+每次修改都先构造并编译完整候选，成功后才替换最后有效文档和 compiled curve。活动
+transaction 保存准确的 document 与 transient baseline；中间帧可以更新 preview，但
+commit 只压入一个有界 undo entry。cancel 会重新编译/恢复 baseline 及其 selection、
+primary anchor、playhead、viewport、playback。undo/redo 只存 document state；宿主上下文
+变化会清空两栈，避免载入新能力集合不再接受的旧条目。
+
+插点直接使用 `split_motion_curve`。直接操作支持单选/多选锚点、时间顺序 clamp、进度安全
+范围、可选 snapping、点/手柄数值编辑及显式切线模式转换。
+`resolve_motion_curve_handles` 会把 compiler 解析后的 automatic/continuous/corner 几何
+物化成 broken handles，且不改变形状；剪贴板关键帧也使用这些显式手柄。若脱离原 segment
+的 copied handle 违反新 segment 的时间顺序或进度方向，fallback 会物化当前曲线并只在
+完整候选内按比例约束，再重新编译；恶意数据、重复时间和不安全 anchor 顺序仍会失败。
+
+规范化坐标是权威状态；`MotionEditorAxis` 只把 x 映射到独立 duration 供真实时间显示。
+`MotionGraphViewport` 把 pan/zoom 限制在规范化时间及正常进度或绝对 overshoot 安全范围。
+playback 保存 `(absolute_started_time, normalized_origin)`，不会积累帧率误差。preview 与
+document generation 分离；`take_preview` 每个消费帧最多暴露一次最新 curve/compiled pair、
+duration 与 playhead。
+
+`motion_editor::input` 同时只拥有一个 `MotionEditorEditId`，并用 model transaction 包住
+direct/viewport 手势。Begin 失败会回滚 ownership，不匹配 ID/device 不能修改活动编辑，
+End 消费最终 sample，Cancel 恢复 baseline。鼠标、笔、图形内单指执行直接编辑；图形内
+双指触摸或双指精密触控板只操作 viewport，另有 pen barrel 和 mouse viewport 路径。
+0 指、超过 2 指及不支持的 device/contact 组合 fail closed。adapter 从不声明 compositor-
+global 手势，因此 shell workspace 手势完全在本模块之外。
+
+键盘与 direct input 调用同一 editor 方法：方向键和标准 Vim H/J/K/L 按左/下/上/右微调，
+Shift 使用配置的粗调倍率，Tab 循环锚点，Delete 删除可编辑点，Space/Home/End 控制预览，
+Ctrl/Logo A/C/V/Z/Y 产生选择/历史操作或显式剪贴板请求。测试覆盖精确插点几何、继承、
+原子拒绝、有界/合并历史、cancel、切线模式、剪贴板边界/fallback、宿主时钟 playback、
+确定性编辑序列、手势 identity 和全部支持设备类别。UI-7D 没有选择任何 layout、paint
+token、组件组合或用户可见风格数值。
+
 ## 错误与安全策略
 
 - 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；

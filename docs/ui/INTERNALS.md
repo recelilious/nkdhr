@@ -774,6 +774,71 @@ runtime basis for the approved left/right split, return and fluid selection
 transfer, but UI-7C deliberately does not compose or restyle any existing
 component. Numerical visual tuning and component adoption remain owner-guided.
 
+## UI-7D: style-neutral editor state and unified targeted input
+
+`motion_editor::model` is a non-rendering authoring state machine. Its durable
+`DocumentState` contains only optional curve and duration overrides; inherited
+values and registered consumers are host context. Consequently editing an
+inherited field stores a complete override, while reset removes the option and
+immediately follows a replaced parent. Parent or consumer replacement validates
+both inherited and effective curves before assignment and clears history whose
+old states may no longer be valid in the new context.
+
+`MotionCurveConsumerSet` sorts and deduplicates at most 256 stable consumers,
+then computes conservative overshoot/reverse capability intersection. This
+authoring domain is intentionally finer than the UI-7C runtime's spatial/non-
+spatial policy domain: shape may allow both features, while opacity, color and
+bounded scalar do not. The editor runs that gate before the existing analytic
+curve compiler; there is no display-only permission that runtime consumers can
+silently ignore.
+
+Each mutation builds a complete candidate and compiles it before replacing the
+last-good document and compiled curve. Active transactions retain their exact
+document and transient baseline; intermediate frames update preview state but
+only commit pushes one bounded undo entry. Cancellation recompiles/restores the
+baseline and its selection, primary anchor, playhead, viewport and playback.
+Undo/redo stores only document state. Host-context replacement clears both
+stacks rather than admitting an entry that the new capability set cannot load.
+
+Insertion delegates to `split_motion_curve`. Direct manipulation supports one
+or many selected anchors, ordered-time clamping, progress safety bounds,
+optional snapping, numeric point/handle edits and explicit tangent-mode
+conversion. `resolve_motion_curve_handles` materializes the compiler's resolved
+automatic/continuous/corner geometry as broken handles without changing the
+shape. Clipboard keyframes also use those explicit handles. If detached copied
+handles violate their new segment order or progress direction, the fallback
+materializes the current curve and proportionally constrains only the complete
+candidate before recompilation; malformed data, duplicate time and unsafe
+anchor order remain failures.
+
+Normalized coordinates are authoritative. `MotionEditorAxis` maps x to the
+separate duration for real-time display. `MotionGraphViewport` bounds pan/zoom
+to normalized time and either normal progress or the absolute overshoot safety
+range. Playback stores `(absolute_started_time, normalized_origin)`, preventing
+frame-cadence drift. Preview and document generations are distinct;
+`take_preview` exposes only the newest curve/compiled pair, duration and
+playhead once per consumer frame.
+
+`motion_editor::input` owns one `MotionEditorEditId` at a time and brackets
+direct or viewport gestures with model transactions. Failed begin paths roll
+back ownership; mismatched IDs/devices cannot mutate the active edit; end
+consumes its final sample; cancel restores the model baseline. Mouse, pen and
+one targeted touch contact perform direct edits. Two targeted touch contacts or
+two precision-touchpad contacts manipulate only the graph viewport; pen barrel
+and mouse viewport paths are also available. Zero, more-than-two or unsupported
+device/contact combinations fail closed. The adapter never claims compositor-
+global gestures, so shell workspace gestures remain outside this module.
+
+Keyboard handling shares the same editor methods as direct input: arrows and
+standard Vim H/J/K/L nudge left/down/up/right, Shift selects the configured
+coarse multiplier, Tab cycles anchors, Delete removes editable points, Space/
+Home/End control preview, and Ctrl/Logo A/C/V/Z/Y emits selection/history or
+explicit clipboard actions. Tests cover exact insertion geometry, inheritance,
+atomic rejection, bounded/coalesced history, cancellation, tangent modes,
+clipboard bounds/fallback, host-clock playback, deterministic edit sequences,
+gesture identity and every supported device class. No layout, paint token,
+component composition or owner-visible numeric style is selected in UI-7D.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.

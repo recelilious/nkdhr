@@ -501,6 +501,21 @@ pub fn split_motion_curve(
     Ok(result)
 }
 
+/// Resolve automatic/continuous/corner tangents into explicit broken handles
+/// without changing curve geometry. Editors use this when a user switches one
+/// anchor to direct handle manipulation.
+pub fn resolve_motion_curve_handles(
+    source: &MotionCurveData,
+) -> Result<MotionCurveData, MotionCurveCompileError> {
+    let compiled = CompiledMotionCurve::compile(source)?;
+    let result = MotionCurveData {
+        anchors: resolved_broken_anchors(&compiled),
+        ..source.clone()
+    };
+    CompiledMotionCurve::compile(&result)?;
+    Ok(result)
+}
+
 fn resolved_broken_anchors(compiled: &CompiledMotionCurve) -> Vec<MotionAnchorData> {
     compiled
         .source()
@@ -679,6 +694,27 @@ mod tests {
         assert_eq!(split.anchors.len(), 3);
         let after = CompiledMotionCurve::compile(&split).unwrap();
         dense_equal(&before, &after, 2.0e-9);
+    }
+
+    #[test]
+    fn resolving_handles_preserves_the_complete_curve_shape() {
+        let mut source = split_motion_curve(&cubic(0.05, 0.95, false, false), 0.417).unwrap();
+        for anchor in &mut source.anchors {
+            anchor.tangents = MotionTangentsData::Automatic;
+        }
+        let resolved = resolve_motion_curve_handles(&source).unwrap();
+        assert!(
+            resolved
+                .anchors
+                .iter()
+                .all(|anchor| matches!(anchor.tangents, MotionTangentsData::Broken { .. }))
+        );
+        let source = CompiledMotionCurve::compile(&source).unwrap();
+        let resolved = CompiledMotionCurve::compile(&resolved).unwrap();
+        for step in 0..=2_000 {
+            let time = f64::from(step) / 2_000.0;
+            assert!((source.sample(time) - resolved.sample(time)).abs() < 1.0e-10);
+        }
     }
 
     #[test]

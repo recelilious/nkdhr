@@ -7,6 +7,7 @@ mod input;
 mod layout;
 mod motion;
 mod motion_curve;
+mod motion_editor;
 mod motion_runtime;
 mod motion_style;
 mod reactive;
@@ -39,7 +40,19 @@ pub use motion::{
     MotionMode, MotionProfile, MotionSpec, ScalarMotion,
 };
 pub use motion_curve::{
-    CompiledMotionCurve, MotionCurveAnalysis, MotionCurveCompileError, split_motion_curve,
+    CompiledMotionCurve, MotionCurveAnalysis, MotionCurveCompileError,
+    resolve_motion_curve_handles, split_motion_curve,
+};
+pub use motion_editor::{
+    MotionAnchorClipboardData, MotionCurveConsumer, MotionCurveConsumerDomain,
+    MotionCurveConsumerSet, MotionCurveEditor, MotionCurveEditorConfig, MotionCurveEditorError,
+    MotionCurveEditorSnapshot, MotionCurveSource, MotionEditorAxis, MotionEditorClipboardAction,
+    MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId, MotionEditorGesturePhase,
+    MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
+    MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
+    MotionEditorPreview, MotionEditorSnap, MotionEditorTangentSide, MotionEditorTarget,
+    MotionEditorTimeAxis, MotionEditorTransactionOutcome, MotionEditorViewportInput,
+    MotionGraphPoint, MotionGraphViewport, MotionTangentMode,
 };
 pub use motion_runtime::{
     FluidEnvelopeSample, FluidIdleSample, KineticAdvance, KineticMotion, KineticSample,

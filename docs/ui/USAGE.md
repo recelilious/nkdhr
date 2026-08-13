@@ -520,6 +520,48 @@ still render their accepted appearance until each component's visual adoption
 and numeric tuning are reviewed with the owner; no Settings editor or fluid
 component composition is introduced here.
 
+## Style-neutral motion editor (`nkdhr-ui`, UI-7D)
+
+`MotionCurveEditor` owns the effective curve, inherited parent, independent
+duration, field sources, selection, viewport, playhead and bounded undo/redo.
+Construct it with the exact inherited values and a `MotionCurveConsumerSet`.
+The set intersects every registered property's capability: overshoot or
+reverse may be enabled only when every consumer is spatial or shape based;
+opacity, color and bounded scalar consumers reject those permissions. An empty
+set is deliberately conservative.
+
+Editing an inherited curve or duration creates an explicit override;
+`reset_curve` or `reset_duration` removes only that override and reveals the
+exact current parent again. Double activation uses the same shape-preserving
+De Casteljau split as UI-7A. Anchors, automatic/continuous/broken/corner
+tangents and direct handle coordinates can be edited numerically. Multi-
+selection drag uses one delta, clamps against unselected neighbors and
+optionally snaps time/progress. Every candidate is fully compiled before
+publication, so a rejected number, permission or clipboard payload leaves the
+last-good document and history unchanged.
+
+Use `begin_transaction`/`commit_transaction` around a drag; all intermediate
+updates become one undo step. Cancellation restores the curve, selection,
+playhead, viewport and playback state captured at begin. Copy/paste uses a
+versioned, 64-KiB-bounded JSON keyframe payload. Explicit handles are preserved
+when valid; detached handles that cannot fit their new neighbors are resolved
+and constrained before the complete candidate is compiled. Duplicate times or
+unsafe progress still fail atomically.
+
+The graph stores normalized time internally. `MotionEditorAxis` converts it to
+an independently editable real-time duration without changing curve geometry.
+The viewport supports bounded pan/zoom, while playback advances only from the
+host's absolute clock. `take_preview` coalesces any number of edits or playhead
+changes into the newest immutable preview for the next host frame.
+
+`MotionEditorInputController` is a style-free adapter contract, not a widget.
+It accepts targeted mouse, pen and one-contact touch direct edits; targeted
+two-contact touch or precision-touchpad viewport gestures; and keyboard
+selection/editing. It never installs a compositor-global gesture. Arrow keys
+and standard Vim `H/J/K/L` mean left/down/up/right, Shift uses the coarse step,
+and the controller emits explicit text clipboard read/write requests. UI-7E
+will bind these semantics into the owner-reviewed Settings composition.
+
 ## Verification tools
 
 `nkdhr-render` ships a deterministic primitive gallery. Its software reference
