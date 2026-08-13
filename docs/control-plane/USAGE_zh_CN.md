@@ -95,10 +95,14 @@ key 是以点分隔的路径(例如 `theme.profile`、`canvas.grid_size` 和
 目前已注册的 namespace 是 `canvas` 和 `theme`。UI-4 把完整可移植主题保存为
 标量叶子 `theme.profile`:其中是一份带版本的 JSON 文档,由不可变内置/壁纸基础
 和稀疏显式覆盖组成。相邻标量叶子 `theme.library` 则是带版本且经过完整校验的
-用户已保存主题集合。每项操作都保持在一个叶子内,因此各自的导入、校验、发布和
-`Changed` 通知都是同一个原子事务。壁纸主题始终携带冻结后的完整调色板,所以
+用户已保存主题集合。UI-7 新增 `theme.motion_library`，保存有界、带版本且不可变的
+动画 preset `(id, revision)` 快照；活动 style 仍作为可选 `motion.style` 留在原子的
+`theme.profile` 文档中。每项操作都保持在一个叶子内,因此各自的导入、校验、发布和
+`Changed` 通知都是同一个原子事务。旧 `theme.toml` 会得到空动画资料库默认值，但不会
+改写活动 profile。壁纸主题始终携带冻结后的完整调色板,所以
 导出后即使没有原壁纸仍可使用;实时重新生成只替换基础,不会改写显式覆盖对象。
-可用 `nkdhrctl config get theme.profile`、`nkdhrctl config get theme.library`
+可用 `nkdhrctl config get theme.profile`、`nkdhrctl config get theme.library`、
+`nkdhrctl config get theme.motion_library`
 查看,或用 `nkdhrctl config watch theme` 监听。设置应用提供即时预览、取消、保存、
 复制和有界 JSON 导入/导出;直接 `config set` 主要用于导入一份已经准备好且通过
 校验的 JSON 文档。壁纸解码仍由宿主负责;共享主题适配器以确定且有界的方式采样

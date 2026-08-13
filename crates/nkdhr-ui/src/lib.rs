@@ -7,6 +7,7 @@ mod input;
 mod layout;
 mod motion;
 mod motion_curve;
+mod motion_style;
 mod reactive;
 mod semantics;
 pub mod text;
@@ -39,10 +40,17 @@ pub use motion::{
 pub use motion_curve::{
     CompiledMotionCurve, MotionCurveAnalysis, MotionCurveCompileError, split_motion_curve,
 };
+pub use motion_style::{CompiledMotionStyle, MotionStyleCompileError, ResolvedMotionStyle};
 pub use nkdhr_theme::{
-    MAX_MOTION_CURVE_ABSOLUTE_PROGRESS, MAX_MOTION_CURVE_ANCHORS, MIN_MOTION_CURVE_ANCHORS,
+    BALANCED_MOTION_STYLE_REVISION, BuiltInMotionStyle, MAX_MOTION_CURVE_ABSOLUTE_PROGRESS,
+    MAX_MOTION_CURVE_ANCHORS, MAX_MOTION_STYLE_NODES, MIN_MOTION_CURVE_ANCHORS,
     MIN_MOTION_CURVE_TIME_GAP, MOTION_CURVE_AUTO_ALGORITHM_VERSION, MOTION_CURVE_SCHEMA_VERSION,
-    MotionAnchorData, MotionCurveData, MotionCurveDataError, MotionTangentsData, MotionVectorData,
+    MOTION_PRESET_LIBRARY_SCHEMA_VERSION, MOTION_STYLE_SCHEMA_VERSION, MotionAnchorData,
+    MotionComponentNodeData, MotionCurveData, MotionCurveDataError, MotionFamilyNodeData,
+    MotionPresetLibraryData, MotionPresetLibraryError, MotionScopeData, MotionScopeLevelData,
+    MotionSemanticFamilyData, MotionStyleBaseData, MotionStyleError, MotionStylePresetData,
+    MotionStyleProfileData, MotionStyleTreeData, MotionTangentsData, MotionValueOriginData,
+    MotionValueProvenanceData, MotionValuesData, MotionVectorData, ResolvedMotionStyleData,
 };
 pub use reactive::Reactive;
 pub(crate) use reactive::RootReactivity;

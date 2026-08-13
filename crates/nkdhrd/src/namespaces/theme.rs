@@ -1,22 +1,23 @@
-use nkdhr_theme::{ThemeProfile, ThemeProfileLibrary};
+use nkdhr_theme::{MotionPresetLibraryData, ThemeProfile, ThemeProfileLibrary};
 use serde::{Deserialize, Serialize};
 
 use crate::backends::config_store::Namespace;
 
 /// UI-4's atomic CTRL-5 theme namespace.
 ///
-/// The active portable profile and saved-profile library each remain one JSON
-/// string leaf because either edit must validate and publish as one
-/// transaction. This also keeps imported sparse overrides, font-family arrays
-/// and future profile metadata intact while CTRL-5's generic D-Bus leaf
-/// contract remains scalar-only. `theme.toml` is still directly editable; the
-/// daemon validates both leaves and resolves every inherited token before
-/// accepting a write or external reload.
+/// The active portable profile, saved-profile library and UI-7 motion-preset
+/// library each remain one JSON string leaf because each edit must validate
+/// and publish as one transaction. This also keeps imported sparse overrides,
+/// font-family arrays and future profile metadata intact while CTRL-5's generic
+/// D-Bus leaf contract remains scalar-only. `theme.toml` is still directly
+/// editable; the daemon validates all three leaves before accepting a write or
+/// external reload. UI runtime compilation adds the executable curve checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ThemeSettings {
     pub profile: String,
     pub library: String,
+    pub motion_library: String,
 }
 
 impl Default for ThemeSettings {
@@ -26,6 +27,8 @@ impl Default for ThemeSettings {
                 .expect("the built-in default theme profile always serializes"),
             library: serde_json::to_string(&ThemeProfileLibrary::default())
                 .expect("the empty theme profile library always serializes"),
+            motion_library: serde_json::to_string(&MotionPresetLibraryData::default())
+                .expect("the empty motion preset library always serializes"),
         }
     }
 }
@@ -37,7 +40,8 @@ impl Namespace for ThemeSettings {
         ThemeProfile::from_json(&self.profile)
             .and_then(|profile| profile.resolve())
             .map_err(|error| error.to_string())?;
-        ThemeProfileLibrary::from_json(&self.library)
+        ThemeProfileLibrary::from_json(&self.library).map_err(|error| error.to_string())?;
+        MotionPresetLibraryData::from_json(&self.motion_library)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -65,13 +69,17 @@ mod tests {
     }
 
     #[test]
-    fn pre_library_theme_file_receives_the_empty_library_default() {
+    fn older_theme_file_receives_both_empty_library_defaults() {
         let profile = serde_json::to_string(&ThemeProfile::default()).unwrap();
         let legacy = format!("profile = '{}'\n", profile.replace('\'', "''"));
         let settings: ThemeSettings = toml::from_str(&legacy).unwrap();
         assert_eq!(
             ThemeProfileLibrary::from_json(&settings.library).unwrap(),
             ThemeProfileLibrary::default()
+        );
+        assert_eq!(
+            MotionPresetLibraryData::from_json(&settings.motion_library).unwrap(),
+            MotionPresetLibraryData::default()
         );
         settings.validate().unwrap();
     }
@@ -180,6 +188,52 @@ mod tests {
         ));
         assert_eq!(
             store.get("theme.library").unwrap(),
+            serde_json::Value::String(valid)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_store_rejection_preserves_the_last_good_motion_library() {
+        let dir = std::env::temp_dir().join(format!(
+            "nkdhr-motion-library-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let schemas = Box::leak(vec![NamespaceSchema::of::<ThemeSettings>()].into_boxed_slice());
+        let store = ConfigStore::open(dir.clone(), schemas).unwrap();
+
+        let mut valid = MotionPresetLibraryData::default();
+        valid
+            .insert(
+                nkdhr_theme::MotionStylePresetData::built_in(
+                    nkdhr_theme::BuiltInMotionStyle::Balanced,
+                    nkdhr_theme::BALANCED_MOTION_STYLE_REVISION,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let valid = valid.to_json().unwrap();
+        store
+            .set(
+                "theme.motion_library",
+                serde_json::Value::String(valid.clone()),
+            )
+            .unwrap();
+
+        let invalid = r#"{"schema_version":1,"presets":[{"broken":true}]}"#;
+        assert!(matches!(
+            store.set(
+                "theme.motion_library",
+                serde_json::Value::String(invalid.into())
+            ),
+            Err(ConfigError::Invalid(_))
+        ));
+        assert_eq!(
+            store.get("theme.motion_library").unwrap(),
             serde_json::Value::String(valid)
         );
         let _ = fs::remove_dir_all(dir);

@@ -678,6 +678,52 @@ defaults, exact insertion, hidden extrema/reverse, settling overshoot without a
 false reverse, automatic tangent determinism, maximum anchor count, absolute-
 time repeatability and 256 deterministically generated legal monotone curves.
 
+## UI-7B: inheritance and immutable preset snapshots
+
+`nkdhr-theme::motion_style` keeps executable compilation out of portable data.
+An active `MotionStyleProfileData` pins a built-in revision or embeds a complete
+`MotionStylePresetData`, plus a sparse `MotionStyleTreeData`. Each tree has root
+values and maps semantic families to stable component IDs and transition IDs.
+Documents are bounded to 4,096 nodes and 1 MiB; IDs are bounded lowercase
+stable identifiers. The root of a preset must contain a curve and duration,
+while descendants may contain either field independently.
+
+Resolution interleaves base and profile values at each specificity level:
+base root, override root, base family, override family, and likewise for
+component and transition. Thus specificity outranks origin, but an explicit
+profile value replaces its preset at the same scope. Curves are `Option` values
+at the layer boundary and replace as one complete object. Curve and duration
+carry separate `MotionValueProvenanceData`; reset deletes one option rather
+than copying a parent value. `snapshot_as_preset` overlays same-scope fields
+onto the pinned base and produces a new complete immutable revision.
+
+Only Balanced revision 1 currently resolves. It is generated from the legacy
+four cubics and all 23 family durations, and dense tests compare its compiled
+result with every old family evaluator. Lively, Calm and Direct are stable enum
+identities without fabricated revision payloads; unavailable revisions fail
+closed. When `MotionData.style` is absent, `CompiledMotionStyle` embeds the
+same exact legacy migration in memory. The optional serde field is skipped, so
+old theme profiles retain their bytes until a user explicitly authors style
+data.
+
+`CompiledMotionStyle` mirrors both trees with precompiled Arc-backed curves.
+Compilation visits every source curve, including shadowed nodes. `ThemeRuntime`
+builds this object beside `Theme` before acquiring its publication mutex, and
+`ThemeSnapshot` carries both under one generation. A data or curve error cannot
+replace the previous Arc. Lookup only walks four bounded map levels and clones
+the selected curve's Arc; it performs no JSON work or curve compilation.
+Existing widgets still execute the old `Theme::motion` path in UI-7B, ensuring
+no visible change before UI-7C's policy/runtime work.
+
+`MotionPresetLibraryData` is a 4 MiB/256-preset collection keyed by immutable
+`(id, revision)`. A different payload cannot overwrite the same identity.
+`nkdhrd` validates it as the scalar `theme.motion_library` leaf and supplies an
+empty default to older theme files. The Settings-side
+`MotionPresetLibraryEditor` adds the stronger runtime validation pass: every
+import is completely compiled in isolation before it can produce an opaque
+persistence request; its durable model changes only after matching host or
+CTRL-5 confirmation.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.

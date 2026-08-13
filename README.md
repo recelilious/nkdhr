@@ -108,9 +108,13 @@ reconstructing it. Phase 3 is now in UI-7's owner-guided professional motion
 system. Its product and interaction specification is owner-approved;
 UI-7A adds the portable 2–64-anchor segmented curve data, deterministic f64
 compiler/evaluator, analytic overshoot/reverse validation, exact shape-
-preserving insertion and lossless migration from the existing cubics. The
-approved Settings editor itself remains a later UI-7 step rather than an
-unreviewed scaffold.
+preserving insertion and lossless migration from the existing cubics. UI-7B
+adds pinned preset revisions, atomic profile/family/component/transition
+inheritance with per-field provenance, compiled last-known-good theme snapshots
+and transactional preset-library persistence. Balanced revision 1 preserves
+the accepted output exactly; other approved style identities await owner-guided
+tuning. The approved Settings editor itself remains a later UI-7 step rather
+than an unreviewed scaffold.
 
 ## Documentation
 

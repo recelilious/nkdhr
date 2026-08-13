@@ -456,6 +456,47 @@ order is exactly divided into two legal segments in memory. Existing theme
 JSON is not rewritten in UI-7A; versioned preset persistence and inherited
 runtime snapshots belong to UI-7B.
 
+## Inherited motion styles (`nkdhr-theme`, `nkdhr-ui`, UI-7B)
+
+UI-7B adds `MotionStyleProfileData` as the optional `motion.style` member of a
+theme's resolved motion data. Its absence is meaningful: the existing four
+cubics and family durations are migrated exactly in memory, so old profile JSON
+is not rewritten and every existing widget continues to use its accepted
+`MotionProfile` path. An authored style pins either a built-in `(style,
+revision)` or embeds a complete immutable preset snapshot, then stores a sparse
+override tree.
+
+The tree resolves in one fixed order: profile, semantic family, stable
+component identifier, transition identifier. Each level may independently
+provide a complete `MotionCurveData` and a duration. A curve is one atomic
+field—anchor or tangent JSON is never inherited piecemeal—while a component
+curve may, for example, coexist with a family duration. `resolve_scope` reports
+separate exact provenance for both fields. Removing one field is therefore the
+reset operation and reveals the precise parent value again.
+
+`ThemeSnapshot::motion_style` exposes the immutable `CompiledMotionStyle`
+compiled before the theme generation is published. Every curve in both the
+base and override trees is compiled, even if another value currently shadows
+it. Invalid candidates preserve the exact last-known-good theme snapshot.
+`resolve` and `resolve_family` return an Arc-backed compiled curve, duration and
+field provenance without reparsing configuration or recompiling curves.
+
+Balanced revision 1 is the exact snapshot of the accepted legacy defaults.
+Lively, Calm and Direct have stable reserved identities but deliberately have
+no numeric revision yet; selecting an unavailable revision fails rather than
+silently falling back. Their actual curves and timings require owner-guided
+calibration. `snapshot_as_preset` freezes the effective same-scope overrides
+into a portable user revision independent of its former built-in base.
+
+`MotionPresetLibraryData` stores at most 256 immutable `(id, revision)`
+snapshots. Reimporting identical data is a no-op; different content at an
+existing identity is a conflict rather than an overwrite. Settings'
+`MotionPresetLibraryEditor` fully parses and compiles an import before returning
+one opaque `theme.motion_library` CTRL-5 write. Its durable local library only
+changes after the host confirms that complete write. UI-7B adds no editor
+composition; semantic fluid parameters follow in UI-7C and style-neutral graph
+editing state follows in UI-7D.
+
 ## Verification tools
 
 `nkdhr-render` ships a deterministic primitive gallery. Its software reference

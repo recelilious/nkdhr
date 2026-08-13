@@ -15,13 +15,17 @@ use nkdhr_theme::{
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
-use crate::{Density, Invalidation, MotionMode, Theme, ThemeError};
+use crate::{
+    CompiledMotionStyle, Density, Invalidation, MotionMode, MotionStyleCompileError, Theme,
+    ThemeError,
+};
 
 #[derive(Debug, Clone)]
 pub struct ThemeSnapshot {
     generation: u64,
     resolved: Arc<ResolvedTheme>,
     theme: Arc<Theme>,
+    motion_style: Arc<CompiledMotionStyle>,
 }
 
 impl ThemeSnapshot {
@@ -35,6 +39,12 @@ impl ThemeSnapshot {
 
     pub fn theme(&self) -> Arc<Theme> {
         Arc::clone(&self.theme)
+    }
+
+    /// UI-7's independently compiled style hierarchy. Existing widgets keep
+    /// consuming `Theme::motion` until UI-7C switches runtime execution.
+    pub fn motion_style(&self) -> Arc<CompiledMotionStyle> {
+        Arc::clone(&self.motion_style)
     }
 
     pub fn changes_from(&self, previous: &Self) -> Vec<ThemeTokenChange> {
@@ -145,12 +155,14 @@ impl ThemeRuntime {
     ) -> Result<Self, ThemeRuntimeError> {
         let resolved = profile.resolve_with_extensions(&extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
+        let motion_style = CompiledMotionStyle::from_motion_data(&resolved.data.motion)?;
         Ok(Self {
             state: Arc::new(Mutex::new(RuntimeState {
                 snapshot: Arc::new(ThemeSnapshot {
                     generation: 1,
                     resolved: Arc::new(resolved),
                     theme: Arc::new(theme),
+                    motion_style: Arc::new(motion_style),
                 }),
             })),
             extensions,
@@ -168,6 +180,7 @@ impl ThemeRuntime {
     pub fn publish(&self, profile: ThemeProfile) -> Result<ThemePublication, ThemeRuntimeError> {
         let resolved = profile.resolve_with_extensions(&self.extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
+        let motion_style = CompiledMotionStyle::from_motion_data(&resolved.data.motion)?;
         let mut state = self.state.lock().expect("theme runtime poisoned");
         let previous = Arc::clone(&state.snapshot);
         if previous.resolved.as_ref() == &resolved {
@@ -183,6 +196,7 @@ impl ThemeRuntime {
             generation: previous.generation.wrapping_add(1).max(1),
             resolved: Arc::new(resolved),
             theme: Arc::new(theme),
+            motion_style: Arc::new(motion_style),
         });
         state.snapshot = Arc::clone(&snapshot);
         Ok(ThemePublication {
@@ -335,6 +349,7 @@ pub mod tokens {
 pub enum ThemeRuntimeError {
     Profile(ThemeProfileError),
     Runtime(ThemeError),
+    MotionStyle(MotionStyleCompileError),
 }
 
 impl fmt::Display for ThemeRuntimeError {
@@ -342,6 +357,7 @@ impl fmt::Display for ThemeRuntimeError {
         match self {
             Self::Profile(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
+            Self::MotionStyle(error) => error.fmt(formatter),
         }
     }
 }
@@ -360,15 +376,24 @@ impl From<ThemeError> for ThemeRuntimeError {
     }
 }
 
+impl From<MotionStyleCompileError> for ThemeRuntimeError {
+    fn from(value: MotionStyleCompileError) -> Self {
+        Self::MotionStyle(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::time::Duration;
 
     use nkdhr_render::{DisplayListBuilder, Primitive, Rect};
     use nkdhr_theme::{
         ExtensionTokenDescriptor, ExtensionTokenGroup, ExtensionTokenType, ExtensionValue,
+        MotionCurveData, MotionFamilyNodeData, MotionSemanticFamilyData, MotionStyleProfileData,
+        MotionTangentsData, MotionValueOriginData, MotionValuesData, MotionVectorData,
         ThemeExtensionRegistry, ThemeProfile,
     };
     use serde_json::json;
@@ -503,6 +528,51 @@ mod tests {
             ..ThemeProfile::default()
         };
         assert!(runtime.publish(invalid).is_err());
+        assert!(Arc::ptr_eq(&accepted, &runtime.snapshot()));
+    }
+
+    #[test]
+    fn compiled_motion_style_is_atomic_and_rejection_preserves_last_good() {
+        let runtime = ThemeRuntime::default();
+        let accepted = runtime.snapshot();
+        let legacy_toggle = accepted
+            .motion_style()
+            .resolve_family(crate::MotionFamily::Toggle)
+            .unwrap();
+        assert_eq!(legacy_toggle.duration, Duration::from_millis(220));
+        assert!(matches!(
+            legacy_toggle.curve_provenance.origin,
+            MotionValueOriginData::EmbeddedPreset { .. }
+        ));
+
+        let mut style = MotionStyleProfileData::default();
+        let mut invalid = MotionCurveData::linear();
+        invalid.anchors[0].tangents = MotionTangentsData::Broken {
+            incoming: MotionVectorData::ZERO,
+            outgoing: MotionVectorData::new(0.8, 0.2),
+        };
+        invalid.anchors[1].tangents = MotionTangentsData::Broken {
+            incoming: MotionVectorData::new(-0.8, -0.2),
+            outgoing: MotionVectorData::ZERO,
+        };
+        style.overrides.families.insert(
+            MotionSemanticFamilyData::Focus,
+            MotionFamilyNodeData {
+                values: MotionValuesData {
+                    curve: Some(invalid),
+                    duration_ms: None,
+                },
+                components: Default::default(),
+            },
+        );
+        let invalid = ThemeProfile {
+            overrides: json!({"motion": {"style": style}}),
+            ..ThemeProfile::default()
+        };
+        assert!(matches!(
+            runtime.publish(invalid),
+            Err(ThemeRuntimeError::MotionStyle(_))
+        ));
         assert!(Arc::ptr_eq(&accepted, &runtime.snapshot()));
     }
 

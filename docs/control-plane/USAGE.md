@@ -105,12 +105,17 @@ The currently registered namespaces are `canvas` and `theme`. UI-4 stores a
 complete portable profile in the scalar leaf `theme.profile`: one versioned
 JSON document containing an immutable built-in or wallpaper base plus sparse
 explicit overrides. The sibling scalar `theme.library` is a versioned,
-validated collection of user-saved profiles. Keeping each operation in one
-leaf makes its import, validation, publication and `Changed` delivery one
-atomic transaction. Wallpaper profiles always carry a frozen resolved palette,
+validated collection of user-saved profiles. UI-7 adds
+`theme.motion_library`, a bounded versioned collection of immutable motion
+preset `(id, revision)` snapshots; active style data remains inside the atomic
+`theme.profile` document as optional `motion.style`. Keeping each operation in
+one leaf makes its import, validation, publication and `Changed` delivery one
+atomic transaction. Older `theme.toml` files receive an empty motion library
+without rewriting their active profile. Wallpaper profiles always carry a frozen resolved palette,
 so an export remains usable without the source image; a live regeneration
 replaces only the base and preserves the explicit override object. Use
-`nkdhrctl config get theme.profile`, `nkdhrctl config get theme.library` or
+`nkdhrctl config get theme.profile`, `nkdhrctl config get theme.library`,
+`nkdhrctl config get theme.motion_library` or
 `nkdhrctl config watch theme` to inspect them. Settings is the normal editor
 and provides immediate preview, cancel, save, copy and bounded JSON
 import/export. Direct `config set` is chiefly useful for importing an already

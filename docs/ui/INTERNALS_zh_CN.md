@@ -263,6 +263,40 @@ CSS 旧曲线转换成两个符合新编辑器更强时间顺序的 segment。UI
 反向、overshoot settle 不误报 reverse、自动切线确定性、最大锚点数、绝对时间重复性，
 以及 256 条确定生成的合法单调曲线。
 
+## UI-7B：继承与不可变预设快照
+
+`nkdhr-theme::motion_style` 让可执行编译远离 portable data。活动的
+`MotionStyleProfileData` 会固定一个内置 revision 或嵌入完整 `MotionStylePresetData`，
+再携带稀疏 `MotionStyleTreeData`。树的 root values 下按 semantic family 映射稳定
+component ID 与 transition ID。文档最多 4,096 个节点、1 MiB，ID 是有界小写稳定标识。
+preset root 必须包含曲线和 duration，后代则可独立只含其中之一。
+
+解析会在每个 specificity 层交错 base/profile：base root、override root、base family、
+override family，component 与 transition 同理。因此 specificity 高于 origin，而相同
+scope 的显式 profile value 会替换 preset。曲线在层边界是一个完整 `Option`，只能整条
+替换。曲线和 duration 分别带 `MotionValueProvenanceData`；reset 是删除一个 option，
+不是复制父值。`snapshot_as_preset` 把同 scope 字段覆盖到固定 base 上，生成新的完整
+不可变 revision。
+
+当前只有 Balanced revision 1 可解析。它由旧四条 cubic 与全部 23 个 family duration
+生成，密集测试逐 family 比较编译结果和旧 evaluator。Lively、Calm、Direct 是稳定 enum
+身份，但不会凭空制造 revision payload；不可用版本会失败关闭。`MotionData.style` 缺省
+时，`CompiledMotionStyle` 在内存中嵌入同一份精确旧数据迁移。可选 serde 字段会跳过，
+因此用户明确编写 style data 前，旧主题 profile 不会被改写。
+
+`CompiledMotionStyle` 用预编译 Arc-backed curve 镜像两棵树；编译会访问包括被遮住
+节点在内的每条源曲线。`ThemeRuntime` 在取得 publication mutex 前与 `Theme` 一起构建
+它，`ThemeSnapshot` 在同一 generation 下携带两者；任何 data/curve 错误都无法替换旧
+Arc。查找只走四个有界 map 层并 clone 被选曲线的 Arc，不解析 JSON 或重新编译。UI-7B
+中现有 widget 仍执行旧 `Theme::motion` 路径，从而在 UI-7C policy/runtime 前保持视觉
+完全不变。
+
+`MotionPresetLibraryData` 是以不可变 `(id, revision)` 为键的 4 MiB/256 preset 集合；
+不同 payload 不能覆盖同一身份。`nkdhrd` 将其作为标量 `theme.motion_library` 叶校验，
+并给旧 theme 文件补空默认值。Settings 侧 `MotionPresetLibraryEditor` 再执行更强的 runtime
+校验：每次 import 必须先在隔离状态完整编译，之后才能产生 opaque persistence request；
+只有匹配的 host/CTRL-5 确认后 durable model 才会变化。
+
 ## 错误与安全策略
 
 - 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；

@@ -14,10 +14,12 @@ use serde_json::{Map as JsonMap, Value as Json};
 
 mod extensions;
 mod motion_curve;
+mod motion_style;
 mod wallpaper;
 
 pub use extensions::*;
 pub use motion_curve::*;
+pub use motion_style::*;
 pub use wallpaper::*;
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;
@@ -428,6 +430,10 @@ pub struct MotionData {
     pub soft: [f32; 4],
     pub durations: MotionDurationsData,
     pub fluid: FluidData,
+    /// UI-7 style hierarchy. Absence preserves the legacy four-cubic document
+    /// and is migrated in memory, so existing profile JSON is never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<MotionStyleProfileData>,
 }
 
 impl Default for MotionData {
@@ -441,6 +447,7 @@ impl Default for MotionData {
             soft: [0.33, 1.0, 0.68, 1.0],
             durations: MotionDurationsData::default(),
             fluid: FluidData::default(),
+            style: None,
         }
     }
 }
@@ -920,9 +927,13 @@ pub fn diff(previous: &ThemeData, current: &ThemeData) -> Vec<ThemeTokenChange> 
     let mut new = BTreeMap::new();
     flatten_values("", &previous, &mut old);
     flatten_values("", &current, &mut new);
-    new.into_iter()
-        .filter_map(|(path, value)| {
-            (old.get(&path) != Some(&value)).then(|| ThemeTokenChange {
+    old.keys()
+        .chain(new.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            (old.get(&path) != new.get(&path)).then(|| ThemeTokenChange {
                 impact: token_impact(&path),
                 path,
             })
@@ -1016,6 +1027,11 @@ fn validate_motion(motion: &MotionData) -> Result<(), ThemeProfileError> {
         || fluid.bud_stagger > fluid.group_maximum
     {
         return Err(ThemeProfileError::InvalidToken("motion.fluid".into()));
+    }
+    if let Some(style) = &motion.style {
+        style
+            .resolve()
+            .map_err(|_| ThemeProfileError::InvalidToken("motion.style".into()))?;
     }
     Ok(())
 }
@@ -1268,6 +1284,13 @@ mod tests {
         assert!(diff(&old, &new).contains(&ThemeTokenChange {
             path: "spacing.medium".into(),
             impact: TokenImpact::Layout
+        }));
+
+        let mut with_style = old.clone();
+        with_style.motion.style = Some(MotionStyleProfileData::default());
+        let removed = diff(&with_style, &old);
+        assert!(removed.iter().any(|change| {
+            change.path.starts_with("motion.style.") && change.impact == TokenImpact::Layout
         }));
     }
 

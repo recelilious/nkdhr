@@ -222,6 +222,35 @@ fingerprint。
 多边形不满足新编辑器的严格顺序，会在内存中精确分成两个合法 segment。UI-7A 不自动
 改写现有主题 JSON；版本化 preset 持久化与继承 runtime snapshot 属于 UI-7B。
 
+## 动画风格继承（`nkdhr-theme`、`nkdhr-ui`，UI-7B）
+
+UI-7B 把 `MotionStyleProfileData` 作为主题 motion 数据中可选的 `motion.style`。缺省本身
+有明确含义：现有四条 cubic 与各 family duration 只在内存中精确迁移，因此旧 profile
+JSON 不会被改写，所有现有 widget 也继续使用已经验收的 `MotionProfile` 路径。显式风格
+会固定一个内置 `(style, revision)`，或嵌入一份完整不可变 preset snapshot，再保存稀疏
+override tree。
+
+继承顺序固定为：配置、语义族、稳定组件标识、具体过渡。每层都可分别提供完整
+`MotionCurveData` 和 duration。曲线始终是一个原子字段，不会按 anchor/tangent JSON
+局部继承；因此组件曲线可同时继承语义族时长。`resolve_scope` 分别报告两个字段的精确
+来源。删除当前层某字段就是 reset，并会重新显露准确的父级值。
+
+`ThemeSnapshot::motion_style` 暴露在主题 generation 发布前完整编译的不可变
+`CompiledMotionStyle`。base 与 override tree 中的每条曲线都会编译，即使当前被另一值
+遮住；无效候选保留原样的最后有效主题 snapshot。`resolve`/`resolve_family` 直接返回
+Arc-backed 编译曲线、时长和字段来源，不重新解析配置或编译曲线。
+
+Balanced revision 1 是已验收旧默认值的精确快照。Lively、Calm、Direct 已保留稳定
+身份，但在与所有者共同校准前刻意没有数值 revision；引用不存在的版本会明确失败，不会
+偷偷 fallback。`snapshot_as_preset` 可把同层有效覆盖冻结成不再依赖原内置 base 的便携
+用户 revision。
+
+`MotionPresetLibraryData` 最多保存 256 个不可变 `(id, revision)` 快照；重复导入相同
+内容是 no-op，同一身份的不同内容则冲突而非覆盖。Settings 的
+`MotionPresetLibraryEditor` 会在返回单个 `theme.motion_library` CTRL-5 写请求前完整解析
+并编译导入；只有宿主确认整次写入后，durable local library 才变化。UI-7B 没有组合任何
+编辑器界面；语义 fluid 参数属于 UI-7C，style-neutral 图形编辑状态属于 UI-7D。
+
 ## 验证工具
 
 `nkdhr-render` 含确定性图元 gallery；软件参考渲染器生成提交的 PPM golden，测试逐字

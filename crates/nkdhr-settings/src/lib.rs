@@ -3,9 +3,11 @@
 mod appearance;
 mod host;
 mod interaction;
+mod motion_presets;
 mod theme_profiles;
 
 pub use appearance::*;
 pub use host::*;
 pub use interaction::*;
+pub use motion_presets::*;
 pub use theme_profiles::*;
