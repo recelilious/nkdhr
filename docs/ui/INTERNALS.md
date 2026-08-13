@@ -637,6 +637,47 @@ No binding value is executable code. Custom command execution, if later
 implemented through CTRL-EXT, is a separately authorized typed action rather
 than an escape hatch in the binding grammar.
 
+## UI-7A: segmented motion-curve foundation
+
+Portable authored data lives in `nkdhr-theme::motion_curve`; executable/runtime
+precomputation lives in `nkdhr-ui::motion_curve`. This preserves the dependency
+direction and keeps profile data non-executable. `MotionCurveData` is an atomic
+curve field with a schema version, automatic-tangent algorithm version,
+overshoot/reverse permissions and 2–64 anchors. Structural validation fixes
+the endpoints, enforces a `1e-6` minimum normalized time gap, rejects non-finite
+values and bounds hostile progress/handle data before compilation.
+
+Automatic anchors resolve with version-one shape-preserving PCHIP derivatives.
+Continuous anchors normalize one stored direction and apply independent input/
+output lengths; broken anchors preserve both vectors; corner anchors resolve
+to zero handles. Each adjacent pair becomes one `CompiledSegment` containing
+four points and precomputed f64 power-basis polynomials for time and progress.
+Control times must remain ordered inside the segment. The immutable compiled
+object stores boxed segments behind one Arc, analytic range/reverse results and
+a stable fingerprint; sampling performs no allocation, locking or tree access.
+
+Progress extrema are roots of each segment's quadratic derivative. Derivative
+sign intervals additionally distinguish true reverse motion inside the normal
+range from the necessary return from an allowed above-one overshoot. Actual
+overshoot/reverse requires the authored permission, and an absolute progress
+safety range remains non-bypassable. Time inversion uses exactly 32 bisection
+iterations after a segment binary search, so output is a function of curve and
+absolute time rather than frame cadence. Zero and one have exact branches.
+
+`split_motion_curve` compiles the source, solves the selected segment parameter
+and applies De Casteljau subdivision. It converts resolved neighboring handles
+to explicit broken tangents and recompiles the result; dense sampling verifies
+the shape is unchanged. Legacy `[x1,y1,x2,y2]` data maps exactly. If `x1>x2`,
+one exact half subdivision turns the CSS-valid legacy shape into two segments
+whose control times satisfy the editor's stronger direct-manipulation rule.
+The old scalar runtime and portable theme schema remain untouched during
+UI-7A; UI-7B will own atomic inherited presets and persistence migration.
+
+Tests cover portable bounds, fixed endpoints/order, all accepted legacy
+defaults, exact insertion, hidden extrema/reverse, settling overshoot without a
+false reverse, automatic tangent determinism, maximum anchor count, absolute-
+time repeatability and 256 deterministically generated legal monotone curves.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.

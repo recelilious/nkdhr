@@ -428,6 +428,34 @@ it into style-neutral discoverability rows; rejected candidate diagnostics do
 not replace its effective rows. `ActionFeedback` is the shared
 invoked/began/updated/ended/cancelled feedback value for later shell surfaces.
 
+## Multi-segment motion curves (`nkdhr-theme`, `nkdhr-ui`, UI-7A)
+
+UI-7A implements the portable curve value and runtime compiler; the approved
+professional Settings editor is intentionally not constructed yet.
+`MotionCurveData` stores 2–64 time-ordered anchors with fixed `(0,0)` and
+`(1,1)` endpoints. Tangents use one of four explicit representations:
+automatic, continuous with one direction and independent side lengths, broken
+with independent vectors, or corner. Duration is not part of the curve, so one
+normalized shape remains reusable at different speeds.
+
+`CompiledMotionCurve::compile` validates the complete data, resolves the
+versioned shape-preserving automatic tangent algorithm, rejects a control
+polygon that turns backward in time, analytically finds progress extrema and
+rejects undeclared overshoot or reverse motion. Sampling uses absolute
+normalized time, a segment binary search and a fixed-iteration monotonic time
+inversion. It allocates nothing, takes no lock and returns exact endpoint
+values. `analysis`, `velocity` and a stable content fingerprint are available
+to the later editor/runtime layers.
+
+`split_motion_curve` performs an exact De Casteljau split. Adding an anchor
+therefore cannot change the animation until the new point or handles are
+actually moved. The existing `CubicBezier` API remains active and exposes
+`to_motion_curve_data`/`compile_motion_curve` for lossless migration. A legacy
+CSS cubic whose time-control polygon does not meet the stricter direct-editing
+order is exactly divided into two legal segments in memory. Existing theme
+JSON is not rewritten in UI-7A; versioned preset persistence and inherited
+runtime snapshots belong to UI-7B.
+
 ## Verification tools
 
 `nkdhr-render` ships a deterministic primitive gallery. Its software reference

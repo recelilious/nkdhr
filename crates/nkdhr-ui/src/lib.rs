@@ -6,6 +6,7 @@ mod host;
 mod input;
 mod layout;
 mod motion;
+mod motion_curve;
 mod reactive;
 mod semantics;
 pub mod text;
@@ -34,6 +35,14 @@ pub use layout::{
 pub use motion::{
     CubicBezier, FluidTuning, FluidVariation, MotionDurations, MotionError, MotionFamily,
     MotionMode, MotionProfile, MotionSpec, ScalarMotion,
+};
+pub use motion_curve::{
+    CompiledMotionCurve, MotionCurveAnalysis, MotionCurveCompileError, split_motion_curve,
+};
+pub use nkdhr_theme::{
+    MAX_MOTION_CURVE_ABSOLUTE_PROGRESS, MAX_MOTION_CURVE_ANCHORS, MIN_MOTION_CURVE_ANCHORS,
+    MIN_MOTION_CURVE_TIME_GAP, MOTION_CURVE_AUTO_ALGORITHM_VERSION, MOTION_CURVE_SCHEMA_VERSION,
+    MotionAnchorData, MotionCurveData, MotionCurveDataError, MotionTangentsData, MotionVectorData,
 };
 pub use reactive::Reactive;
 pub(crate) use reactive::RootReactivity;

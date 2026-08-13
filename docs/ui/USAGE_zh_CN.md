@@ -202,6 +202,26 @@ Super+Ctrl+方向调整右/下边、Super+数字跳 mark、Super+Shift+数字设
 有效行。`ActionFeedback` 为以后 shell 提供 invoked/began/updated/ended/cancelled
 统一反馈，本阶段没有擅自设计通知视觉。
 
+## 分段动画曲线（`nkdhr-theme`、`nkdhr-ui`，UI-7A）
+
+UI-7A 已实现可移植曲线值与 runtime compiler；经确认的专业 Settings 编辑器刻意尚未
+开始组合。`MotionCurveData` 保存 2–64 个严格按时间排列的锚点，端点固定为 `(0,0)`、
+`(1,1)`。切线显式使用 automatic、同方向但两侧独立长度的 continuous、两侧独立的
+broken 或收回手柄的 corner。duration 不属于曲线，因此同一规范化形状可复用在不同
+时长。
+
+`CompiledMotionCurve::compile` 校验完整数据，解析带版本且保持形状的自动切线，拒绝
+时间回头的控制多边形，解析求出真实进度极值，并拒绝未授权的超调或反向。采样只依赖
+绝对规范化时间，通过 segment 二分查找与固定次数的单调时间反解完成；无 allocation、
+无锁，端点精确返回。后续 editor/runtime 可读取 `analysis`、`velocity` 与稳定内容
+fingerprint。
+
+`split_motion_curve` 使用精确 De Casteljau 分割，因此新增锚点本身不会改变动画，只有
+随后移动点或手柄才会。现有 `CubicBezier` API 保持有效，并提供
+`to_motion_curve_data`/`compile_motion_curve` 无损迁移入口。旧 CSS cubic 若时间控制
+多边形不满足新编辑器的严格顺序，会在内存中精确分成两个合法 segment。UI-7A 不自动
+改写现有主题 JSON；版本化 preset 持久化与继承 runtime snapshot 属于 UI-7B。
+
 ## 验证工具
 
 `nkdhr-render` 含确定性图元 gallery；软件参考渲染器生成提交的 PPM golden，测试逐字

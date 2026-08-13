@@ -64,6 +64,22 @@ impl CubicBezier {
         }
         cubic((lower + upper) * 0.5, self.y1, self.y2)
     }
+
+    /// Convert the Phase-3 single cubic into UI-7's portable segmented data.
+    /// A legacy control polygon which is not directly editable under UI-7's
+    /// ordered-time rule is exactly subdivided without changing its geometry.
+    pub fn to_motion_curve_data(
+        self,
+    ) -> Result<nkdhr_theme::MotionCurveData, nkdhr_theme::MotionCurveDataError> {
+        nkdhr_theme::MotionCurveData::from_legacy_cubic([self.x1, self.y1, self.x2, self.y2])
+    }
+
+    /// Compile the losslessly migrated UI-7 representation.
+    pub fn compile_motion_curve(
+        self,
+    ) -> Result<crate::CompiledMotionCurve, crate::MotionCurveCompileError> {
+        crate::CompiledMotionCurve::from_legacy_cubic([self.x1, self.y1, self.x2, self.y2])
+    }
 }
 
 fn cubic(parameter: f32, first: f32, second: f32) -> f32 {

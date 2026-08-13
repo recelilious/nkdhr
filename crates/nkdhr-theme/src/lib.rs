@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
 
 mod extensions;
+mod motion_curve;
 mod wallpaper;
 
 pub use extensions::*;
+pub use motion_curve::*;
 pub use wallpaper::*;
 
 pub const THEME_SCHEMA_VERSION: u32 = 1;

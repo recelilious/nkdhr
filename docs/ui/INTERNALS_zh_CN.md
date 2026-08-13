@@ -234,6 +234,35 @@ BindingSettingsModel 直接接收 BindingSnapshot，从其 catalog 格式化无�
 拒绝 publication 只更新诊断。ActionFeedback 提供统一结果 seam，不提前设计 Phase 4
 通知组件。任何绑定都不是代码；未来 CTRL-EXT 命令仍必须是单独授权的类型化 action。
 
+## UI-7A：分段动画曲线基础
+
+可移植 authored data 位于 `nkdhr-theme::motion_curve`，runtime 预计算位于
+`nkdhr-ui::motion_curve`，从而保持依赖方向且配置不可执行。`MotionCurveData` 是原子
+曲线字段，携带 schema、自动切线算法版本、超调/反向权限与 2–64 个锚点。结构校验
+固定端点，要求至少 `1e-6` 的规范化时间间隔，在编译前拒绝非有限值并限制恶意
+progress/handle 数据。
+
+automatic 锚点用版本一、保持形状的 PCHIP derivative 解析；continuous 把一个保存的
+方向规范化后应用两侧独立长度；broken 保留两个向量；corner 得到零手柄。相邻锚点
+编译为 `CompiledSegment`，保存四点及 time/progress 的 f64 power-basis 系数。控制时间
+必须在 segment 内有序。不可变编译对象把 boxed segments、解析 range/reverse 结果与
+稳定 fingerprint 放在一个 Arc 后；采样不分配、不加锁、不访问配置树。
+
+进度极值由每段二次 derivative 的根解析得到；导数符号区间进一步区分正常范围内的
+真实反向与允许越过 1 后回到终点所必需的下降。真实超调/反向必须有 authored 权限，
+绝对 progress 安全界限不可绕过。采样先二分 segment，再固定执行 32 次时间反解，因此
+输出只由曲线和绝对时间决定，不依赖帧率；0 与 1 使用精确分支。
+
+`split_motion_curve` 编译源曲线、解出目标 segment parameter，再执行 De Casteljau
+分割；相邻已解析手柄转换为显式 broken tangent，并重新编译完整结果，密集采样证明
+形状不变。旧 `[x1,y1,x2,y2]` 可精确映射；若 `x1>x2`，一次精确 half split 会把合法
+CSS 旧曲线转换成两个符合新编辑器更强时间顺序的 segment。UI-7A 不改旧 scalar runtime
+或 portable theme schema；UI-7B 才负责原子继承 preset 与持久化迁移。
+
+测试覆盖 portable 边界、固定端点/顺序、全部现有默认曲线、精确新增点、隐藏极值/
+反向、overshoot settle 不误报 reverse、自动切线确定性、最大锚点数、绝对时间重复性，
+以及 256 条确定生成的合法单调曲线。
+
 ## 错误与安全策略
 
 - 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；

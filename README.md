@@ -104,8 +104,13 @@ interaction foundation: bounded hot-reloadable key/button/gesture documents,
 validated named actions, last-known-good snapshots, conflict diagnostics and
 one central instant/continuous dispatcher now own the existing canvas input
 vocabulary. Settings consumes the same effective snapshot rather than
-reconstructing it. Phase 3 next moves to UI-7's owner-guided professional
-motion editor design.
+reconstructing it. Phase 3 is now in UI-7's owner-guided professional motion
+system. Its product and interaction specification is owner-approved;
+UI-7A adds the portable 2–64-anchor segmented curve data, deterministic f64
+compiler/evaluator, analytic overshoot/reverse validation, exact shape-
+preserving insertion and lossless migration from the existing cubics. The
+approved Settings editor itself remains a later UI-7 step rather than an
+unreviewed scaffold.
 
 ## Documentation
 
