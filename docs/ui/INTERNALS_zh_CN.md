@@ -297,6 +297,40 @@ Arc。查找只走四个有界 map 层并 clone 被选曲线的 Arc，不解析 
 校验：每次 import 必须先在隔离状态完整编译，之后才能产生 opaque persistence request；
 只有匹配的 host/CTRL-5 确认后 durable model 才会变化。
 
+## UI-7C：策略管控的中断与语义流体
+
+UI-7C 将 authored Motion Style 与最终 Motion Policy 分开。`MotionRuntimeProfile`
+在 publication 前构建，并与编译 style 一同放入同一代 `ThemeSnapshot`。Standard 与
+Expressive 解析指定 scope 的曲线/时长，并只应用一次全局速度倍率；Reduced 把全部空间
+过渡替换为立即完成，只给非空间反馈保留固定且不超过 100 ms 的短过渡；Off 对所有域都
+立即完成。直接操控在每种模式下都可用，而 Reduced/Off 会禁止空间路径、流体拓扑、拖尾、
+振荡、程序变化、惯性与静止态水面。`MotionExecutionSpec` 字段不公开，因此组件在策略
+替换后不能从 spec 中重新拼回 authored 值。单独暴露的 compiled style 只供创作/检查，
+不是执行入口。
+
+稀疏 style value 现在还包含九个可独立继承的语义流体字段：粘度、表面张力、吸引力、
+颈部、拖尾、路径灵动度、振荡、阻尼与变化幅度。它们采用相同的配置/语义族/组件/具体
+过渡优先级，每个字段单独保留来源。Balanced revision 1 刻意不写入这些新值；解析只把
+实际存在的字段覆盖到与旧实现精确兼容的流体基线上，因此迁移不会凭空增加静止振荡，也
+不会改变已验收输出。当前范围是 portable 安全边界，不代表已经与所有者确认视觉数值。
+
+`ResolvedSemanticFluid` 私有保存最终策略模式。瞬态 envelope 对 `(progress, seed)`
+确定、受校验参数限制，并在进度 0 与 1 精确归零，所以程序变化无法改变声明的终点或
+时长。常动水面用绝对时间与稳定 seed 采样：显式启用非零振荡后会持续活动，同时不会
+积累帧历史误差；Reduced 与 Off 的两种采样都精确静止。
+
+`KineticMotion` 只拥有一个活动 segment 与一个最新目标。改目标时先采样屏幕当前值和
+速度，把旧 run 以 Interrupted 结束，再围绕编译曲线加入端点约束 Hermite 修正；新段
+会以原切线开始，并在目标处以零速度结束。策略要求立即完成时仍会产生一次 begin 和一次
+Completed。完成/取消最多报告一次，从不排动画队列。
+
+`SelectionMassMotion` 把同一契约应用于稳定节点 ID 向量。负的数值质量会被截断，随后
+向量解析归一化；归一化速度导数使速度总和保持为零，同时把总质量精确修正。中断会保留
+当前每个节点的可见质量/切线，并只把全部质量重定向到最新节点；完成时收束到该节点，
+取消则冻结当前分布且速度归零。这是已经确认的左右分裂、收回和粘液式选中传递的运行
+基础，但 UI-7C 刻意没有组合或重绘任何现有组件。视觉数值校准与组件接入仍会由所有者
+逐步控制。
+
 ## 错误与安全策略
 
 - 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；

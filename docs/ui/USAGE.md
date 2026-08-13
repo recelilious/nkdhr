@@ -497,6 +497,29 @@ changes after the host confirms that complete write. UI-7B adds no editor
 composition; semantic fluid parameters follow in UI-7C and style-neutral graph
 editing state follows in UI-7D.
 
+## Policy motion runtime (`nkdhr-ui`, UI-7C)
+
+Use `ThemeSnapshot::motion_runtime`, not the authoring-only `motion_style`, for
+component execution. Resolve a stable `MotionScopeData` together with a
+`MotionPropertyDomain`; the returned opaque `MotionExecutionSpec` is already
+governed by Expressive/Standard/Reduced/Off policy. Reduced makes spatial
+motion immediate while retaining brief non-spatial feedback, and Off is fully
+immediate. Direct pointer/keyboard manipulation remains functional in either
+mode. Callers must consume begin/terminal outcomes from `KineticMotion` or
+`SelectionMassMotion`; both keep only the latest target and never queue clips.
+
+Fluid overrides may be authored independently at any style scope. Use
+`resolve_fluid`, then sample the returned `ResolvedSemanticFluid`; its policy
+mode cannot be supplied or overridden by the caller. Event variation requires
+a stable event seed. Idle water requires a stable component seed and absolute
+time. An authored zero oscillation is stationary; a non-zero oscillation stays
+alive in Standard/Expressive and is forced to exact rest in Reduced/Off.
+
+This stage supplies framework and execution behavior only. Existing widgets
+still render their accepted appearance until each component's visual adoption
+and numeric tuning are reviewed with the owner; no Settings editor or fluid
+component composition is introduced here.
+
 ## Verification tools
 
 `nkdhr-render` ships a deterministic primitive gallery. Its software reference

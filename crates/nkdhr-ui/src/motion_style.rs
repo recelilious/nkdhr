@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nkdhr_theme::{
-    MotionComponentNodeData, MotionData, MotionFamilyNodeData, MotionScopeData,
-    MotionScopeLevelData, MotionSemanticFamilyData, MotionStyleError, MotionStyleProfileData,
-    MotionStyleTreeData, MotionValueOriginData, MotionValueProvenanceData, MotionValuesData,
-    ResolvedMotionStyleData,
+    MotionComponentNodeData, MotionData, MotionFamilyNodeData, MotionFluidOverridesData,
+    MotionFluidProvenanceData, MotionScopeData, MotionScopeLevelData, MotionSemanticFamilyData,
+    MotionStyleError, MotionStyleProfileData, MotionStyleTreeData, MotionValueOriginData,
+    MotionValueProvenanceData, MotionValuesData, ResolvedMotionStyleData,
 };
 
 use crate::{CompiledMotionCurve, MotionCurveCompileError, MotionFamily};
@@ -32,12 +32,15 @@ pub struct ResolvedMotionStyle {
     pub duration: Duration,
     pub curve_provenance: MotionValueProvenanceData,
     pub duration_provenance: MotionValueProvenanceData,
+    pub fluid: MotionFluidOverridesData,
+    pub fluid_provenance: MotionFluidProvenanceData,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CompiledMotionValues {
     curve: Option<CompiledMotionCurve>,
     duration_ms: Option<u64>,
+    fluid: MotionFluidOverridesData,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +104,8 @@ impl CompiledMotionStyle {
         let mut duration_ms = None;
         let mut curve_provenance = None;
         let mut duration_provenance = None;
+        let mut fluid = MotionFluidOverridesData::default();
+        let mut fluid_provenance = MotionFluidProvenanceData::default();
         let override_origin = MotionValueOriginData::ProfileOverride {
             profile_id: self.inner.resolved.profile.id.clone(),
         };
@@ -122,8 +127,9 @@ impl CompiledMotionStyle {
                     }
                     if let Some(value) = values.duration_ms {
                         duration_ms = Some(value);
-                        duration_provenance = Some(provenance);
+                        duration_provenance = Some(provenance.clone());
                     }
+                    apply_fluid(values.fluid, &provenance, &mut fluid, &mut fluid_provenance);
                 }
             }
         }
@@ -136,6 +142,8 @@ impl CompiledMotionStyle {
                 .ok_or(MotionStyleCompileError::IncompleteSnapshot)?,
             duration_provenance: duration_provenance
                 .ok_or(MotionStyleCompileError::IncompleteSnapshot)?,
+            fluid,
+            fluid_provenance,
         })
     }
 
@@ -227,7 +235,33 @@ fn compile_values(
             .transpose()
             .map_err(MotionStyleCompileError::Curve)?,
         duration_ms: values.duration_ms,
+        fluid: values.fluid,
     })
+}
+
+fn apply_fluid(
+    values: MotionFluidOverridesData,
+    provenance: &MotionValueProvenanceData,
+    fluid: &mut MotionFluidOverridesData,
+    fluid_provenance: &mut MotionFluidProvenanceData,
+) {
+    macro_rules! apply_field {
+        ($field:ident) => {
+            if let Some(value) = values.$field {
+                fluid.$field = Some(value);
+                fluid_provenance.$field = Some(provenance.clone());
+            }
+        };
+    }
+    apply_field!(viscosity);
+    apply_field!(surface_tension);
+    apply_field!(attraction);
+    apply_field!(neck);
+    apply_field!(trail);
+    apply_field!(path_liveliness);
+    apply_field!(oscillation);
+    apply_field!(damping);
+    apply_field!(variation);
 }
 
 fn compiled_values_at_level<'a>(
@@ -371,6 +405,7 @@ mod tests {
         family.values = MotionValuesData {
             curve: Some(invalid),
             duration_ms: None,
+            fluid: Default::default(),
         };
         assert!(matches!(
             CompiledMotionStyle::compile(profile),

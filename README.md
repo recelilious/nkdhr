@@ -113,8 +113,11 @@ adds pinned preset revisions, atomic profile/family/component/transition
 inheritance with per-field provenance, compiled last-known-good theme snapshots
 and transactional preset-library persistence. Balanced revision 1 preserves
 the accepted output exactly; other approved style identities await owner-guided
-tuning. The approved Settings editor itself remains a later UI-7 step rather
-than an unreviewed scaffold.
+tuning. UI-7C adds the final Expressive/Standard/Reduced/Off policy runtime,
+state-and-velocity-preserving latest-target interruption, conserved multi-node
+selection mass, and deterministic endpoint-preserving semantic fluid/idle-water
+signals. These are execution foundations only: existing component visuals and
+the approved Settings editor remain later owner-guided UI-7 work.
 
 ## Documentation
 

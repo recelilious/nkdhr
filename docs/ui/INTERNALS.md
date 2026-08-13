@@ -724,6 +724,56 @@ import is completely compiled in isolation before it can produce an opaque
 persistence request; its durable model changes only after matching host or
 CTRL-5 confirmation.
 
+## UI-7C: policy-governed interruption and semantic fluid
+
+UI-7C separates authored Motion Style from final Motion Policy. A
+`MotionRuntimeProfile` is built before publication and stored beside the
+compiled style in the same `ThemeSnapshot` generation. Standard and Expressive
+resolve the scoped curve and duration, applying the global speed multiplier
+once. Reduced replaces every spatial transition with an immediate result and
+uses a fixed, at-most-100-ms non-spatial feedback curve. Off is immediate for
+all domains. Direct manipulation stays available in every mode; Reduced and
+Off deny spatial paths, fluid topology, trails, oscillation, procedural
+variation, inertia and idle fluid. `MotionExecutionSpec` fields are private,
+so component execution cannot reconstruct the authored values after policy has
+replaced them. The separately exposed compiled style is for authoring and
+introspection, not execution.
+
+The sparse style value now also carries nine independent semantic fluid
+fields: viscosity, surface tension, attraction, neck, trail, path liveliness,
+oscillation, damping and variation. They follow the same profile/family/
+component/transition precedence and each retains its own provenance. Balanced
+revision 1 intentionally contains none of these new values. Resolution overlays
+only present fields on the exact legacy-compatible fluid base, so migration
+does not invent new idle oscillation or change accepted output. The bounds are
+portable validation limits, not owner-approved visual calibration.
+
+`ResolvedSemanticFluid` keeps its final policy mode private. Transient envelope
+sampling is deterministic for `(progress, seed)`, bounded by validated
+parameters and exactly zero at progress zero and one; therefore procedural
+variation cannot alter the declared endpoint or duration. Idle water uses
+absolute time and a stable seed, so it remains continuously alive when an
+authored non-zero oscillation is enabled, without accumulating frame-history
+error. Reduced and Off return exact rest for both paths.
+
+`KineticMotion` owns one active segment and one latest target. Retargeting first
+samples the visible scalar and velocity, terminates the previous run as
+Interrupted, then uses endpoint-constrained Hermite correction terms around the
+compiled curve. The new segment begins with the exact incoming tangent and
+settles at its target with zero velocity. Immediate policy changes still emit
+one begin and one Completed terminal result. Completion/cancellation is emitted
+at most once; there is no animation queue.
+
+`SelectionMassMotion` applies the same contract to a vector of stable node IDs.
+Negative numerical mass is clamped and the vector is analytically normalized;
+the normalized velocity derivative keeps velocity sum zero while total mass is
+corrected exactly. Retargeting preserves the visible per-node mass/tangent and
+redirects all mass to only the newest node. Completion collapses to that node;
+cancellation freezes the current distribution with zero velocity. This is the
+runtime basis for the approved left/right split, return and fluid selection
+transfer, but UI-7C deliberately does not compose or restyle any existing
+component. Numerical visual tuning and component adoption remain owner-guided.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.

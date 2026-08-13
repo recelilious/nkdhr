@@ -84,8 +84,58 @@ impl MotionSemanticFamilyData {
     ];
 }
 
-/// One inheritance unit. A curve is always replaced atomically; duration is a
-/// separate field and can therefore inherit from a different scope.
+/// Sparse semantic fluid fields. Each option inherits and resets independently
+/// while the runtime supplies an exact legacy-compatible base.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionFluidOverridesData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viscosity: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_tension: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attraction: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neck: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_liveliness: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oscillation: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variation: Option<f64>,
+}
+
+impl MotionFluidOverridesData {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn validate(self) -> Result<(), MotionStyleError> {
+        for (field, value, maximum) in [
+            ("viscosity", self.viscosity, 4.0),
+            ("surface_tension", self.surface_tension, 4.0),
+            ("attraction", self.attraction, 4.0),
+            ("neck", self.neck, 64.0),
+            ("trail", self.trail, 64.0),
+            ("path_liveliness", self.path_liveliness, 32.0),
+            ("oscillation", self.oscillation, 4.0),
+            ("damping", self.damping, 4.0),
+            ("variation", self.variation, 0.5),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0 || value > maximum) {
+                return Err(MotionStyleError::InvalidFluidParameter(field));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One inheritance unit. A curve is always replaced atomically; duration and
+/// each semantic fluid parameter can inherit from different scopes.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionValuesData {
@@ -93,11 +143,13 @@ pub struct MotionValuesData {
     pub curve: Option<MotionCurveData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "MotionFluidOverridesData::is_empty")]
+    pub fluid: MotionFluidOverridesData,
 }
 
 impl MotionValuesData {
     pub fn is_empty(&self) -> bool {
-        self.curve.is_none() && self.duration_ms.is_none()
+        self.curve.is_none() && self.duration_ms.is_none() && self.fluid.is_empty()
     }
 
     fn validate(&self) -> Result<(), MotionStyleError> {
@@ -110,6 +162,7 @@ impl MotionValuesData {
         {
             return Err(MotionStyleError::InvalidDuration);
         }
+        self.fluid.validate()?;
         Ok(())
     }
 }
@@ -448,12 +501,29 @@ pub struct MotionValueProvenanceData {
     pub transition: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MotionFluidProvenanceData {
+    pub viscosity: Option<MotionValueProvenanceData>,
+    pub surface_tension: Option<MotionValueProvenanceData>,
+    pub attraction: Option<MotionValueProvenanceData>,
+    pub neck: Option<MotionValueProvenanceData>,
+    pub trail: Option<MotionValueProvenanceData>,
+    pub path_liveliness: Option<MotionValueProvenanceData>,
+    pub oscillation: Option<MotionValueProvenanceData>,
+    pub damping: Option<MotionValueProvenanceData>,
+    pub variation: Option<MotionValueProvenanceData>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedMotionValuesData {
     pub curve: MotionCurveData,
     pub duration_ms: u64,
     pub curve_provenance: MotionValueProvenanceData,
     pub duration_provenance: MotionValueProvenanceData,
+    /// Semantic fluid fields remain optional until a consumer overlays them on
+    /// its exact legacy-compatible base. Each present field resolves alone.
+    pub fluid: MotionFluidOverridesData,
+    pub fluid_provenance: MotionFluidProvenanceData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -499,6 +569,8 @@ impl ResolvedMotionStyleData {
         let mut duration_ms = None;
         let mut curve_provenance = None;
         let mut duration_provenance = None;
+        let mut fluid = MotionFluidOverridesData::default();
+        let mut fluid_provenance = MotionFluidProvenanceData::default();
         let override_origin = MotionValueOriginData::ProfileOverride {
             profile_id: self.profile.id.clone(),
         };
@@ -520,6 +592,8 @@ impl ResolvedMotionStyleData {
                         &mut duration_ms,
                         &mut curve_provenance,
                         &mut duration_provenance,
+                        &mut fluid,
+                        &mut fluid_provenance,
                     );
                 }
             }
@@ -530,6 +604,8 @@ impl ResolvedMotionStyleData {
             curve_provenance: curve_provenance.ok_or(MotionStyleError::IncompletePresetRoot)?,
             duration_provenance: duration_provenance
                 .ok_or(MotionStyleError::IncompletePresetRoot)?,
+            fluid,
+            fluid_provenance,
         })
     }
 }
@@ -560,6 +636,26 @@ fn overlay_values(base: &mut MotionValuesData, overlay: &MotionValuesData) {
     if let Some(duration_ms) = overlay.duration_ms {
         base.duration_ms = Some(duration_ms);
     }
+    overlay_fluid(&mut base.fluid, overlay.fluid);
+}
+
+fn overlay_fluid(base: &mut MotionFluidOverridesData, overlay: MotionFluidOverridesData) {
+    macro_rules! overlay_field {
+        ($field:ident) => {
+            if let Some(value) = overlay.$field {
+                base.$field = Some(value);
+            }
+        };
+    }
+    overlay_field!(viscosity);
+    overlay_field!(surface_tension);
+    overlay_field!(attraction);
+    overlay_field!(neck);
+    overlay_field!(trail);
+    overlay_field!(path_liveliness);
+    overlay_field!(oscillation);
+    overlay_field!(damping);
+    overlay_field!(variation);
 }
 
 fn values_at_level<'a>(
@@ -597,6 +693,8 @@ fn apply_values(
     duration_ms: &mut Option<u64>,
     curve_provenance: &mut Option<MotionValueProvenanceData>,
     duration_provenance: &mut Option<MotionValueProvenanceData>,
+    fluid: &mut MotionFluidOverridesData,
+    fluid_provenance: &mut MotionFluidProvenanceData,
 ) {
     if let Some(value) = &values.curve {
         *curve = Some(value.clone());
@@ -604,8 +702,25 @@ fn apply_values(
     }
     if let Some(value) = values.duration_ms {
         *duration_ms = Some(value);
-        *duration_provenance = Some(provenance);
+        *duration_provenance = Some(provenance.clone());
     }
+    macro_rules! apply_fluid_field {
+        ($field:ident) => {
+            if let Some(value) = values.fluid.$field {
+                fluid.$field = Some(value);
+                fluid_provenance.$field = Some(provenance.clone());
+            }
+        };
+    }
+    apply_fluid_field!(viscosity);
+    apply_fluid_field!(surface_tension);
+    apply_fluid_field!(attraction);
+    apply_fluid_field!(neck);
+    apply_fluid_field!(trail);
+    apply_fluid_field!(path_liveliness);
+    apply_fluid_field!(oscillation);
+    apply_fluid_field!(damping);
+    apply_fluid_field!(variation);
 }
 
 fn provenance(
@@ -829,6 +944,7 @@ fn legacy_preset(
                         .transpose()
                         .map_err(MotionStyleError::Curve)?,
                     duration_ms: Some(duration_ms),
+                    fluid: MotionFluidOverridesData::default(),
                 },
                 components: BTreeMap::new(),
             },
@@ -846,6 +962,7 @@ fn legacy_preset(
                         .map_err(MotionStyleError::Curve)?,
                 ),
                 duration_ms: Some(180),
+                fluid: MotionFluidOverridesData::default(),
             },
             families,
         },
@@ -921,6 +1038,7 @@ pub enum MotionStyleError {
     IncompletePresetRoot,
     EmptyTransition,
     InvalidDuration,
+    InvalidFluidParameter(&'static str),
     TooManyNodes,
     Curve(MotionCurveDataError),
 }
@@ -953,6 +1071,9 @@ impl fmt::Display for MotionStyleError {
             }
             Self::EmptyTransition => formatter.write_str("motion transition override is empty"),
             Self::InvalidDuration => formatter.write_str("motion duration exceeds 60000 ms"),
+            Self::InvalidFluidParameter(field) => {
+                write!(formatter, "invalid semantic fluid parameter {field}")
+            }
             Self::TooManyNodes => formatter.write_str("motion style contains too many scope nodes"),
             Self::Curve(error) => error.fmt(formatter),
         }
@@ -1041,6 +1162,7 @@ mod tests {
                 values: MotionValuesData {
                     curve: Some(MotionCurveData::linear()),
                     duration_ms: None,
+                    fluid: MotionFluidOverridesData::default(),
                 },
                 transitions: BTreeMap::new(),
             },
@@ -1063,6 +1185,70 @@ mod tests {
             values.curve_provenance.level,
             MotionScopeLevelData::Component
         );
+    }
+
+    #[test]
+    fn semantic_fluid_fields_inherit_independently_with_exact_provenance() {
+        let mut profile = MotionStyleProfileData::default();
+        profile.overrides.values.fluid.viscosity = Some(1.4);
+        let family = profile
+            .overrides
+            .families
+            .entry(MotionSemanticFamilyData::Toggle)
+            .or_default();
+        family.values.fluid.neck = Some(11.0);
+        let component = family.components.entry("nkdhr.toggle".into()).or_default();
+        component.values.fluid.trail = Some(7.0);
+        component.transitions.insert(
+            "select".into(),
+            MotionValuesData {
+                fluid: MotionFluidOverridesData {
+                    variation: Some(0.12),
+                    ..MotionFluidOverridesData::default()
+                },
+                ..MotionValuesData::default()
+            },
+        );
+
+        let values = profile
+            .resolve()
+            .unwrap()
+            .resolve_scope(&MotionScopeData::transition(
+                MotionSemanticFamilyData::Toggle,
+                "nkdhr.toggle",
+                "select",
+            ))
+            .unwrap();
+        assert_eq!(values.fluid.viscosity, Some(1.4));
+        assert_eq!(values.fluid.neck, Some(11.0));
+        assert_eq!(values.fluid.trail, Some(7.0));
+        assert_eq!(values.fluid.variation, Some(0.12));
+        assert_eq!(
+            values.fluid_provenance.viscosity.unwrap().level,
+            MotionScopeLevelData::Profile
+        );
+        assert_eq!(
+            values.fluid_provenance.neck.unwrap().level,
+            MotionScopeLevelData::Family
+        );
+        assert_eq!(
+            values.fluid_provenance.trail.unwrap().level,
+            MotionScopeLevelData::Component
+        );
+        assert_eq!(
+            values.fluid_provenance.variation.unwrap().level,
+            MotionScopeLevelData::Transition
+        );
+    }
+
+    #[test]
+    fn invalid_semantic_fluid_value_rejects_the_profile() {
+        let mut profile = MotionStyleProfileData::default();
+        profile.overrides.values.fluid.variation = Some(0.500_001);
+        assert!(matches!(
+            profile.resolve(),
+            Err(MotionStyleError::InvalidFluidParameter("variation"))
+        ));
     }
 
     #[test]
@@ -1156,6 +1342,7 @@ mod tests {
             .or_default()
             .values
             .duration_ms = Some(375);
+        profile.overrides.values.fluid.surface_tension = Some(1.75);
         let frozen = profile
             .resolve()
             .unwrap()
@@ -1173,6 +1360,7 @@ mod tests {
             .resolve_scope(&MotionScopeData::family(MotionSemanticFamilyData::Toggle))
             .unwrap();
         assert_eq!(values.duration_ms, 375);
+        assert_eq!(values.fluid.surface_tension, Some(1.75));
         assert_eq!(frozen.id, "my-motion");
         assert_eq!(frozen.revision, 3);
         assert!(matches!(

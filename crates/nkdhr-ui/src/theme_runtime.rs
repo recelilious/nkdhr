@@ -16,8 +16,8 @@ use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
 use crate::{
-    CompiledMotionStyle, Density, Invalidation, MotionMode, MotionStyleCompileError, Theme,
-    ThemeError,
+    CompiledMotionStyle, Density, Invalidation, MotionMode, MotionRuntimeError,
+    MotionRuntimeProfile, MotionStyleCompileError, Theme, ThemeError,
 };
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,7 @@ pub struct ThemeSnapshot {
     resolved: Arc<ResolvedTheme>,
     theme: Arc<Theme>,
     motion_style: Arc<CompiledMotionStyle>,
+    motion_runtime: Arc<MotionRuntimeProfile>,
 }
 
 impl ThemeSnapshot {
@@ -41,10 +42,16 @@ impl ThemeSnapshot {
         Arc::clone(&self.theme)
     }
 
-    /// UI-7's independently compiled style hierarchy. Existing widgets keep
-    /// consuming `Theme::motion` until UI-7C switches runtime execution.
+    /// UI-7's independently compiled authoring/introspection hierarchy.
+    /// Component execution uses `motion_runtime` so policy remains final.
     pub fn motion_style(&self) -> Arc<CompiledMotionStyle> {
         Arc::clone(&self.motion_style)
+    }
+
+    /// UI-7C's final policy-governed execution snapshot. It is published in
+    /// the same atomic generation as the portable profile and compiled style.
+    pub fn motion_runtime(&self) -> Arc<MotionRuntimeProfile> {
+        Arc::clone(&self.motion_runtime)
     }
 
     pub fn changes_from(&self, previous: &Self) -> Vec<ThemeTokenChange> {
@@ -156,6 +163,11 @@ impl ThemeRuntime {
         let resolved = profile.resolve_with_extensions(&extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
         let motion_style = CompiledMotionStyle::from_motion_data(&resolved.data.motion)?;
+        let motion_runtime = MotionRuntimeProfile::from_motion_data(
+            &resolved.data.motion,
+            theme.motion.fluid,
+            motion_style.clone(),
+        )?;
         Ok(Self {
             state: Arc::new(Mutex::new(RuntimeState {
                 snapshot: Arc::new(ThemeSnapshot {
@@ -163,6 +175,7 @@ impl ThemeRuntime {
                     resolved: Arc::new(resolved),
                     theme: Arc::new(theme),
                     motion_style: Arc::new(motion_style),
+                    motion_runtime: Arc::new(motion_runtime),
                 }),
             })),
             extensions,
@@ -181,6 +194,11 @@ impl ThemeRuntime {
         let resolved = profile.resolve_with_extensions(&self.extensions)?;
         let theme = Theme::from_data(&resolved.data)?;
         let motion_style = CompiledMotionStyle::from_motion_data(&resolved.data.motion)?;
+        let motion_runtime = MotionRuntimeProfile::from_motion_data(
+            &resolved.data.motion,
+            theme.motion.fluid,
+            motion_style.clone(),
+        )?;
         let mut state = self.state.lock().expect("theme runtime poisoned");
         let previous = Arc::clone(&state.snapshot);
         if previous.resolved.as_ref() == &resolved {
@@ -197,6 +215,7 @@ impl ThemeRuntime {
             resolved: Arc::new(resolved),
             theme: Arc::new(theme),
             motion_style: Arc::new(motion_style),
+            motion_runtime: Arc::new(motion_runtime),
         });
         state.snapshot = Arc::clone(&snapshot);
         Ok(ThemePublication {
@@ -350,6 +369,7 @@ pub enum ThemeRuntimeError {
     Profile(ThemeProfileError),
     Runtime(ThemeError),
     MotionStyle(MotionStyleCompileError),
+    MotionRuntime(MotionRuntimeError),
 }
 
 impl fmt::Display for ThemeRuntimeError {
@@ -358,6 +378,7 @@ impl fmt::Display for ThemeRuntimeError {
             Self::Profile(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
             Self::MotionStyle(error) => error.fmt(formatter),
+            Self::MotionRuntime(error) => error.fmt(formatter),
         }
     }
 }
@@ -379,6 +400,12 @@ impl From<ThemeError> for ThemeRuntimeError {
 impl From<MotionStyleCompileError> for ThemeRuntimeError {
     fn from(value: MotionStyleCompileError) -> Self {
         Self::MotionStyle(value)
+    }
+}
+
+impl From<MotionRuntimeError> for ThemeRuntimeError {
+    fn from(value: MotionRuntimeError) -> Self {
+        Self::MotionRuntime(value)
     }
 }
 
@@ -561,6 +588,7 @@ mod tests {
                 values: MotionValuesData {
                     curve: Some(invalid),
                     duration_ms: None,
+                    fluid: Default::default(),
                 },
                 components: Default::default(),
             },
@@ -574,6 +602,36 @@ mod tests {
             Err(ThemeRuntimeError::MotionStyle(_))
         ));
         assert!(Arc::ptr_eq(&accepted, &runtime.snapshot()));
+    }
+
+    #[test]
+    fn policy_runtime_is_published_in_the_same_theme_generation() {
+        let runtime = ThemeRuntime::default();
+        let scope = nkdhr_theme::MotionScopeData::family(MotionSemanticFamilyData::Toggle);
+        let initial = runtime
+            .snapshot()
+            .motion_runtime()
+            .resolve(&scope, crate::MotionPropertyDomain::Spatial)
+            .unwrap();
+        assert_eq!(initial.duration(), Duration::from_millis(220));
+        assert_eq!(initial.source(), crate::MotionPolicySource::AuthoredStyle);
+
+        let reduced = ThemeProfile {
+            overrides: json!({"motion": {"mode": "reduced"}}),
+            ..ThemeProfile::default()
+        };
+        let publication = runtime.publish(reduced).unwrap();
+        let snapshot = publication.snapshot();
+        assert_eq!(
+            snapshot.generation(),
+            publication.previous_generation().wrapping_add(1)
+        );
+        let execution = snapshot
+            .motion_runtime()
+            .resolve(&scope, crate::MotionPropertyDomain::Spatial)
+            .unwrap();
+        assert!(execution.is_immediate());
+        assert_eq!(execution.source(), crate::MotionPolicySource::ReducedPolicy);
     }
 
     #[test]

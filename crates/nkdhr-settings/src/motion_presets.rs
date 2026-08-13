@@ -366,6 +366,7 @@ mod tests {
                 values: MotionValuesData {
                     curve: Some(invalid),
                     duration_ms: None,
+                    fluid: Default::default(),
                 },
                 components: Default::default(),
             },

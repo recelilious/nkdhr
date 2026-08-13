@@ -251,6 +251,23 @@ Balanced revision 1 是已验收旧默认值的精确快照。Lively、Calm、Di
 并编译导入；只有宿主确认整次写入后，durable local library 才变化。UI-7B 没有组合任何
 编辑器界面；语义 fluid 参数属于 UI-7C，style-neutral 图形编辑状态属于 UI-7D。
 
+## 策略动效运行时（`nkdhr-ui`，UI-7C）
+
+组件执行应使用 `ThemeSnapshot::motion_runtime`，而不是只供创作检查的
+`motion_style`。用稳定 `MotionScopeData` 与 `MotionPropertyDomain` 解析，返回的不透明
+`MotionExecutionSpec` 已经执行 Expressive/Standard/Reduced/Off 最终策略。Reduced
+让空间运动立即完成、只保留短暂非空间反馈；Off 全部立即完成。两者都不会禁止直接键鼠
+操控。调用方必须消费 `KineticMotion` 或 `SelectionMassMotion` 的 begin/terminal 结果；
+它们只保留最新目标，从不排队 clip。
+
+流体字段可在任意 style scope 独立覆盖。调用 `resolve_fluid` 后直接采样返回的
+`ResolvedSemanticFluid`，调用方不能传入或覆盖其策略模式。事件变化需要稳定 event
+seed；常动水面需要稳定 component seed 与绝对时间。显式为零的振荡保持静止；非零振荡
+会在 Standard/Expressive 中持续活动，并在 Reduced/Off 中被强制精确归零。
+
+本阶段只提供框架与执行行为。现有组件继续保持已验收外观，直到每个组件的视觉接入与
+数值调校逐项和所有者确认；这里没有开始组合 Settings 编辑器或流体组件造型。
+
 ## 验证工具
 
 `nkdhr-render` 含确定性图元 gallery；软件参考渲染器生成提交的 PPM golden，测试逐字
