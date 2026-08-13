@@ -33,6 +33,7 @@ const PREVIEW_RAIL_HEIGHT: f32 = 48.0;
 const GRAPH_TOOLBAR_HEIGHT: f32 = 40.0;
 const GRAPH_AXIS_HEIGHT: f32 = 28.0;
 const GRAPH_CONTENT_INSET: f32 = 18.0;
+const NAVIGATION_VERTICAL_INSET: f32 = 8.0;
 
 #[derive(Clone)]
 pub(crate) struct MotionEditorSession {
@@ -238,15 +239,21 @@ pub(crate) fn navigation_shell(
     capabilities: MaterialCapabilities,
     navigation: Element,
 ) -> Element {
-    Element::new(GelSurface::new(
-        Arc::clone(&theme),
-        MaterialTier::CompactNode,
-        capabilities,
-        theme.radii.group,
-        Insets::ZERO,
-        GelElevation::Raised,
-    ))
-    .child(navigation)
+    Element::new(Align {
+        horizontal: Alignment::Stretch,
+        vertical: Alignment::Start,
+    })
+    .child(
+        Element::new(GelSurface::new(
+            Arc::clone(&theme),
+            MaterialTier::CompactNode,
+            capabilities,
+            theme.radii.group,
+            Insets::symmetric(0.0, NAVIGATION_VERTICAL_INSET),
+            GelElevation::Raised,
+        ))
+        .child(navigation),
+    )
 }
 
 pub(crate) fn inspector(

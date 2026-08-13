@@ -1183,13 +1183,18 @@ impl AppearanceSettings {
                 );
             }
         }
+        let compact_content_height = entries.len() as f32 * theme.density_metrics().row_height;
         let content_size = Size::new(
             if compact {
                 COMPACT_NAVIGATION_WIDTH
             } else {
                 NAVIGATION_WIDTH
             },
-            620.0,
+            if compact {
+                compact_content_height
+            } else {
+                620.0
+            },
         );
         let list = List::from_entries("设置分类", selection, entries, Arc::clone(&theme))?
             .material_tier(MaterialTier::Ghost)

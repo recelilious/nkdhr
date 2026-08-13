@@ -292,11 +292,27 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
     let [navigation, graph_workspace, inspector] = body_children(&root);
     assert_eq!(root.rect(navigation).unwrap().width, 64.0);
     let navigation_rect = root.rect(navigation).unwrap();
-    let navigation_scroll = root.children(navigation).unwrap()[0];
+    let navigation_material = root.children(navigation).unwrap()[0];
+    let navigation_scroll = root.children(navigation_material).unwrap()[0];
+    let material_rect = root.rect(navigation_material).unwrap();
+    let scroll_rect = root.rect(navigation_scroll).unwrap();
     assert_eq!(
-        root.rect(navigation_scroll).unwrap(),
-        navigation_rect,
-        "the compact rail must not squeeze its rows, separators, and scroll viewport inside a second padding band"
+        material_rect.width, navigation_rect.width,
+        "the compact rail must retain the complete 64 px horizontal axis"
+    );
+    assert!(
+        material_rect.height < navigation_rect.height,
+        "the compact material must hug its nodes instead of reaching the bottom of the body"
+    );
+    assert_eq!(material_rect.y, navigation_rect.y);
+    assert_eq!(scroll_rect.x, material_rect.x);
+    assert_eq!(scroll_rect.width, material_rect.width);
+    assert_eq!(scroll_rect.y - material_rect.y, 8.0);
+    assert_eq!(material_rect.bottom() - scroll_rect.bottom(), 8.0);
+    assert_eq!(
+        scroll_rect.height,
+        9.0 * Theme::default().density_metrics().row_height,
+        "the compact rail viewport must exactly contain all nine navigation nodes"
     );
     let mut stack = vec![navigation];
     let mut compact_icons = Vec::new();
