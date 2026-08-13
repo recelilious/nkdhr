@@ -454,6 +454,106 @@ fn professional_motion_graph_edits_the_persistent_editor_session() {
 }
 
 #[test]
+fn professional_inspector_edits_duration_and_fluid_values_live() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    let semantics = root.semantic_tree();
+    let duration = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::TextInput
+                && node.semantics.label.as_deref() == Some("持续时间（毫秒）")
+        })
+        .expect("the duration property is an editable numeric input");
+    let duration_center = Point::new(
+        duration.bounds.x + duration.bounds.width * 0.5,
+        duration.bounds.y + duration.bounds.height * 0.5,
+    );
+    for event in [
+        UiEvent::PointerDown {
+            position: duration_center,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        UiEvent::PointerUp {
+            position: duration_center,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+    ] {
+        root.dispatch(&event).unwrap();
+    }
+    root.dispatch(&UiEvent::KeyDown {
+        key: nkdhr_ui::Key::Character("a".to_owned()),
+        modifiers: Modifiers {
+            control: true,
+            ..Modifiers::default()
+        },
+        repeat: false,
+    })
+    .unwrap();
+    root.dispatch(&UiEvent::TextInput("420 ms".to_owned()))
+        .unwrap();
+    root.dispatch(&UiEvent::KeyDown {
+        key: nkdhr_ui::Key::Enter,
+        modifiers: Modifiers::default(),
+        repeat: false,
+    })
+    .unwrap();
+    assert_eq!(
+        model.motion_editor_snapshot().duration,
+        Duration::from_millis(420)
+    );
+
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    let viscosity = root
+        .semantic_tree()
+        .into_iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Slider
+                && node.semantics.label.as_deref() == Some("黏度")
+        })
+        .expect("the viscosity property is an interactive slider");
+    let target = Point::new(
+        viscosity.bounds.x + viscosity.bounds.width * 0.82,
+        viscosity.bounds.y + viscosity.bounds.height * 0.5,
+    );
+    let revision = model.composition_revision().get();
+    for event in [
+        UiEvent::PointerDown {
+            position: target,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        UiEvent::PointerUp {
+            position: target,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+    ] {
+        root.dispatch(&event).unwrap();
+    }
+    assert!(model.composition_revision().get() > revision);
+
+    let (mut rebuilt, _) = settings_list(&model, size, capabilities());
+    let viscosity = rebuilt
+        .semantic_tree()
+        .into_iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Slider
+                && node.semantics.label.as_deref() == Some("黏度")
+        })
+        .expect("the rebuilt inspector retains its viscosity value");
+    assert_ne!(viscosity.semantics.value.as_deref(), Some("68"));
+}
+
+#[test]
 fn professional_motion_graph_viewport_zoom_reset_and_fit_are_live() {
     let model = AppearanceSettings::new();
     model.open_motion_editor();

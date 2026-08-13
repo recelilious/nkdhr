@@ -882,9 +882,13 @@ transient view state, never the curve document or undo history. `100%` restores
 the canonical normalized view while `Fit` encloses the compiled curve.
 
 This slice deliberately preserves the owner-approved allocation, Tokyo Night
-palette, Maple Mono typography and renderer-native material treatment. Graph
-numeric property bindings, save/export persistence and the future conserved-
-liquid navigation selection remain subsequent UI-7E work.
+palette, Maple Mono typography and renderer-native material treatment. The
+duration field now edits the authoritative curve document with atomic range
+validation, while the three visible Fluid sliders write sparse
+`MotionFluidOverridesData` values and retain them across reconciliation. Reset
+removes both kinds of explicit override. Selected-keyframe numeric bindings,
+save/export persistence and the future conserved-liquid navigation selection
+remain subsequent UI-7E work.
 
 Clay/glass depth follows an explicit edge/content separation invariant. Outer
 directional shadow keeps describing the surface's elevation, while theme-aware

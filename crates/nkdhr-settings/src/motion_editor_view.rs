@@ -21,10 +21,11 @@ use nkdhr_ui::{
     MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId, MotionEditorGesturePhase,
     MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
     MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
-    MotionEditorTarget, MotionEditorViewportInput, MotionGraphPoint, MotionGraphViewport, Padding,
-    PaintCtx, PointerButton, Reactive, ScrollPhase, SemanticRole, Semantics, SemanticsCtx, Size,
-    Slider, SliderError, SurfaceState, Text, TextRole, Theme, ThemeReadSet, Toggle, UiError,
-    UiEvent, Widget, paint_fluid_well, resolve_fluid_material_tones, resolve_motion_curve_handles,
+    MotionEditorTarget, MotionEditorViewportInput, MotionFluidOverridesData, MotionGraphPoint,
+    MotionGraphViewport, Padding, PaintCtx, PointerButton, Reactive, ScrollPhase, SemanticRole,
+    Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text, TextInput,
+    TextInputStatus, TextRole, Theme, ThemeReadSet, Toggle, UiError, UiEvent, Widget,
+    paint_fluid_well, resolve_fluid_material_tones, resolve_motion_curve_handles,
 };
 
 const SCOPE_RAIL_HEIGHT: f32 = 88.0;
@@ -34,6 +35,32 @@ const GRAPH_TOOLBAR_HEIGHT: f32 = 40.0;
 const GRAPH_AXIS_HEIGHT: f32 = 28.0;
 const GRAPH_CONTENT_INSET: f32 = 18.0;
 const NAVIGATION_VERTICAL_INSET: f32 = 8.0;
+const MAX_EDITABLE_DURATION_MS: u64 = 60_000;
+const FLUID_PERCENT_PER_SEMANTIC_UNIT: f64 = 25.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FluidMaterialValues {
+    viscosity: f32,
+    surface_tension: f32,
+    attraction: f32,
+}
+
+impl Default for FluidMaterialValues {
+    fn default() -> Self {
+        Self {
+            viscosity: 68.0,
+            surface_tension: 72.0,
+            attraction: 56.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FluidMaterialField {
+    Viscosity,
+    SurfaceTension,
+    Attraction,
+}
 
 #[derive(Clone)]
 pub(crate) struct MotionEditorSession {
@@ -45,6 +72,9 @@ struct MotionEditorSessionInner {
     inherited_compiled: CompiledMotionCurve,
     input: RefCell<MotionEditorInputController>,
     next_edit_id: Cell<u64>,
+    duration_text: Reactive<String>,
+    duration_status: Reactive<TextInputStatus>,
+    fluid_overrides: Cell<MotionFluidOverridesData>,
     composition_revision: Reactive<u64>,
     visual_revision: Reactive<u64>,
 }
@@ -105,6 +135,9 @@ impl MotionEditorSession {
                 inherited_compiled,
                 input: RefCell::new(MotionEditorInputController::default()),
                 next_edit_id: Cell::new(1),
+                duration_text: Reactive::new("280 ms".to_owned()),
+                duration_status: Reactive::new(TextInputStatus::Idle),
+                fluid_overrides: Cell::new(MotionFluidOverridesData::default()),
                 composition_revision,
                 visual_revision: Reactive::new(1),
             }),
@@ -144,6 +177,7 @@ impl MotionEditorSession {
             self.bump_visual_revision();
         }
         if outcome.document_changed {
+            self.sync_duration_control();
             self.bump_composition_revision();
         }
         Ok(outcome)
@@ -180,9 +214,110 @@ impl MotionEditorSession {
         let mut editor = self.inner.editor.borrow_mut();
         let curve = editor.reset_curve().unwrap_or(false);
         let duration = editor.reset_duration();
-        if curve || duration {
+        let fluid = self
+            .inner
+            .fluid_overrides
+            .replace(MotionFluidOverridesData::default())
+            != MotionFluidOverridesData::default();
+        if curve || duration || fluid {
             editor.fit_viewport();
-            drop(editor);
+        }
+        drop(editor);
+        self.sync_duration_control();
+        if curve || duration || fluid {
+            self.bump_visual_revision();
+            self.bump_composition_revision();
+        }
+    }
+
+    fn duration_text(&self) -> Reactive<String> {
+        self.inner.duration_text.clone()
+    }
+
+    fn duration_status(&self) -> Reactive<TextInputStatus> {
+        self.inner.duration_status.clone()
+    }
+
+    fn duration_text_changed(&self) {
+        self.inner.duration_status.set(TextInputStatus::Idle);
+    }
+
+    fn submit_duration(&self, text: &str) {
+        let milliseconds = text
+            .trim()
+            .strip_suffix("ms")
+            .unwrap_or(text.trim())
+            .trim()
+            .parse::<u64>();
+        let Ok(milliseconds) = milliseconds else {
+            self.inner.duration_status.set(TextInputStatus::Invalid(
+                "请输入 1–60000 ms 的整数".to_owned(),
+            ));
+            return;
+        };
+        if !(1..=MAX_EDITABLE_DURATION_MS).contains(&milliseconds) {
+            self.inner.duration_status.set(TextInputStatus::Invalid(
+                "持续时间范围为 1–60000 ms".to_owned(),
+            ));
+            return;
+        }
+        let result = self
+            .inner
+            .editor
+            .borrow_mut()
+            .set_duration(Duration::from_millis(milliseconds));
+        match result {
+            Ok(changed) => {
+                self.sync_duration_control();
+                self.inner.duration_status.set(TextInputStatus::Valid);
+                if changed {
+                    self.bump_visual_revision();
+                    self.bump_composition_revision();
+                }
+            }
+            Err(_) => self.inner.duration_status.set(TextInputStatus::Invalid(
+                "当前编辑事务暂时不能修改持续时间".to_owned(),
+            )),
+        }
+    }
+
+    fn sync_duration_control(&self) {
+        let milliseconds = self.inner.editor.borrow().snapshot().duration.as_millis();
+        self.inner.duration_text.set(format!("{milliseconds} ms"));
+        self.inner.duration_status.set(TextInputStatus::Idle);
+    }
+
+    fn fluid_material(&self) -> FluidMaterialValues {
+        let inherited = FluidMaterialValues::default();
+        let overrides = self.fluid_overrides();
+        FluidMaterialValues {
+            viscosity: semantic_fluid_percent(overrides.viscosity, inherited.viscosity),
+            surface_tension: semantic_fluid_percent(
+                overrides.surface_tension,
+                inherited.surface_tension,
+            ),
+            attraction: semantic_fluid_percent(overrides.attraction, inherited.attraction),
+        }
+    }
+
+    fn fluid_overrides(&self) -> MotionFluidOverridesData {
+        self.inner.fluid_overrides.get()
+    }
+
+    fn set_fluid_material(&self, field: FluidMaterialField, value: f32) {
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            return;
+        }
+        let mut overrides = self.fluid_overrides();
+        let semantic_value = f64::from(value) / FLUID_PERCENT_PER_SEMANTIC_UNIT;
+        match field {
+            FluidMaterialField::Viscosity => overrides.viscosity = Some(semantic_value),
+            FluidMaterialField::SurfaceTension => {
+                overrides.surface_tension = Some(semantic_value);
+            }
+            FluidMaterialField::Attraction => overrides.attraction = Some(semantic_value),
+        }
+        if self.inner.fluid_overrides.replace(overrides) != overrides {
             self.bump_visual_revision();
             self.bump_composition_revision();
         }
@@ -289,13 +424,25 @@ pub(crate) fn inspector(
     ))
     .child(inherited);
 
+    let duration_source = match snapshot.duration_source {
+        nkdhr_ui::MotionCurveSource::Inherited => "ms · 继承",
+        nkdhr_ui::MotionCurveSource::Explicit => "ms · 当前层覆盖",
+    };
+    let duration_session = session.clone();
+    let duration_submit = session.clone();
     let duration = property_row(
         "持续时间",
-        "继承",
+        duration_source,
         Element::new(
-            Button::new("280 ms", Arc::clone(&theme))
-                .variant(ButtonVariant::Fluid)
-                .capabilities(capabilities),
+            TextInput::new(
+                "持续时间（毫秒）",
+                session.duration_text(),
+                Arc::clone(&theme),
+            )
+            .status(session.duration_status())
+            .capabilities(capabilities)
+            .on_change(move |_| duration_session.duration_text_changed())
+            .on_submit(move |value| duration_submit.submit_duration(value)),
         ),
         &theme,
     );
@@ -347,9 +494,31 @@ pub(crate) fn inspector(
         &theme,
     ));
 
-    let viscosity = fluid_slider("黏度", 68.0, Arc::clone(&theme), capabilities)?;
-    let tension = fluid_slider("表面张力", 72.0, Arc::clone(&theme), capabilities)?;
-    let attraction = fluid_slider("吸附力", 56.0, Arc::clone(&theme), capabilities)?;
+    let material = session.fluid_material();
+    let viscosity = fluid_slider(
+        "黏度",
+        material.viscosity,
+        FluidMaterialField::Viscosity,
+        session.clone(),
+        Arc::clone(&theme),
+        capabilities,
+    )?;
+    let tension = fluid_slider(
+        "表面张力",
+        material.surface_tension,
+        FluidMaterialField::SurfaceTension,
+        session.clone(),
+        Arc::clone(&theme),
+        capabilities,
+    )?;
+    let attraction = fluid_slider(
+        "吸附力",
+        material.attraction,
+        FluidMaterialField::Attraction,
+        session.clone(),
+        Arc::clone(&theme),
+        capabilities,
+    )?;
     let fluid = Element::new(Flex {
         axis: Axis::Vertical,
         gap: 8.0,
@@ -370,7 +539,11 @@ pub(crate) fn inspector(
             &theme,
         ))
         .child(italic_text(
-            "Shape · 继承",
+            if session.fluid_overrides().is_empty() {
+                "Shape · 继承"
+            } else {
+                "Shape · 当前层覆盖"
+            },
             TextRole::Caption,
             theme.palette.text_muted,
             &theme,
@@ -798,6 +971,8 @@ fn property_row(label: &str, provenance: &str, control: Element, theme: &Theme) 
 fn fluid_slider(
     label: &str,
     value: f32,
+    field: FluidMaterialField,
+    session: MotionEditorSession,
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
 ) -> Result<Element, SliderError> {
@@ -832,8 +1007,15 @@ fn fluid_slider(
         Slider::new(label, value_state, 0.0, 100.0, theme)?
             .step(1.0)?
             .ideal_width(220.0)?
-            .capabilities(capabilities),
+            .capabilities(capabilities)
+            .on_change(move |value| session.set_fluid_material(field, value)),
     )))
+}
+
+fn semantic_fluid_percent(value: Option<f64>, inherited_percent: f32) -> f32 {
+    value
+        .map(|value| (value * FLUID_PERCENT_PER_SEMANTIC_UNIT) as f32)
+        .unwrap_or(inherited_percent)
 }
 
 fn divider(color: Color) -> Element {
@@ -2273,5 +2455,56 @@ mod tests {
         assert_eq!(final_state.snapshot.playhead, 1.0);
         assert_eq!(final_state.compiled.sample(1.0), 1.0);
         assert_eq!(final_state.snapshot.playback, MotionEditorPlayback::Paused);
+    }
+
+    #[test]
+    fn inspector_values_are_authoritative_validated_and_reset_together() {
+        let revision = Reactive::new(1);
+        let session = MotionEditorSession::new(revision.clone());
+
+        session.submit_duration("420 ms");
+        let duration = session.snapshot();
+        assert_eq!(duration.duration, Duration::from_millis(420));
+        assert_eq!(
+            duration.duration_source,
+            nkdhr_ui::MotionCurveSource::Explicit
+        );
+        assert_eq!(session.duration_text().get(), "420 ms");
+        assert_eq!(session.duration_status().get(), TextInputStatus::Valid);
+
+        let document_generation = duration.document_generation;
+        session.submit_duration("60001");
+        assert_eq!(
+            session.snapshot().document_generation,
+            document_generation,
+            "an invalid duration must preserve the last-good document"
+        );
+        assert!(matches!(
+            session.duration_status().get(),
+            TextInputStatus::Invalid(_)
+        ));
+
+        session.set_fluid_material(FluidMaterialField::Viscosity, 81.0);
+        session.set_fluid_material(FluidMaterialField::SurfaceTension, 63.0);
+        session.set_fluid_material(FluidMaterialField::Attraction, 74.0);
+        assert_eq!(
+            session.fluid_material(),
+            FluidMaterialValues {
+                viscosity: 81.0,
+                surface_tension: 63.0,
+                attraction: 74.0,
+            }
+        );
+        let overrides = session.fluid_overrides();
+        assert_eq!(overrides.viscosity, Some(81.0 / 25.0));
+        assert_eq!(overrides.surface_tension, Some(63.0 / 25.0));
+        assert_eq!(overrides.attraction, Some(74.0 / 25.0));
+        assert!(revision.get() > 1);
+
+        session.reset();
+        assert_eq!(session.fluid_material(), FluidMaterialValues::default());
+        assert!(session.fluid_overrides().is_empty());
+        assert_eq!(session.snapshot().duration, Duration::from_millis(280));
+        assert_eq!(session.duration_text().get(), "280 ms");
     }
 }

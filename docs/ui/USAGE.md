@@ -562,7 +562,10 @@ and standard Vim `H/J/K/L` mean left/down/up/right, Shift uses the coarse step,
 and the controller emits explicit text clipboard read/write requests. The first
 UI-7E production binding now connects mouse direct editing, graph-local mouse/
 precision-touchpad viewport gestures, keyboard/history/clipboard commands and
-host-clock preview playback to the owner-reviewed Settings composition;
+host-clock preview playback to the owner-reviewed Settings composition. Its
+duration input accepts an integer from 1 through 60000 with an optional `ms`
+suffix; invalid submissions preserve the last-good document. Visible Fluid
+percentages map into sparse semantic overrides and survive reconciliation;
 persistence remains a later slice.
 
 ## Verification tools
