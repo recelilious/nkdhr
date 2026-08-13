@@ -383,6 +383,24 @@ Ctrl/Logo A/C/V/Z/Y 产生选择/历史操作或显式剪贴板请求。测试�
 确定性编辑序列、手势 identity 和全部支持设备类别。UI-7D 没有选择任何 layout、paint
 token、组件组合或用户可见风格数值。
 
+## UI-7E：逐项确认后的生产动画工作区
+
+`AppearanceSettings` 持有一个可克隆的 `MotionEditorSession`，而不是把它放进随时会替换的
+widget descriptor。因尺寸、主题发布或检查器变化产生的 reconcile 会重建已确认组合，但
+不会丢失曲线文档、选择、历史、playhead 或播放模式。文档编辑递增 Settings composition
+revision，让文字和检查器 descriptor 从权威 snapshot 重建；另一个 reactive visual
+revision 只使曲线图与预览 sibling 在选择、scrub 和宿主时钟播放时重绘，不会每帧重建树。
+
+`MotionCurvePlot` 在已确认的 clay/glass 槽中绘制继承曲线、有效 compiled 曲线、动态
+playhead、锚点及选中锚点的 broken handle。命中顺序先 handle、再锚点、playhead 和曲线；
+pointer capture 包住直接编辑，双击曲线执行保持形状的精确插点。获得焦点的曲线图转发
+UI-7D 键盘契约，包括标准 Vim 方向、undo/redo 与显式剪贴板请求。预览采样同一 compiled
+曲线，可以先越过终点再回到稳定最终帧；产品默认明确为单次播放，时间只来自宿主时钟。
+
+这一切片刻意保持已确认的布局分配、Tokyo Night 配色、Maple Mono 字体和 renderer-native
+材质实现。图形 viewport 手势接线、数值属性绑定、保存/导出持久化，以及未来守恒液态导航
+选中块仍属于后续 UI-7E 工作。
+
 ## 错误与安全策略
 
 - 公共 geometry/style 构造器拒绝非有限值，allocation 在 texture/atlas 前检查；

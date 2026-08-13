@@ -437,6 +437,7 @@ struct AppearanceState {
     navigation_selection: Reactive<Option<u64>>,
     mobile_navigation_open: Reactive<bool>,
     composition_revision: Reactive<u64>,
+    motion_editor: crate::motion_editor_view::MotionEditorSession,
     next_apply_generation: Cell<u64>,
     pending_apply: RefCell<BTreeMap<AppearanceSetting, SettingsApplyToken>>,
     undo: RefCell<Option<UndoAction>>,
@@ -464,6 +465,9 @@ impl AppearanceSettings {
 
     pub fn with_theme_profiles(theme_profiles: ThemeProfileEditor) -> Self {
         let scheme = scheme_for_profile(&theme_profiles.snapshot().committed_profile);
+        let composition_revision = Reactive::new(1);
+        let motion_editor =
+            crate::motion_editor_view::MotionEditorSession::new(composition_revision.clone());
         Self {
             state: Rc::new(AppearanceState {
                 theme_profiles,
@@ -488,7 +492,8 @@ impl AppearanceSettings {
                 navigation_scroll: Reactive::new(ScrollOffset::ZERO),
                 navigation_selection: Reactive::new(Some(SettingsPage::Appearance.identity())),
                 mobile_navigation_open: Reactive::new(false),
-                composition_revision: Reactive::new(1),
+                composition_revision,
+                motion_editor,
                 next_apply_generation: Cell::new(1),
                 pending_apply: RefCell::new(BTreeMap::new()),
                 undo: RefCell::new(None),
@@ -699,6 +704,10 @@ impl AppearanceSettings {
         self.request_reconcile();
     }
 
+    pub fn motion_editor_snapshot(&self) -> nkdhr_ui::MotionCurveEditorSnapshot {
+        self.state.motion_editor.snapshot()
+    }
+
     pub fn search_query(&self) -> String {
         self.state.search.get()
     }
@@ -881,6 +890,7 @@ impl AppearanceSettings {
                 Arc::clone(&theme),
                 nested,
                 spec.inspector_is_drawer,
+                self.state.motion_editor.clone(),
             )?
         } else {
             self.inspector(Arc::clone(&theme), nested, spec.inspector_is_drawer)
@@ -1207,7 +1217,12 @@ impl AppearanceSettings {
         let body = if page == SettingsPage::Appearance {
             self.appearance_page(Arc::clone(&theme), capabilities, spec.rows_are_stacked)?
         } else if page == SettingsPage::MotionEditor {
-            return crate::motion_editor_view::workspace(theme, capabilities).map_err(Into::into);
+            return crate::motion_editor_view::workspace(
+                theme,
+                capabilities,
+                self.state.motion_editor.clone(),
+            )
+            .map_err(Into::into);
         } else {
             self.placeholder_page(page, Arc::clone(&theme))
         };

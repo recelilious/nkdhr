@@ -10,7 +10,8 @@ use nkdhr_settings::{
     SettingsAssets, SettingsFeedbackKind, SettingsLayoutMode,
 };
 use nkdhr_ui::{
-    ManualClock, MaterialCapabilities, SemanticRole, Size, Theme, UiRoot,
+    CompiledMotionCurve, ManualClock, MaterialCapabilities, Modifiers, PointerButton, SemanticRole,
+    Size, Theme, UiEvent, UiRoot,
     text::{TextConfig, TextResources, TextSystem},
 };
 
@@ -346,6 +347,66 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn professional_motion_graph_edits_the_persistent_editor_session() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    let graph = root
+        .semantic_tree()
+        .into_iter()
+        .find(|node| {
+            node.semantics
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("动画曲线图："))
+        })
+        .expect("the professional graph exposes its semantic node");
+    let plot = graph.bounds.inset(18.0);
+    let before = model.motion_editor_snapshot();
+    let compiled = CompiledMotionCurve::compile(&before.curve).unwrap();
+    let analysis = compiled.analysis();
+    let minimum = if analysis.minimum_progress < 0.0 {
+        (analysis.minimum_progress * 10.0).floor() / 10.0
+    } else {
+        0.0
+    };
+    let maximum = (analysis.maximum_progress.max(1.0) * 10.0).ceil() / 10.0;
+    let time = 0.5;
+    let progress = compiled.sample(time);
+    let position = Point::new(
+        plot.x + plot.width * time as f32,
+        plot.bottom() - plot.height * ((progress - minimum) / (maximum - minimum)) as f32,
+    );
+
+    let result = root
+        .dispatch(&UiEvent::PointerDown {
+            position,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 2,
+        })
+        .unwrap();
+    assert!(result.handled);
+    assert_eq!(result.focused, Some(graph.id));
+    assert_eq!(result.pointer_capture, None);
+
+    let after = model.motion_editor_snapshot();
+    assert_eq!(after.curve.anchors.len(), before.curve.anchors.len() + 1);
+    assert!(after.document_generation > before.document_generation);
+    assert!(after.can_undo);
+
+    let (mut rebuilt, _) = settings_list(&model, size, capabilities());
+    assert!(rebuilt.semantic_tree().iter().any(|node| {
+        node.semantics
+            .label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("动画曲线图："))
+    }));
+    assert_eq!(model.motion_editor_snapshot().curve.anchors.len(), 3);
 }
 
 #[test]

@@ -294,8 +294,9 @@ delta，受未选择邻点限制，并可分别吸附 time/progress。每个候�
 `MotionEditorInputController` 是无样式 adapter 契约，不是 widget。它接收已命中图形的
 鼠标、笔和单指直接编辑，图形内双指触摸/精密触控板 viewport 手势，以及键盘选择/编辑；
 不会注册 compositor-global 手势。方向键和标准 Vim `H/J/K/L` 分别表示左/下/上/右，
-Shift 使用粗调步长，剪贴板读写以显式请求返回。UI-7E 才会把这些语义绑定到逐项确认的
-Settings 组合。
+Shift 使用粗调步长，剪贴板读写以显式请求返回。首个 UI-7E 生产接线已经把鼠标直接编辑、
+键盘/历史/剪贴板命令和宿主时钟预览播放接入逐项确认的 Settings 组合；viewport 手势与
+持久化仍是后续切片。
 
 ## 验证工具
 

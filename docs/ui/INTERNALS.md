@@ -850,6 +850,33 @@ clipboard bounds/fallback, host-clock playback, deterministic edit sequences,
 gesture identity and every supported device class. No layout, paint token,
 component composition or owner-visible numeric style is selected in UI-7D.
 
+## UI-7E: owner-reviewed production motion workspace
+
+`AppearanceSettings` owns one cloneable `MotionEditorSession`; it is not stored
+inside a disposable widget descriptor. Reconciliation caused by resize, theme
+publication or inspector changes therefore rebuilds the approved composition
+without discarding the curve document, selection, history, playhead or playback
+mode. Document edits increment the Settings composition revision so textual and
+inspector descriptors are rebuilt from the authoritative snapshot. A separate
+reactive visual revision invalidates the graph and preview siblings for
+selection, scrubbing and host-clock playback without rebuilding the tree every
+frame.
+
+`MotionCurvePlot` renders the inherited and effective compiled curves, dynamic
+playhead, anchors and selected broken handles inside the accepted clay/glass
+well. Hit testing resolves handles before anchors, then the playhead and curve.
+Pointer capture brackets direct edits; double activation on the curve performs
+exact shape-preserving insertion. The focused graph forwards the UI-7D keyboard
+contract, including standard Vim directions, undo/redo and explicit clipboard
+requests. The preview samples the same compiled curve and can visibly pass its
+endpoint before returning to the stable final frame; single-shot playback is
+the explicit product default and time comes only from the host clock.
+
+This slice deliberately preserves the owner-approved allocation, Tokyo Night
+palette, Maple Mono typography and renderer-native material treatment. Graph
+viewport gesture wiring, numeric property bindings, save/export persistence and
+the future conserved-liquid navigation selection remain subsequent UI-7E work.
+
 ## Error and safety policy
 
 - Public geometry and style constructors reject non-finite values.

@@ -1,20 +1,30 @@
-//! UI-7E owner-reviewable professional motion workspace composition.
-//!
-//! This module deliberately starts with the P1 resting frame. It uses the
-//! production toolkit and motion tokens, but it does not yet bind editing
-//! gestures to [`nkdhr_ui::MotionCurveEditor`]. That binding follows visual
-//! acceptance of the workspace hierarchy.
+//! UI-7E owner-reviewed professional motion workspace composition and local
+//! authoring session. The session outlives retained-tree reconciliation, so
+//! editing state survives resize, theme publication and responsive relayout.
 
-use std::sync::Arc;
+use std::{
+    cell::{Cell, RefCell},
+    fmt,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use nkdhr_render::{Color, CornerRadii, Point, Rect, Shadow, Transform};
 use nkdhr_ui::text::FontSlant;
 use nkdhr_ui::{
-    Align, Alignment, ArrangeCtx, Axis, Button, ButtonVariant, Constraints, CrossAxisAlignment,
-    CubicBezier, Element, Flex, Insets, MainAxisAlignment, MaterialCapabilities, MaterialTier,
-    MeasureCtx, Padding, PaintCtx, Reactive, SemanticRole, Semantics, SemanticsCtx, Size, Slider,
-    SliderError, SurfaceState, Text, TextRole, Theme, ThemeReadSet, Toggle, UiError, Widget,
-    paint_fluid_well, resolve_fluid_material_tones,
+    Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, CompiledMotionCurve,
+    Constraints, CrossAxisAlignment, CubicBezier, Element, EventCtx, Flex, Insets, Invalidation,
+    Key, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, Modifiers,
+    MotionCurveConsumer, MotionCurveConsumerDomain, MotionCurveConsumerSet, MotionCurveEditor,
+    MotionCurveEditorConfig, MotionCurveEditorSnapshot, MotionEditorClipboardAction,
+    MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId, MotionEditorGesturePhase,
+    MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
+    MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
+    MotionEditorTarget, MotionGraphPoint, Padding, PaintCtx, PointerButton, Reactive, SemanticRole,
+    Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text, TextRole, Theme,
+    ThemeReadSet, Toggle, UiError, UiEvent, Widget, paint_fluid_well, resolve_fluid_material_tones,
+    resolve_motion_curve_handles,
 };
 
 const SCOPE_RAIL_HEIGHT: f32 = 88.0;
@@ -23,13 +33,188 @@ const PREVIEW_RAIL_HEIGHT: f32 = 48.0;
 const GRAPH_TOOLBAR_HEIGHT: f32 = 40.0;
 const GRAPH_AXIS_HEIGHT: f32 = 28.0;
 
+#[derive(Clone)]
+pub(crate) struct MotionEditorSession {
+    inner: Rc<MotionEditorSessionInner>,
+}
+
+struct MotionEditorSessionInner {
+    editor: RefCell<MotionCurveEditor>,
+    inherited_compiled: CompiledMotionCurve,
+    input: RefCell<MotionEditorInputController>,
+    next_edit_id: Cell<u64>,
+    composition_revision: Reactive<u64>,
+    visual_revision: Reactive<u64>,
+}
+
+impl fmt::Debug for MotionEditorSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let snapshot = self.snapshot();
+        formatter
+            .debug_struct("MotionEditorSession")
+            .field("document_generation", &snapshot.document_generation)
+            .field("playhead", &snapshot.playhead)
+            .field("playback", &snapshot.playback)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+struct MotionEditorRenderState {
+    snapshot: MotionCurveEditorSnapshot,
+    compiled: CompiledMotionCurve,
+    inherited_compiled: CompiledMotionCurve,
+}
+
+impl MotionEditorSession {
+    pub(crate) fn new(composition_revision: Reactive<u64>) -> Self {
+        let inherited = CubicBezier::SETTLE
+            .to_motion_curve_data()
+            .expect("the approved inherited curve is portable");
+        let explicit = overshoot_curve()
+            .to_motion_curve_data()
+            .expect("the approved review curve is portable");
+        let consumers = MotionCurveConsumerSet::new(vec![
+            MotionCurveConsumer::new("settings.drawer.open", MotionCurveConsumerDomain::Spatial)
+                .expect("the approved consumer identity is valid"),
+        ])
+        .expect("the approved consumer set is valid");
+        let inherited_compiled = CompiledMotionCurve::compile(&inherited)
+            .expect("the approved inherited curve compiles");
+        let mut editor = MotionCurveEditor::new(
+            inherited,
+            Some(explicit),
+            Duration::from_millis(280),
+            None,
+            consumers,
+            MotionCurveEditorConfig::default(),
+        )
+        .expect("the approved editor seed is valid");
+        editor.set_looping(false);
+        editor.fit_viewport();
+        editor
+            .scrub_playhead(0.46)
+            .expect("the approved resting playhead is finite");
+        Self {
+            inner: Rc::new(MotionEditorSessionInner {
+                editor: RefCell::new(editor),
+                inherited_compiled,
+                input: RefCell::new(MotionEditorInputController::default()),
+                next_edit_id: Cell::new(1),
+                composition_revision,
+                visual_revision: Reactive::new(1),
+            }),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> MotionCurveEditorSnapshot {
+        self.inner.editor.borrow().snapshot()
+    }
+
+    fn render_state(&self) -> MotionEditorRenderState {
+        let editor = self.inner.editor.borrow();
+        let snapshot = editor.snapshot();
+        MotionEditorRenderState {
+            inherited_compiled: self.inner.inherited_compiled.clone(),
+            snapshot,
+            compiled: editor.compiled().clone(),
+        }
+    }
+
+    fn next_edit_id(&self) -> nkdhr_ui::MotionEditorEditId {
+        let id = self.inner.next_edit_id.get().max(1);
+        self.inner.next_edit_id.set(id.wrapping_add(1).max(1));
+        nkdhr_ui::MotionEditorEditId(id)
+    }
+
+    fn handle(
+        &self,
+        input: MotionEditorInput,
+    ) -> Result<MotionEditorInputOutcome, MotionEditorInputError> {
+        let outcome = self
+            .inner
+            .input
+            .borrow_mut()
+            .handle(&mut self.inner.editor.borrow_mut(), input)?;
+        if outcome.document_changed || outcome.transient_changed {
+            self.bump_visual_revision();
+        }
+        if outcome.document_changed {
+            self.bump_composition_revision();
+        }
+        Ok(outcome)
+    }
+
+    fn fit_viewport(&self) {
+        self.inner.editor.borrow_mut().fit_viewport();
+        self.bump_visual_revision();
+        self.bump_composition_revision();
+    }
+
+    fn set_looping(&self, looping: bool) {
+        if self.inner.editor.borrow_mut().set_looping(looping) {
+            self.bump_composition_revision();
+        }
+    }
+
+    fn advance_playback(&self, now: Duration) -> bool {
+        let changed = self.inner.editor.borrow_mut().advance_playback(now);
+        if changed {
+            self.bump_visual_revision();
+        }
+        changed
+    }
+
+    fn reset(&self) {
+        let mut editor = self.inner.editor.borrow_mut();
+        let curve = editor.reset_curve().unwrap_or(false);
+        let duration = editor.reset_duration();
+        if curve || duration {
+            editor.fit_viewport();
+            drop(editor);
+            self.bump_visual_revision();
+            self.bump_composition_revision();
+        }
+    }
+
+    fn set_permissions(&self, overshoot: bool, reverse: bool) {
+        let _ = self
+            .inner
+            .editor
+            .borrow_mut()
+            .set_permissions(overshoot, reverse);
+        self.bump_visual_revision();
+        // Recompose even when the editor rejects the permission change. The
+        // replacement Toggle then reads the authoritative editor value instead
+        // of leaving a locally toggled but invalid visual state behind.
+        self.bump_composition_revision();
+    }
+
+    fn bump_composition_revision(&self) {
+        self.inner
+            .composition_revision
+            .update(|revision| *revision = revision.wrapping_add(1).max(1));
+    }
+
+    fn watch_visual_revision(&self, ctx: &mut PaintCtx<'_>) {
+        let _ = ctx.watch(&self.inner.visual_revision, Invalidation::PAINT);
+    }
+
+    fn bump_visual_revision(&self) {
+        self.inner
+            .visual_revision
+            .update(|revision| *revision = revision.wrapping_add(1).max(1));
+    }
+}
+
 pub(crate) fn workspace(
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
+    session: MotionEditorSession,
 ) -> Result<Element, SliderError> {
-    let scope = scope_rail(Arc::clone(&theme), capabilities);
-    let graph = motion_graph(Arc::clone(&theme), capabilities);
-    let preview = preview(Arc::clone(&theme), capabilities);
+    let scope = scope_rail(Arc::clone(&theme), capabilities, session.clone());
+    let graph = motion_graph(Arc::clone(&theme), capabilities, session.clone());
+    let preview = preview(Arc::clone(&theme), capabilities, session);
     Ok(Element::new(MotionWorkspaceLayout {
         divider: with_alpha(theme.palette.edge, 0.045),
     })
@@ -58,7 +243,9 @@ pub(crate) fn inspector(
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
     drawer: bool,
+    session: MotionEditorSession,
 ) -> Result<Element, SliderError> {
+    let snapshot = session.snapshot();
     let inherited = text(
         "● 当前层覆盖  ·  未保存",
         TextRole::Caption,
@@ -106,8 +293,10 @@ pub(crate) fn inspector(
         &theme,
     );
 
-    let overshoot = Reactive::new(true);
-    let reverse = Reactive::new(false);
+    let overshoot = Reactive::new(snapshot.curve.allow_overshoot);
+    let reverse = Reactive::new(snapshot.curve.allow_reverse);
+    let overshoot_session = session.clone();
+    let reverse_session = session.clone();
     let capability_rows = Element::new(Flex {
         axis: Axis::Vertical,
         gap: 4.0,
@@ -118,7 +307,12 @@ pub(crate) fn inspector(
         "允许越界",
         "当前消费者允许",
         Element::new(
-            Toggle::new("允许越界", overshoot, Arc::clone(&theme)).capabilities(capabilities),
+            Toggle::new("允许越界", overshoot, Arc::clone(&theme))
+                .capabilities(capabilities)
+                .on_change(move |value| {
+                    let reverse = overshoot_session.snapshot().curve.allow_reverse;
+                    overshoot_session.set_permissions(value, reverse);
+                }),
         ),
         &theme,
     ))
@@ -126,7 +320,12 @@ pub(crate) fn inspector(
         "允许反向",
         "当前消费者允许",
         Element::new(
-            Toggle::new("允许反向", reverse, Arc::clone(&theme)).capabilities(capabilities),
+            Toggle::new("允许反向", reverse, Arc::clone(&theme))
+                .capabilities(capabilities)
+                .on_change(move |value| {
+                    let overshoot = reverse_session.snapshot().curve.allow_overshoot;
+                    reverse_session.set_permissions(overshoot, value);
+                }),
         ),
         &theme,
     ));
@@ -164,6 +363,7 @@ pub(crate) fn inspector(
     .child(tension)
     .child(attraction);
 
+    let reset_session = session.clone();
     let actions = Element::new(Flex {
         axis: Axis::Horizontal,
         gap: 8.0,
@@ -174,7 +374,8 @@ pub(crate) fn inspector(
         Button::new("重置", Arc::clone(&theme))
             .variant(ButtonVariant::Fluid)
             .capabilities(capabilities)
-            .enabled(true),
+            .enabled(true)
+            .on_activate(move || reset_session.reset()),
     ))
     .child(Element::new(
         Button::new("保存", Arc::clone(&theme))
@@ -223,7 +424,12 @@ pub(crate) fn inspector(
     Ok(panel)
 }
 
-fn scope_rail(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
+fn scope_rail(
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    session: MotionEditorSession,
+) -> Element {
+    let snapshot = session.snapshot();
     let heading = Element::new(Flex {
         axis: Axis::Horizontal,
         gap: 12.0,
@@ -237,7 +443,14 @@ fn scope_rail(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element 
         &theme,
     ))
     .child(text(
-        "曲线 ● 本地预览   ·   280 ms ○ 继承",
+        format!(
+            "曲线 ● 本地预览   ·   {} ms ○ {}",
+            snapshot.duration.as_millis(),
+            match snapshot.duration_source {
+                nkdhr_ui::MotionCurveSource::Inherited => "继承",
+                nkdhr_ui::MotionCurveSource::Explicit => "覆盖",
+            }
+        ),
         TextRole::Caption,
         theme.palette.text_muted,
         &theme,
@@ -277,7 +490,12 @@ fn scope_rail(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element 
     )
 }
 
-fn motion_graph(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
+fn motion_graph(
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    session: MotionEditorSession,
+) -> Element {
+    let snapshot = session.snapshot();
     let toolbar = Element::new(Padding {
         insets: Insets::symmetric(12.0, 4.0),
     })
@@ -315,11 +533,13 @@ fn motion_graph(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Elemen
                 main_alignment: MainAxisAlignment::End,
                 cross_alignment: CrossAxisAlignment::Center,
             })
-            .child(Element::new(
+            .child(Element::new({
+                let session = session.clone();
                 Button::new("适应", Arc::clone(&theme))
                     .variant(ButtonVariant::Fluid)
-                    .capabilities(capabilities),
-            ))
+                    .capabilities(capabilities)
+                    .on_activate(move || session.fit_viewport())
+            }))
             .child(Element::new(
                 Button::new("100%", Arc::clone(&theme))
                     .variant(ButtonVariant::Fluid)
@@ -330,10 +550,7 @@ fn motion_graph(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Elemen
     let plot = Element::new(MotionCurvePlot {
         theme: Arc::clone(&theme),
         capabilities,
-        current: overshoot_curve(),
-        inherited: CubicBezier::SETTLE,
-        playhead: 0.46,
-        progress_maximum: 1.2,
+        session: session.clone(),
     });
     let axis = Element::new(Padding {
         insets: Insets::new(16.0, 2.0, 16.0, 4.0),
@@ -352,13 +569,13 @@ fn motion_graph(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Elemen
             &theme,
         ))
         .child(text(
-            "140 ms",
+            format!("{} ms", snapshot.duration.as_millis() / 2),
             TextRole::Caption,
             theme.palette.text_muted,
             &theme,
         ))
         .child(text(
-            "280 ms   时间",
+            format!("{} ms   时间", snapshot.duration.as_millis()),
             TextRole::Caption,
             theme.palette.text_secondary,
             &theme,
@@ -370,7 +587,12 @@ fn motion_graph(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Elemen
         .child(axis)
 }
 
-fn preview(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
+fn preview(
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    session: MotionEditorSession,
+) -> Element {
+    let snapshot = session.snapshot();
     let rail = Element::new(Padding {
         insets: Insets::symmetric(12.0, 6.0),
     })
@@ -408,16 +630,28 @@ fn preview(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
                 main_alignment: MainAxisAlignment::End,
                 cross_alignment: CrossAxisAlignment::Center,
             })
-            .child(Element::new(
+            .child(Element::new({
+                let session = session.clone();
                 Button::new("单次", Arc::clone(&theme))
-                    .variant(ButtonVariant::FluidSelected)
-                    .capabilities(capabilities),
-            ))
-            .child(Element::new(
+                    .variant(if !snapshot.looping {
+                        ButtonVariant::FluidSelected
+                    } else {
+                        ButtonVariant::Fluid
+                    })
+                    .capabilities(capabilities)
+                    .on_activate(move || session.set_looping(false))
+            }))
+            .child(Element::new({
+                let session = session.clone();
                 Button::new("循环", Arc::clone(&theme))
-                    .variant(ButtonVariant::Fluid)
-                    .capabilities(capabilities),
-            ))
+                    .variant(if snapshot.looping {
+                        ButtonVariant::FluidSelected
+                    } else {
+                        ButtonVariant::Fluid
+                    })
+                    .capabilities(capabilities)
+                    .on_activate(move || session.set_looping(true))
+            }))
             .child(Element::new(
                 Button::new("交互", Arc::clone(&theme))
                     .variant(ButtonVariant::Fluid)
@@ -483,6 +717,7 @@ fn preview(theme: Arc<Theme>, capabilities: MaterialCapabilities) -> Element {
     );
     let stage = Element::new(PreviewStage {
         theme: Arc::clone(&theme),
+        session,
     })
     .child(
         Element::new(Align {
@@ -1001,10 +1236,13 @@ impl Widget for MotionGraphLayout {
 struct MotionCurvePlot {
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
-    current: CubicBezier,
-    inherited: CubicBezier,
-    playhead: f32,
-    progress_maximum: f32,
+    session: MotionEditorSession,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MotionCurvePlotState {
+    active: Option<MotionEditorEditId>,
+    focused: bool,
 }
 
 impl Widget for MotionCurvePlot {
@@ -1028,7 +1266,15 @@ impl Widget for MotionCurvePlot {
         self.theme = theme;
     }
 
+    fn create_state(&self) -> Box<dyn std::any::Any> {
+        Box::<MotionCurvePlotState>::default()
+    }
+
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+        self.session.watch_visual_revision(ctx);
+        let state = self.session.render_state();
+        let focused = ctx.state_mut::<MotionCurvePlotState>()?.focused;
+        let (progress_minimum, progress_maximum) = graph_progress_range(&state);
         let frame = ctx.rect().inset(6.0);
         paint_fluid_well(
             ctx.builder(),
@@ -1036,7 +1282,10 @@ impl Widget for MotionCurvePlot {
             CornerRadii::all(self.theme.radii.group),
             &self.theme,
             self.capabilities,
-            SurfaceState::default(),
+            SurfaceState {
+                focused,
+                ..SurfaceState::default()
+            },
         )?;
         let plot = frame.inset(12.0);
         let minor = with_alpha(self.theme.palette.edge, 0.022);
@@ -1058,41 +1307,39 @@ impl Widget for MotionCurvePlot {
         draw_curve(
             ctx,
             plot,
-            self.inherited,
-            self.progress_maximum,
-            inherited,
-            1.25,
-            true,
+            &state.inherited_compiled,
+            (progress_minimum, progress_maximum),
+            CurveStroke::new(inherited, 1.25).dashed(),
         )?;
         draw_curve(
             ctx,
             plot,
-            self.current,
-            self.progress_maximum,
-            with_alpha(self.theme.palette.inverse_edge, 0.36),
-            6.0,
-            false,
+            &state.compiled,
+            (progress_minimum, progress_maximum),
+            CurveStroke::new(with_alpha(self.theme.palette.inverse_edge, 0.36), 6.0),
         )?;
         draw_curve(
             ctx,
             plot,
-            self.current,
-            self.progress_maximum,
-            with_alpha(self.theme.palette.accent_secondary, 0.56),
-            4.0,
-            false,
+            &state.compiled,
+            (progress_minimum, progress_maximum),
+            CurveStroke::new(with_alpha(self.theme.palette.accent_secondary, 0.56), 4.0),
         )?;
         draw_curve(
             ctx,
             Rect::new(plot.x, plot.y - 0.8, plot.width, plot.height),
-            self.current,
-            self.progress_maximum,
-            self.theme.palette.accent,
-            1.6,
-            false,
+            &state.compiled,
+            (progress_minimum, progress_maximum),
+            CurveStroke::new(self.theme.palette.accent, 1.6),
         )?;
 
-        let playhead_x = plot.x + plot.width * self.playhead.clamp(0.0, 1.0);
+        let playhead_x = graph_to_screen(
+            plot,
+            MotionGraphPoint::new(state.snapshot.playhead, progress_minimum),
+            progress_minimum,
+            progress_maximum,
+        )
+        .x;
         let info = with_alpha(self.theme.palette.accent_secondary, 0.82);
         ctx.builder()
             .rect(Rect::new(playhead_x, plot.y, 1.0, plot.height), info)?;
@@ -1102,60 +1349,479 @@ impl Widget for MotionCurvePlot {
             self.theme.palette.accent_secondary,
         )?;
 
-        for point in [
-            Point::new(plot.x, plot.bottom()),
-            Point::new(
-                plot.right(),
-                plot.bottom() - plot.height / self.progress_maximum,
-            ),
-        ] {
+        if let Some(selected) = state.snapshot.primary_selection {
+            let resolved = resolve_motion_curve_handles(&state.snapshot.curve)
+                .map_err(|error| UiError::Text(error.to_string()))?;
+            let Some(anchor) = resolved.anchors.get(selected) else {
+                return Err(UiError::Text(
+                    "selected motion anchor is missing".to_owned(),
+                ));
+            };
+            let nkdhr_ui::MotionTangentsData::Broken { incoming, outgoing } = anchor.tangents
+            else {
+                return Err(UiError::Text(
+                    "resolved motion anchor did not expose handles".to_owned(),
+                ));
+            };
+            for (side, vector) in [
+                (MotionEditorTarget::IncomingHandle(selected), incoming),
+                (MotionEditorTarget::OutgoingHandle(selected), outgoing),
+            ] {
+                if (selected == 0 && matches!(side, MotionEditorTarget::IncomingHandle(_)))
+                    || (selected + 1 == resolved.anchors.len()
+                        && matches!(side, MotionEditorTarget::OutgoingHandle(_)))
+                {
+                    continue;
+                }
+                let anchor_point = graph_to_screen(
+                    plot,
+                    MotionGraphPoint::new(anchor.time, anchor.progress),
+                    progress_minimum,
+                    progress_maximum,
+                );
+                let handle_point = graph_to_screen(
+                    plot,
+                    MotionGraphPoint::new(
+                        anchor.time + vector.time,
+                        anchor.progress + vector.progress,
+                    ),
+                    progress_minimum,
+                    progress_maximum,
+                );
+                draw_segment(
+                    ctx,
+                    anchor_point,
+                    handle_point,
+                    1.0,
+                    with_alpha(self.theme.palette.accent_secondary, 0.48),
+                )?;
+                ctx.builder().rounded_rect(
+                    Rect::new(handle_point.x - 4.0, handle_point.y - 4.0, 8.0, 8.0),
+                    CornerRadii::all(4.0),
+                    self.theme.palette.accent_secondary,
+                )?;
+            }
+        }
+
+        for (index, anchor) in state.snapshot.curve.anchors.iter().enumerate() {
+            let point = graph_to_screen(
+                plot,
+                MotionGraphPoint::new(anchor.time, anchor.progress),
+                progress_minimum,
+                progress_maximum,
+            );
+            let selected = state.snapshot.selection.contains(&index);
             ctx.builder().rounded_rect(
                 Rect::new(point.x - 6.0, point.y - 6.0, 12.0, 12.0),
                 CornerRadii::all(6.0),
                 with_alpha(self.theme.palette.inverse_edge, 0.72),
             )?;
             ctx.builder().rounded_rect(
-                Rect::new(point.x - 3.0, point.y - 3.0, 6.0, 6.0),
-                CornerRadii::all(2.0),
-                self.theme.palette.accent,
+                Rect::new(
+                    point.x - if selected { 4.0 } else { 3.0 },
+                    point.y - if selected { 4.0 } else { 3.0 },
+                    if selected { 8.0 } else { 6.0 },
+                    if selected { 8.0 } else { 6.0 },
+                ),
+                CornerRadii::all(if selected { 4.0 } else { 2.0 }),
+                if selected {
+                    self.theme.palette.accent_secondary
+                } else {
+                    self.theme.palette.accent
+                },
             )?;
         }
         Ok(())
     }
 
+    fn animation(&self, ctx: &mut AnimationCtx<'_>) {
+        let changed = self.session.advance_playback(ctx.now());
+        let playing = matches!(
+            self.session.snapshot().playback,
+            MotionEditorPlayback::Playing { .. }
+        );
+        if changed {
+            ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+        }
+        if playing {
+            ctx.request_animation_frame();
+        }
+    }
+
+    fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
+        let frame = ctx.rect().inset(6.0);
+        let plot = frame.inset(12.0);
+        let render = self.session.render_state();
+        let (minimum, maximum) = graph_progress_range(&render);
+        match event {
+            UiEvent::PointerDown {
+                position,
+                button: PointerButton::Primary,
+                modifiers,
+                click_count,
+            } => {
+                let target = hit_graph_target(*position, plot, minimum, maximum, &render);
+                let id = self.session.next_edit_id();
+                let point = screen_to_graph(*position, plot, minimum, maximum);
+                let input = MotionEditorInput::Direct(MotionEditorDirectInput {
+                    id,
+                    phase: MotionEditorGesturePhase::Begin,
+                    device: MotionEditorDevice::Mouse,
+                    target,
+                    position: point,
+                    modifiers: editor_modifiers(*modifiers),
+                    activation_count: *click_count,
+                    snapping: !modifiers.alt,
+                });
+                if self.session.handle(input).is_ok() {
+                    let completed_double_click =
+                        *click_count >= 2 && target == MotionEditorTarget::Curve;
+                    ctx.state_mut::<MotionCurvePlotState>()?.active =
+                        (!completed_double_click).then_some(id);
+                    ctx.request_focus();
+                    if !completed_double_click {
+                        ctx.capture_pointer();
+                    }
+                    ctx.set_handled();
+                    ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                }
+            }
+            UiEvent::PointerMoved { position } => {
+                let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active else {
+                    return Ok(());
+                };
+                let point = screen_to_graph(*position, plot, minimum, maximum);
+                let input = MotionEditorInput::Direct(MotionEditorDirectInput {
+                    id,
+                    phase: MotionEditorGesturePhase::Update,
+                    device: MotionEditorDevice::Mouse,
+                    target: MotionEditorTarget::Graph,
+                    position: point,
+                    modifiers: MotionEditorModifiers::default(),
+                    activation_count: 1,
+                    snapping: true,
+                });
+                let _ = self.session.handle(input);
+                ctx.set_handled();
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
+            UiEvent::PointerUp {
+                position,
+                button: PointerButton::Primary,
+                ..
+            } => {
+                let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active.take() else {
+                    return Ok(());
+                };
+                let point = screen_to_graph(*position, plot, minimum, maximum);
+                let input = MotionEditorInput::Direct(MotionEditorDirectInput {
+                    id,
+                    phase: MotionEditorGesturePhase::End,
+                    device: MotionEditorDevice::Mouse,
+                    target: MotionEditorTarget::Graph,
+                    position: point,
+                    modifiers: MotionEditorModifiers::default(),
+                    activation_count: 1,
+                    snapping: true,
+                });
+                let _ = self.session.handle(input);
+                ctx.release_pointer();
+                ctx.set_handled();
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
+            UiEvent::PointerCancel => {
+                if let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active.take() {
+                    let point = MotionGraphPoint::default();
+                    let _ =
+                        self.session
+                            .handle(MotionEditorInput::Direct(MotionEditorDirectInput {
+                                id,
+                                phase: MotionEditorGesturePhase::Cancel,
+                                device: MotionEditorDevice::Mouse,
+                                target: MotionEditorTarget::Graph,
+                                position: point,
+                                modifiers: MotionEditorModifiers::default(),
+                                activation_count: 1,
+                                snapping: true,
+                            }));
+                    ctx.release_pointer();
+                    ctx.set_handled();
+                    ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                }
+            }
+            UiEvent::KeyDown {
+                key,
+                modifiers,
+                repeat,
+            } => {
+                if let Some(key) = editor_key(key) {
+                    let outcome = self.session.handle(MotionEditorInput::Key {
+                        key,
+                        modifiers: editor_modifiers(*modifiers),
+                        repeat: *repeat,
+                        now: ctx.now(),
+                    });
+                    if let Ok(outcome) = outcome {
+                        apply_editor_outcome(ctx, outcome);
+                        ctx.set_handled();
+                        ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                    }
+                }
+            }
+            UiEvent::ClipboardText { text, .. } if ctx.focused() => {
+                let _ = self
+                    .session
+                    .handle(MotionEditorInput::PasteText(text.clone()));
+                ctx.set_handled();
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
+            UiEvent::FocusChanged(focused) => {
+                ctx.state_mut::<MotionCurvePlotState>()?.focused = *focused;
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn semantics(&self, _ctx: &mut SemanticsCtx<'_>) -> Semantics {
+        let snapshot = self.session.snapshot();
         Semantics {
             role: SemanticRole::Group,
-            label: Some("动画曲线图：自定义越界曲线，持续时间 280 毫秒".to_owned()),
-            value: Some("播放位置 46%".to_owned()),
+            label: Some(format!(
+                "动画曲线图：{}，持续时间 {} 毫秒",
+                if snapshot.curve.allow_overshoot {
+                    "允许越界"
+                } else {
+                    "限制进度"
+                },
+                snapshot.duration.as_millis()
+            )),
+            value: Some(format!("播放位置 {:.0}%", snapshot.playhead * 100.0)),
+            focusable: true,
             ..Semantics::default()
         }
+    }
+
+    fn focusable(&self) -> bool {
+        true
+    }
+
+    fn accepts_pointer(&self) -> bool {
+        true
     }
 }
 
 fn draw_curve(
     ctx: &mut PaintCtx<'_>,
     rect: Rect,
-    curve: CubicBezier,
-    progress_maximum: f32,
-    color: Color,
-    width: f32,
-    dashed: bool,
+    curve: &CompiledMotionCurve,
+    progress_range: (f64, f64),
+    stroke: CurveStroke,
 ) -> Result<(), UiError> {
+    let (progress_minimum, progress_maximum) = progress_range;
     let mut previous = Point::new(rect.x, rect.bottom());
     for index in 1..=64 {
         let time = index as f32 / 64.0;
-        let progress = curve.sample(time);
+        let progress = curve.sample(f64::from(time));
         let next = Point::new(
             rect.x + rect.width * time,
-            rect.bottom() - rect.height * progress / progress_maximum,
+            rect.bottom()
+                - rect.height
+                    * ((progress - progress_minimum) / (progress_maximum - progress_minimum))
+                        as f32,
         );
-        if !dashed || (index / 3) % 2 == 0 {
-            draw_segment(ctx, previous, next, width, color)?;
+        if !stroke.dashed || (index / 3) % 2 == 0 {
+            draw_segment(ctx, previous, next, stroke.width, stroke.color)?;
         }
         previous = next;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CurveStroke {
+    color: Color,
+    width: f32,
+    dashed: bool,
+}
+
+impl CurveStroke {
+    const fn new(color: Color, width: f32) -> Self {
+        Self {
+            color,
+            width,
+            dashed: false,
+        }
+    }
+
+    const fn dashed(mut self) -> Self {
+        self.dashed = true;
+        self
+    }
+}
+
+fn graph_progress_range(state: &MotionEditorRenderState) -> (f64, f64) {
+    let current = state.compiled.analysis();
+    let inherited = state.inherited_compiled.analysis();
+    let minimum = current
+        .minimum_progress
+        .min(inherited.minimum_progress)
+        .min(0.0);
+    let maximum = current
+        .maximum_progress
+        .max(inherited.maximum_progress)
+        .max(1.0);
+    let minimum = if minimum < 0.0 {
+        (minimum * 10.0).floor() / 10.0
+    } else {
+        0.0
+    };
+    let maximum = (maximum * 10.0).ceil() / 10.0;
+    (minimum, maximum.max(minimum + 0.1))
+}
+
+fn graph_to_screen(
+    rect: Rect,
+    point: MotionGraphPoint,
+    progress_minimum: f64,
+    progress_maximum: f64,
+) -> Point {
+    Point::new(
+        rect.x + rect.width * point.time as f32,
+        rect.bottom()
+            - rect.height
+                * ((point.progress - progress_minimum) / (progress_maximum - progress_minimum))
+                    as f32,
+    )
+}
+
+fn screen_to_graph(
+    point: Point,
+    rect: Rect,
+    progress_minimum: f64,
+    progress_maximum: f64,
+) -> MotionGraphPoint {
+    let time = f64::from(((point.x - rect.x) / rect.width.max(1.0)).clamp(0.0, 1.0));
+    let vertical = f64::from(((rect.bottom() - point.y) / rect.height.max(1.0)).clamp(0.0, 1.0));
+    MotionGraphPoint::new(
+        time,
+        progress_minimum + vertical * (progress_maximum - progress_minimum),
+    )
+}
+
+fn hit_graph_target(
+    point: Point,
+    rect: Rect,
+    progress_minimum: f64,
+    progress_maximum: f64,
+    state: &MotionEditorRenderState,
+) -> MotionEditorTarget {
+    if let Some(selected) = state.snapshot.primary_selection
+        && let Ok(resolved) = resolve_motion_curve_handles(&state.snapshot.curve)
+        && let Some(anchor) = resolved.anchors.get(selected)
+        && let nkdhr_ui::MotionTangentsData::Broken { incoming, outgoing } = anchor.tangents
+    {
+        for (target, vector) in [
+            (MotionEditorTarget::IncomingHandle(selected), incoming),
+            (MotionEditorTarget::OutgoingHandle(selected), outgoing),
+        ] {
+            if (selected == 0 && matches!(target, MotionEditorTarget::IncomingHandle(_)))
+                || (selected + 1 == resolved.anchors.len()
+                    && matches!(target, MotionEditorTarget::OutgoingHandle(_)))
+            {
+                continue;
+            }
+            let handle = graph_to_screen(
+                rect,
+                MotionGraphPoint::new(anchor.time + vector.time, anchor.progress + vector.progress),
+                progress_minimum,
+                progress_maximum,
+            );
+            if (point.x - handle.x).abs() <= 10.0 && (point.y - handle.y).abs() <= 10.0 {
+                return target;
+            }
+        }
+    }
+    for (index, anchor) in state.snapshot.curve.anchors.iter().enumerate() {
+        let screen = graph_to_screen(
+            rect,
+            MotionGraphPoint::new(anchor.time, anchor.progress),
+            progress_minimum,
+            progress_maximum,
+        );
+        if (point.x - screen.x).abs() <= 10.0 && (point.y - screen.y).abs() <= 10.0 {
+            return MotionEditorTarget::Anchor(index);
+        }
+    }
+    let playhead = graph_to_screen(
+        rect,
+        MotionGraphPoint::new(state.snapshot.playhead, progress_minimum),
+        progress_minimum,
+        progress_maximum,
+    );
+    if (point.x - playhead.x).abs() <= 7.0 {
+        return MotionEditorTarget::Playhead;
+    }
+    let graph = screen_to_graph(point, rect, progress_minimum, progress_maximum);
+    let curve_progress = state.compiled.sample(graph.time);
+    let curve = graph_to_screen(
+        rect,
+        MotionGraphPoint::new(graph.time, curve_progress),
+        progress_minimum,
+        progress_maximum,
+    );
+    if (point.y - curve.y).abs() <= 10.0 {
+        MotionEditorTarget::Curve
+    } else {
+        MotionEditorTarget::Playhead
+    }
+}
+
+fn editor_modifiers(modifiers: Modifiers) -> MotionEditorModifiers {
+    MotionEditorModifiers {
+        shift: modifiers.shift,
+        control: modifiers.control,
+        alt: modifiers.alt,
+        logo: modifiers.logo,
+    }
+}
+
+fn editor_key(key: &Key) -> Option<MotionEditorKey> {
+    Some(match key {
+        Key::Tab => MotionEditorKey::Tab,
+        Key::Enter => MotionEditorKey::Enter,
+        Key::Space => MotionEditorKey::Space,
+        Key::Escape => MotionEditorKey::Escape,
+        Key::ArrowLeft => MotionEditorKey::ArrowLeft,
+        Key::ArrowRight => MotionEditorKey::ArrowRight,
+        Key::ArrowUp => MotionEditorKey::ArrowUp,
+        Key::ArrowDown => MotionEditorKey::ArrowDown,
+        Key::Home => MotionEditorKey::Home,
+        Key::End => MotionEditorKey::End,
+        Key::Backspace => MotionEditorKey::Backspace,
+        Key::Delete => MotionEditorKey::Delete,
+        Key::Character(value) => {
+            let mut characters = value.chars();
+            let character = characters.next()?;
+            if characters.next().is_some() {
+                return None;
+            }
+            MotionEditorKey::Character(character)
+        }
+        Key::PageUp | Key::PageDown | Key::Named(_) => return None,
+    })
+}
+
+fn apply_editor_outcome(ctx: &mut EventCtx<'_>, outcome: MotionEditorInputOutcome) {
+    match outcome.clipboard {
+        Some(MotionEditorClipboardAction::WriteText(text)) => ctx.write_clipboard_text(text),
+        Some(MotionEditorClipboardAction::ReadText) => ctx.read_clipboard_text(),
+        None => {}
+    }
+    if outcome.preview_pending {
+        ctx.request_animation_frame();
+    }
 }
 
 fn draw_segment(
@@ -1224,6 +1890,7 @@ impl Widget for PreviewLayout {
 #[derive(Debug, Clone)]
 struct PreviewStage {
     theme: Arc<Theme>,
+    session: MotionEditorSession,
 }
 
 impl Widget for PreviewStage {
@@ -1236,6 +1903,7 @@ impl Widget for PreviewStage {
     }
 
     fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+        self.session.watch_visual_revision(ctx);
         let rect = ctx.rect();
         ctx.builder().rect(
             Rect::new(rect.x, rect.y, rect.width, 1.0),
@@ -1245,7 +1913,13 @@ impl Widget for PreviewStage {
             Rect::new(rect.x, rect.bottom() - 1.0, rect.width, 1.0),
             with_alpha(self.theme.palette.inverse_edge, 0.10),
         )?;
-        ctx.paint_children()
+        let state = self.session.render_state();
+        let progress = state.compiled.sample(state.snapshot.playhead) as f32;
+        let translation = (1.0 - progress) * 44.0;
+        if ctx.child_count() == 1 {
+            ctx.paint_child_translated(0, 0.0, translation)?;
+        }
+        Ok(())
     }
 
     fn semantics(&self, _ctx: &mut SemanticsCtx<'_>) -> Semantics {
@@ -1292,5 +1966,63 @@ mod tests {
         assert!(maximum > 1.09);
         assert!(maximum < 1.2);
         assert_eq!(curve.sample(1.0), 1.0);
+    }
+
+    #[test]
+    fn editor_session_keeps_authored_state_across_view_recomposition() {
+        let revision = Reactive::new(1);
+        let session = MotionEditorSession::new(revision.clone());
+        let initial = session.snapshot();
+        let point = MotionGraphPoint::new(0.5, session.render_state().compiled.sample(0.5));
+        let outcome = session
+            .handle(MotionEditorInput::Direct(MotionEditorDirectInput {
+                id: session.next_edit_id(),
+                phase: MotionEditorGesturePhase::Begin,
+                device: MotionEditorDevice::Mouse,
+                target: MotionEditorTarget::Curve,
+                position: point,
+                modifiers: MotionEditorModifiers::default(),
+                activation_count: 2,
+                snapping: true,
+            }))
+            .unwrap();
+
+        assert!(outcome.document_changed);
+        assert_eq!(session.snapshot().curve.anchors.len(), 3);
+        assert!(session.snapshot().document_generation > initial.document_generation);
+        assert!(revision.get() > 1);
+
+        let recomposed = workspace(
+            Arc::new(Theme::default()),
+            MaterialCapabilities::default(),
+            session.clone(),
+        )
+        .unwrap();
+        drop(recomposed);
+        assert_eq!(session.snapshot().curve.anchors.len(), 3);
+        assert!(session.snapshot().can_undo);
+    }
+
+    #[test]
+    fn editor_session_playback_uses_host_time_and_reaches_the_return_frame() {
+        let session = MotionEditorSession::new(Reactive::new(1));
+        let _ = session
+            .handle(MotionEditorInput::Key {
+                key: MotionEditorKey::Space,
+                modifiers: MotionEditorModifiers::default(),
+                repeat: false,
+                now: Duration::from_secs(4),
+            })
+            .unwrap();
+        assert!(matches!(
+            session.snapshot().playback,
+            MotionEditorPlayback::Playing { .. }
+        ));
+
+        assert!(session.advance_playback(Duration::from_millis(4_280)));
+        let final_state = session.render_state();
+        assert_eq!(final_state.snapshot.playhead, 1.0);
+        assert_eq!(final_state.compiled.sample(1.0), 1.0);
+        assert_eq!(final_state.snapshot.playback, MotionEditorPlayback::Paused);
     }
 }
