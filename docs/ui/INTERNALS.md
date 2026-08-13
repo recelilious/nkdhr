@@ -872,10 +872,19 @@ requests. The preview samples the same compiled curve and can visibly pass its
 endpoint before returning to the stable final frame; single-shot playback is
 the explicit product default and time comes only from the host clock.
 
+Paint and hit testing transform through the editor's stable viewport rather
+than deriving a new range from each intermediate curve, so dragging an
+overshoot cannot move the coordinate system beneath the pointer. Graph-local
+wheel input pans, Ctrl-wheel zooms around the pointer, and Shift-wheel pans the
+time axis. Precision-touchpad scroll lifecycle events use one captured UI-7D
+viewport transaction from begin through end/cancel. These edits update only
+transient view state, never the curve document or undo history. `100%` restores
+the canonical normalized view while `Fit` encloses the compiled curve.
+
 This slice deliberately preserves the owner-approved allocation, Tokyo Night
 palette, Maple Mono typography and renderer-native material treatment. Graph
-viewport gesture wiring, numeric property bindings, save/export persistence and
-the future conserved-liquid navigation selection remain subsequent UI-7E work.
+numeric property bindings, save/export persistence and the future conserved-
+liquid navigation selection remain subsequent UI-7E work.
 
 ## Error and safety policy
 

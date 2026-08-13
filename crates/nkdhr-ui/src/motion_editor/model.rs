@@ -732,6 +732,17 @@ impl MotionCurveEditor {
             .fit_curve(&self.compiled, self.effective_curve().allow_overshoot);
     }
 
+    /// Restore the canonical one-to-one normalized graph view. Overshoot may
+    /// remain authored in the curve, but the viewport returns to `0..=1` on
+    /// both axes until the user fits or zooms again.
+    pub fn reset_viewport(&mut self) -> bool {
+        let previous = self.viewport;
+        self.viewport = MotionGraphViewport::default();
+        self.viewport
+            .constrain(self.effective_curve().allow_overshoot);
+        self.viewport != previous
+    }
+
     pub fn pan_viewport(
         &mut self,
         delta: MotionGraphPoint,
@@ -2051,6 +2062,8 @@ mod tests {
         editor.set_permissions(true, true).unwrap();
         editor.fit_viewport();
         assert!(editor.viewport().progress_end() - editor.viewport().progress_start() > 1.0);
+        assert!(editor.reset_viewport());
+        assert_eq!(editor.viewport(), MotionGraphViewport::default());
         editor.set_permissions(false, false).unwrap();
         editor
             .pan_viewport(MotionGraphPoint::new(0.0, 0.1))

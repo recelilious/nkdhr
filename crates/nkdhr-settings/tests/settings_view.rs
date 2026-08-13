@@ -10,8 +10,8 @@ use nkdhr_settings::{
     SettingsAssets, SettingsFeedbackKind, SettingsLayoutMode,
 };
 use nkdhr_ui::{
-    CompiledMotionCurve, ManualClock, MaterialCapabilities, Modifiers, PointerButton, SemanticRole,
-    Size, Theme, UiEvent, UiRoot,
+    CompiledMotionCurve, ManualClock, MaterialCapabilities, Modifiers, PointerButton, ScrollPhase,
+    SemanticRole, Size, Theme, UiEvent, UiRoot,
     text::{TextConfig, TextResources, TextSystem},
 };
 
@@ -368,18 +368,19 @@ fn professional_motion_graph_edits_the_persistent_editor_session() {
     let plot = graph.bounds.inset(18.0);
     let before = model.motion_editor_snapshot();
     let compiled = CompiledMotionCurve::compile(&before.curve).unwrap();
-    let analysis = compiled.analysis();
-    let minimum = if analysis.minimum_progress < 0.0 {
-        (analysis.minimum_progress * 10.0).floor() / 10.0
-    } else {
-        0.0
-    };
-    let maximum = (analysis.maximum_progress.max(1.0) * 10.0).ceil() / 10.0;
+    let viewport = before.viewport;
     let time = 0.5;
     let progress = compiled.sample(time);
     let position = Point::new(
-        plot.x + plot.width * time as f32,
-        plot.bottom() - plot.height * ((progress - minimum) / (maximum - minimum)) as f32,
+        plot.x
+            + plot.width
+                * ((time - viewport.time_start()) / (viewport.time_end() - viewport.time_start()))
+                    as f32,
+        plot.bottom()
+            - plot.height
+                * ((progress - viewport.progress_start())
+                    / (viewport.progress_end() - viewport.progress_start()))
+                    as f32,
     );
 
     let result = root
@@ -407,6 +408,169 @@ fn professional_motion_graph_edits_the_persistent_editor_session() {
             .is_some_and(|label| label.starts_with("动画曲线图："))
     }));
     assert_eq!(model.motion_editor_snapshot().curve.anchors.len(), 3);
+}
+
+#[test]
+fn professional_motion_graph_viewport_zoom_reset_and_fit_are_live() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    let semantics = root.semantic_tree();
+    let graph = semantics
+        .iter()
+        .find(|node| {
+            node.semantics
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("动画曲线图："))
+        })
+        .expect("the professional graph exposes its semantic node");
+    let one_to_one = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("100%")
+        })
+        .expect("the canonical viewport control is present");
+    let fit = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("适应")
+        })
+        .expect("the fit viewport control is present");
+    let initial = model.motion_editor_snapshot();
+    assert_eq!(initial.viewport.time_start(), 0.0);
+    assert_eq!(initial.viewport.time_end(), 1.0);
+    assert!((initial.viewport.progress_end() - 1.2).abs() < 1.0e-9);
+    let document_generation = initial.document_generation;
+
+    let zoom = root
+        .dispatch(&UiEvent::PointerScroll {
+            position: Point::new(
+                graph.bounds.x + graph.bounds.width * 0.5,
+                graph.bounds.y + 80.0,
+            ),
+            delta_x: 0.0,
+            delta_y: -24.0,
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        })
+        .unwrap();
+    assert!(zoom.handled);
+    let zoomed = model.motion_editor_snapshot();
+    assert!(zoomed.viewport.time_end() - zoomed.viewport.time_start() < 1.0);
+    assert!(zoomed.viewport.progress_end() - zoomed.viewport.progress_start() < 1.2);
+    assert_eq!(zoomed.document_generation, document_generation);
+
+    for event in [
+        UiEvent::PointerDown {
+            position: Point::new(
+                one_to_one.bounds.x + one_to_one.bounds.width * 0.5,
+                one_to_one.bounds.y + one_to_one.bounds.height * 0.5,
+            ),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        UiEvent::PointerUp {
+            position: Point::new(
+                one_to_one.bounds.x + one_to_one.bounds.width * 0.5,
+                one_to_one.bounds.y + one_to_one.bounds.height * 0.5,
+            ),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+    ] {
+        root.dispatch(&event).unwrap();
+    }
+    let reset = model.motion_editor_snapshot();
+    assert_eq!(reset.viewport.time_start(), 0.0);
+    assert_eq!(reset.viewport.time_end(), 1.0);
+    assert_eq!(reset.viewport.progress_start(), 0.0);
+    assert_eq!(reset.viewport.progress_end(), 1.0);
+
+    for event in [
+        UiEvent::PointerDown {
+            position: Point::new(
+                fit.bounds.x + fit.bounds.width * 0.5,
+                fit.bounds.y + fit.bounds.height * 0.5,
+            ),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        UiEvent::PointerUp {
+            position: Point::new(
+                fit.bounds.x + fit.bounds.width * 0.5,
+                fit.bounds.y + fit.bounds.height * 0.5,
+            ),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+    ] {
+        root.dispatch(&event).unwrap();
+    }
+    let fitted = model.motion_editor_snapshot();
+    assert!(fitted.viewport.progress_end() - fitted.viewport.progress_start() > 1.0);
+    assert_eq!(fitted.document_generation, document_generation);
+
+    let gesture_position = Point::new(
+        graph.bounds.x + graph.bounds.width * 0.5,
+        graph.bounds.y + graph.bounds.height * 0.5,
+    );
+    let begin = root
+        .dispatch(&UiEvent::ScrollGesture {
+            position: gesture_position,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            phase: ScrollPhase::Begin,
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        })
+        .unwrap();
+    assert!(begin.handled);
+    assert_eq!(begin.pointer_capture, Some(graph.id));
+    let update = root
+        .dispatch(&UiEvent::ScrollGesture {
+            position: gesture_position,
+            delta_x: 0.0,
+            delta_y: -20.0,
+            phase: ScrollPhase::Update,
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        })
+        .unwrap();
+    assert!(update.handled);
+    let end = root
+        .dispatch(&UiEvent::ScrollGesture {
+            position: gesture_position,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            phase: ScrollPhase::End,
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        })
+        .unwrap();
+    assert!(end.handled);
+    assert_eq!(end.pointer_capture, None);
+    let touchpad_zoomed = model.motion_editor_snapshot();
+    assert!(
+        touchpad_zoomed.viewport.time_end() - touchpad_zoomed.viewport.time_start()
+            < fitted.viewport.time_end() - fitted.viewport.time_start()
+    );
+    assert_eq!(touchpad_zoomed.document_generation, document_generation);
 }
 
 #[test]

@@ -560,9 +560,10 @@ two-contact touch or precision-touchpad viewport gestures; and keyboard
 selection/editing. It never installs a compositor-global gesture. Arrow keys
 and standard Vim `H/J/K/L` mean left/down/up/right, Shift uses the coarse step,
 and the controller emits explicit text clipboard read/write requests. The first
-UI-7E production binding now connects mouse direct editing, keyboard/history/
-clipboard commands and host-clock preview playback to the owner-reviewed
-Settings composition; viewport gestures and persistence remain later slices.
+UI-7E production binding now connects mouse direct editing, graph-local mouse/
+precision-touchpad viewport gestures, keyboard/history/clipboard commands and
+host-clock preview playback to the owner-reviewed Settings composition;
+persistence remains a later slice.
 
 ## Verification tools
 

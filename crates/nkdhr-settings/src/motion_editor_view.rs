@@ -21,10 +21,10 @@ use nkdhr_ui::{
     MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId, MotionEditorGesturePhase,
     MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
     MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
-    MotionEditorTarget, MotionGraphPoint, Padding, PaintCtx, PointerButton, Reactive, SemanticRole,
-    Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text, TextRole, Theme,
-    ThemeReadSet, Toggle, UiError, UiEvent, Widget, paint_fluid_well, resolve_fluid_material_tones,
-    resolve_motion_curve_handles,
+    MotionEditorTarget, MotionEditorViewportInput, MotionGraphPoint, MotionGraphViewport, Padding,
+    PaintCtx, PointerButton, Reactive, ScrollPhase, SemanticRole, Semantics, SemanticsCtx, Size,
+    Slider, SliderError, SurfaceState, Text, TextRole, Theme, ThemeReadSet, Toggle, UiError,
+    UiEvent, Widget, paint_fluid_well, resolve_fluid_material_tones, resolve_motion_curve_handles,
 };
 
 const SCOPE_RAIL_HEIGHT: f32 = 88.0;
@@ -91,7 +91,9 @@ impl MotionEditorSession {
         )
         .expect("the approved editor seed is valid");
         editor.set_looping(false);
-        editor.fit_viewport();
+        editor
+            .zoom_viewport(MotionGraphPoint::new(0.0, 0.0), 1.0, 1.0 / 1.2)
+            .expect("the approved 0..1.2 review viewport is valid");
         editor
             .scrub_playhead(0.46)
             .expect("the approved resting playhead is finite");
@@ -149,6 +151,13 @@ impl MotionEditorSession {
         self.inner.editor.borrow_mut().fit_viewport();
         self.bump_visual_revision();
         self.bump_composition_revision();
+    }
+
+    fn reset_viewport(&self) {
+        if self.inner.editor.borrow_mut().reset_viewport() {
+            self.bump_visual_revision();
+            self.bump_composition_revision();
+        }
     }
 
     fn set_looping(&self, looping: bool) {
@@ -520,7 +529,11 @@ fn motion_graph(
                 &theme,
             ))
             .child(text(
-                "进度 0–1.2",
+                format!(
+                    "进度 {}–{}",
+                    format_graph_number(snapshot.viewport.progress_start()),
+                    format_graph_number(snapshot.viewport.progress_end())
+                ),
                 TextRole::Caption,
                 theme.palette.text_muted,
                 &theme,
@@ -540,11 +553,13 @@ fn motion_graph(
                     .capabilities(capabilities)
                     .on_activate(move || session.fit_viewport())
             }))
-            .child(Element::new(
+            .child(Element::new({
+                let session = session.clone();
                 Button::new("100%", Arc::clone(&theme))
                     .variant(ButtonVariant::Fluid)
-                    .capabilities(capabilities),
-            )),
+                    .capabilities(capabilities)
+                    .on_activate(move || session.reset_viewport())
+            })),
         ),
     );
     let plot = Element::new(MotionCurvePlot {
@@ -563,19 +578,31 @@ fn motion_graph(
             cross_alignment: CrossAxisAlignment::Center,
         })
         .child(text(
-            "0 ms",
+            format!(
+                "{} ms",
+                format_milliseconds(snapshot.duration, snapshot.viewport.time_start())
+            ),
             TextRole::Caption,
             theme.palette.text_muted,
             &theme,
         ))
         .child(text(
-            format!("{} ms", snapshot.duration.as_millis() / 2),
+            format!(
+                "{} ms",
+                format_milliseconds(
+                    snapshot.duration,
+                    (snapshot.viewport.time_start() + snapshot.viewport.time_end()) * 0.5,
+                )
+            ),
             TextRole::Caption,
             theme.palette.text_muted,
             &theme,
         ))
         .child(text(
-            format!("{} ms   时间", snapshot.duration.as_millis()),
+            format!(
+                "{} ms   时间",
+                format_milliseconds(snapshot.duration, snapshot.viewport.time_end())
+            ),
             TextRole::Caption,
             theme.palette.text_secondary,
             &theme,
@@ -818,6 +845,18 @@ fn italic_text(content: impl Into<String>, role: TextRole, color: Color, theme: 
 fn with_alpha(color: Color, alpha: f32) -> Color {
     let [red, green, blue, _] = color.components();
     Color::new(red, green, blue, alpha).expect("theme colors and static alpha are valid")
+}
+
+fn format_graph_number(value: f64) -> String {
+    if (value - value.round()).abs() < 1.0e-6 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn format_milliseconds(duration: Duration, normalized_time: f64) -> String {
+    format_graph_number(duration.as_secs_f64() * 1_000.0 * normalized_time)
 }
 
 fn mix_color(first: Color, second: Color, amount: f32) -> Color {
@@ -1241,8 +1280,17 @@ struct MotionCurvePlot {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct MotionCurvePlotState {
-    active: Option<MotionEditorEditId>,
+    active: Option<MotionPlotInteraction>,
     focused: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MotionPlotInteraction {
+    Direct(MotionEditorEditId),
+    Viewport {
+        id: MotionEditorEditId,
+        device: MotionEditorDevice,
+    },
 }
 
 impl Widget for MotionCurvePlot {
@@ -1274,7 +1322,7 @@ impl Widget for MotionCurvePlot {
         self.session.watch_visual_revision(ctx);
         let state = self.session.render_state();
         let focused = ctx.state_mut::<MotionCurvePlotState>()?.focused;
-        let (progress_minimum, progress_maximum) = graph_progress_range(&state);
+        let viewport = state.snapshot.viewport;
         let frame = ctx.rect().inset(6.0);
         paint_fluid_well(
             ctx.builder(),
@@ -1308,46 +1356,47 @@ impl Widget for MotionCurvePlot {
             ctx,
             plot,
             &state.inherited_compiled,
-            (progress_minimum, progress_maximum),
+            viewport,
             CurveStroke::new(inherited, 1.25).dashed(),
         )?;
         draw_curve(
             ctx,
             plot,
             &state.compiled,
-            (progress_minimum, progress_maximum),
+            viewport,
             CurveStroke::new(with_alpha(self.theme.palette.inverse_edge, 0.36), 6.0),
         )?;
         draw_curve(
             ctx,
             plot,
             &state.compiled,
-            (progress_minimum, progress_maximum),
+            viewport,
             CurveStroke::new(with_alpha(self.theme.palette.accent_secondary, 0.56), 4.0),
         )?;
         draw_curve(
             ctx,
             Rect::new(plot.x, plot.y - 0.8, plot.width, plot.height),
             &state.compiled,
-            (progress_minimum, progress_maximum),
+            viewport,
             CurveStroke::new(self.theme.palette.accent, 1.6),
         )?;
 
         let playhead_x = graph_to_screen(
             plot,
-            MotionGraphPoint::new(state.snapshot.playhead, progress_minimum),
-            progress_minimum,
-            progress_maximum,
+            MotionGraphPoint::new(state.snapshot.playhead, viewport.progress_start()),
+            viewport,
         )
         .x;
         let info = with_alpha(self.theme.palette.accent_secondary, 0.82);
-        ctx.builder()
-            .rect(Rect::new(playhead_x, plot.y, 1.0, plot.height), info)?;
-        ctx.builder().rounded_rect(
-            Rect::new(playhead_x - 5.0, plot.y - 3.0, 10.0, 10.0),
-            CornerRadii::all(5.0),
-            self.theme.palette.accent_secondary,
-        )?;
+        if (plot.x..=plot.right()).contains(&playhead_x) {
+            ctx.builder()
+                .rect(Rect::new(playhead_x, plot.y, 1.0, plot.height), info)?;
+            ctx.builder().rounded_rect(
+                Rect::new(playhead_x - 5.0, plot.y - 3.0, 10.0, 10.0),
+                CornerRadii::all(5.0),
+                self.theme.palette.accent_secondary,
+            )?;
+        }
 
         if let Some(selected) = state.snapshot.primary_selection {
             let resolved = resolve_motion_curve_handles(&state.snapshot.curve)
@@ -1376,8 +1425,7 @@ impl Widget for MotionCurvePlot {
                 let anchor_point = graph_to_screen(
                     plot,
                     MotionGraphPoint::new(anchor.time, anchor.progress),
-                    progress_minimum,
-                    progress_maximum,
+                    viewport,
                 );
                 let handle_point = graph_to_screen(
                     plot,
@@ -1385,9 +1433,13 @@ impl Widget for MotionCurvePlot {
                         anchor.time + vector.time,
                         anchor.progress + vector.progress,
                     ),
-                    progress_minimum,
-                    progress_maximum,
+                    viewport,
                 );
+                if !graph_point_visible(plot, anchor_point)
+                    || !graph_point_visible(plot, handle_point)
+                {
+                    continue;
+                }
                 draw_segment(
                     ctx,
                     anchor_point,
@@ -1407,9 +1459,11 @@ impl Widget for MotionCurvePlot {
             let point = graph_to_screen(
                 plot,
                 MotionGraphPoint::new(anchor.time, anchor.progress),
-                progress_minimum,
-                progress_maximum,
+                viewport,
             );
+            if !graph_point_visible(plot, point) {
+                continue;
+            }
             let selected = state.snapshot.selection.contains(&index);
             ctx.builder().rounded_rect(
                 Rect::new(point.x - 6.0, point.y - 6.0, 12.0, 12.0),
@@ -1452,7 +1506,7 @@ impl Widget for MotionCurvePlot {
         let frame = ctx.rect().inset(6.0);
         let plot = frame.inset(12.0);
         let render = self.session.render_state();
-        let (minimum, maximum) = graph_progress_range(&render);
+        let viewport = render.snapshot.viewport;
         match event {
             UiEvent::PointerDown {
                 position,
@@ -1460,9 +1514,9 @@ impl Widget for MotionCurvePlot {
                 modifiers,
                 click_count,
             } => {
-                let target = hit_graph_target(*position, plot, minimum, maximum, &render);
+                let target = hit_graph_target(*position, plot, viewport, &render);
                 let id = self.session.next_edit_id();
-                let point = screen_to_graph(*position, plot, minimum, maximum);
+                let point = screen_to_graph(*position, plot, viewport);
                 let input = MotionEditorInput::Direct(MotionEditorDirectInput {
                     id,
                     phase: MotionEditorGesturePhase::Begin,
@@ -1477,7 +1531,7 @@ impl Widget for MotionCurvePlot {
                     let completed_double_click =
                         *click_count >= 2 && target == MotionEditorTarget::Curve;
                     ctx.state_mut::<MotionCurvePlotState>()?.active =
-                        (!completed_double_click).then_some(id);
+                        (!completed_double_click).then_some(MotionPlotInteraction::Direct(id));
                     ctx.request_focus();
                     if !completed_double_click {
                         ctx.capture_pointer();
@@ -1487,10 +1541,12 @@ impl Widget for MotionCurvePlot {
                 }
             }
             UiEvent::PointerMoved { position } => {
-                let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active else {
+                let Some(MotionPlotInteraction::Direct(id)) =
+                    ctx.state_mut::<MotionCurvePlotState>()?.active
+                else {
                     return Ok(());
                 };
-                let point = screen_to_graph(*position, plot, minimum, maximum);
+                let point = screen_to_graph(*position, plot, viewport);
                 let input = MotionEditorInput::Direct(MotionEditorDirectInput {
                     id,
                     phase: MotionEditorGesturePhase::Update,
@@ -1510,10 +1566,12 @@ impl Widget for MotionCurvePlot {
                 button: PointerButton::Primary,
                 ..
             } => {
-                let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active.take() else {
+                let active = ctx.state_mut::<MotionCurvePlotState>()?.active;
+                let Some(MotionPlotInteraction::Direct(id)) = active else {
                     return Ok(());
                 };
-                let point = screen_to_graph(*position, plot, minimum, maximum);
+                ctx.state_mut::<MotionCurvePlotState>()?.active = None;
+                let point = screen_to_graph(*position, plot, viewport);
                 let input = MotionEditorInput::Direct(MotionEditorDirectInput {
                     id,
                     phase: MotionEditorGesturePhase::End,
@@ -1529,21 +1587,160 @@ impl Widget for MotionCurvePlot {
                 ctx.set_handled();
                 ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
             }
+            UiEvent::PointerScroll {
+                position,
+                delta_x,
+                delta_y,
+                modifiers,
+            } => {
+                if ctx.state_mut::<MotionCurvePlotState>()?.active.is_some() {
+                    return Ok(());
+                }
+                let id = self.session.next_edit_id();
+                let begin = viewport_input(
+                    id,
+                    MotionEditorGesturePhase::Begin,
+                    MotionEditorDevice::Mouse,
+                    ViewportGestureSample::new(
+                        *position,
+                        Point::new(0.0, 0.0),
+                        *modifiers,
+                        plot,
+                        viewport,
+                    ),
+                );
+                if self.session.handle(begin).is_ok() {
+                    let end = viewport_input(
+                        id,
+                        MotionEditorGesturePhase::End,
+                        MotionEditorDevice::Mouse,
+                        ViewportGestureSample::new(
+                            *position,
+                            Point::new(*delta_x, *delta_y),
+                            *modifiers,
+                            plot,
+                            viewport,
+                        ),
+                    );
+                    let _ = self.session.handle(end);
+                    self.session.bump_composition_revision();
+                    ctx.set_handled();
+                    ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+                }
+            }
+            UiEvent::ScrollGesture {
+                position,
+                delta_x,
+                delta_y,
+                phase,
+                modifiers,
+            } => {
+                let device = MotionEditorDevice::PrecisionTouchpad { contacts: 2 };
+                match phase {
+                    ScrollPhase::Begin => {
+                        if ctx.state_mut::<MotionCurvePlotState>()?.active.is_some() {
+                            return Ok(());
+                        }
+                        let id = self.session.next_edit_id();
+                        let input = viewport_input(
+                            id,
+                            MotionEditorGesturePhase::Begin,
+                            device,
+                            ViewportGestureSample::new(
+                                *position,
+                                Point::new(*delta_x, *delta_y),
+                                *modifiers,
+                                plot,
+                                viewport,
+                            ),
+                        );
+                        if self.session.handle(input).is_ok() {
+                            ctx.state_mut::<MotionCurvePlotState>()?.active =
+                                Some(MotionPlotInteraction::Viewport { id, device });
+                            ctx.capture_pointer();
+                            ctx.set_handled();
+                        }
+                    }
+                    ScrollPhase::Update => {
+                        let Some(MotionPlotInteraction::Viewport { id, device }) =
+                            ctx.state_mut::<MotionCurvePlotState>()?.active
+                        else {
+                            return Ok(());
+                        };
+                        let input = viewport_input(
+                            id,
+                            MotionEditorGesturePhase::Update,
+                            device,
+                            ViewportGestureSample::new(
+                                *position,
+                                Point::new(*delta_x, *delta_y),
+                                *modifiers,
+                                plot,
+                                viewport,
+                            ),
+                        );
+                        let _ = self.session.handle(input);
+                        ctx.set_handled();
+                    }
+                    ScrollPhase::End | ScrollPhase::Cancel => {
+                        let active = ctx.state_mut::<MotionCurvePlotState>()?.active;
+                        let Some(MotionPlotInteraction::Viewport { id, device }) = active else {
+                            return Ok(());
+                        };
+                        ctx.state_mut::<MotionCurvePlotState>()?.active = None;
+                        let editor_phase = if *phase == ScrollPhase::End {
+                            MotionEditorGesturePhase::End
+                        } else {
+                            MotionEditorGesturePhase::Cancel
+                        };
+                        let input = viewport_input(
+                            id,
+                            editor_phase,
+                            device,
+                            ViewportGestureSample::new(
+                                *position,
+                                Point::new(*delta_x, *delta_y),
+                                *modifiers,
+                                plot,
+                                viewport,
+                            ),
+                        );
+                        let _ = self.session.handle(input);
+                        self.session.bump_composition_revision();
+                        ctx.release_pointer();
+                        ctx.set_handled();
+                    }
+                }
+                ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
+            }
             UiEvent::PointerCancel => {
-                if let Some(id) = ctx.state_mut::<MotionCurvePlotState>()?.active.take() {
-                    let point = MotionGraphPoint::default();
-                    let _ =
-                        self.session
-                            .handle(MotionEditorInput::Direct(MotionEditorDirectInput {
+                if let Some(active) = ctx.state_mut::<MotionCurvePlotState>()?.active.take() {
+                    let input = match active {
+                        MotionPlotInteraction::Direct(id) => {
+                            MotionEditorInput::Direct(MotionEditorDirectInput {
                                 id,
                                 phase: MotionEditorGesturePhase::Cancel,
                                 device: MotionEditorDevice::Mouse,
                                 target: MotionEditorTarget::Graph,
-                                position: point,
+                                position: MotionGraphPoint::default(),
                                 modifiers: MotionEditorModifiers::default(),
                                 activation_count: 1,
                                 snapping: true,
-                            }));
+                            })
+                        }
+                        MotionPlotInteraction::Viewport { id, device } => {
+                            MotionEditorInput::Viewport(MotionEditorViewportInput {
+                                id,
+                                phase: MotionEditorGesturePhase::Cancel,
+                                device,
+                                anchor: MotionGraphPoint::default(),
+                                translation: MotionGraphPoint::default(),
+                                time_scale: 1.0,
+                                progress_scale: 1.0,
+                            })
+                        }
+                    };
+                    let _ = self.session.handle(input);
                     ctx.release_pointer();
                     ctx.set_handled();
                     ctx.invalidate(Invalidation::PAINT | Invalidation::SEMANTICS);
@@ -1616,20 +1813,21 @@ fn draw_curve(
     ctx: &mut PaintCtx<'_>,
     rect: Rect,
     curve: &CompiledMotionCurve,
-    progress_range: (f64, f64),
+    viewport: MotionGraphViewport,
     stroke: CurveStroke,
 ) -> Result<(), UiError> {
-    let (progress_minimum, progress_maximum) = progress_range;
-    let mut previous = Point::new(rect.x, rect.bottom());
+    let time_span = viewport.time_end() - viewport.time_start();
+    let mut previous = graph_to_screen(
+        rect,
+        MotionGraphPoint::new(viewport.time_start(), curve.sample(viewport.time_start())),
+        viewport,
+    );
     for index in 1..=64 {
-        let time = index as f32 / 64.0;
-        let progress = curve.sample(f64::from(time));
-        let next = Point::new(
-            rect.x + rect.width * time,
-            rect.bottom()
-                - rect.height
-                    * ((progress - progress_minimum) / (progress_maximum - progress_minimum))
-                        as f32,
+        let time = viewport.time_start() + time_span * f64::from(index) / 64.0;
+        let next = graph_to_screen(
+            rect,
+            MotionGraphPoint::new(time, curve.sample(time)),
+            viewport,
         );
         if !stroke.dashed || (index / 3) % 2 == 0 {
             draw_segment(ctx, previous, next, stroke.width, stroke.color)?;
@@ -1661,60 +1859,34 @@ impl CurveStroke {
     }
 }
 
-fn graph_progress_range(state: &MotionEditorRenderState) -> (f64, f64) {
-    let current = state.compiled.analysis();
-    let inherited = state.inherited_compiled.analysis();
-    let minimum = current
-        .minimum_progress
-        .min(inherited.minimum_progress)
-        .min(0.0);
-    let maximum = current
-        .maximum_progress
-        .max(inherited.maximum_progress)
-        .max(1.0);
-    let minimum = if minimum < 0.0 {
-        (minimum * 10.0).floor() / 10.0
-    } else {
-        0.0
-    };
-    let maximum = (maximum * 10.0).ceil() / 10.0;
-    (minimum, maximum.max(minimum + 0.1))
-}
-
-fn graph_to_screen(
-    rect: Rect,
-    point: MotionGraphPoint,
-    progress_minimum: f64,
-    progress_maximum: f64,
-) -> Point {
+fn graph_to_screen(rect: Rect, point: MotionGraphPoint, viewport: MotionGraphViewport) -> Point {
+    let time_span = viewport.time_end() - viewport.time_start();
+    let progress_span = viewport.progress_end() - viewport.progress_start();
     Point::new(
-        rect.x + rect.width * point.time as f32,
+        rect.x + rect.width * ((point.time - viewport.time_start()) / time_span) as f32,
         rect.bottom()
-            - rect.height
-                * ((point.progress - progress_minimum) / (progress_maximum - progress_minimum))
-                    as f32,
+            - rect.height * ((point.progress - viewport.progress_start()) / progress_span) as f32,
     )
 }
 
-fn screen_to_graph(
-    point: Point,
-    rect: Rect,
-    progress_minimum: f64,
-    progress_maximum: f64,
-) -> MotionGraphPoint {
-    let time = f64::from(((point.x - rect.x) / rect.width.max(1.0)).clamp(0.0, 1.0));
+fn graph_point_visible(rect: Rect, point: Point) -> bool {
+    (rect.x..=rect.right()).contains(&point.x) && (rect.y..=rect.bottom()).contains(&point.y)
+}
+
+fn screen_to_graph(point: Point, rect: Rect, viewport: MotionGraphViewport) -> MotionGraphPoint {
+    let horizontal = f64::from(((point.x - rect.x) / rect.width.max(1.0)).clamp(0.0, 1.0));
     let vertical = f64::from(((rect.bottom() - point.y) / rect.height.max(1.0)).clamp(0.0, 1.0));
     MotionGraphPoint::new(
-        time,
-        progress_minimum + vertical * (progress_maximum - progress_minimum),
+        viewport.time_start() + horizontal * (viewport.time_end() - viewport.time_start()),
+        viewport.progress_start()
+            + vertical * (viewport.progress_end() - viewport.progress_start()),
     )
 }
 
 fn hit_graph_target(
     point: Point,
     rect: Rect,
-    progress_minimum: f64,
-    progress_maximum: f64,
+    viewport: MotionGraphViewport,
     state: &MotionEditorRenderState,
 ) -> MotionEditorTarget {
     if let Some(selected) = state.snapshot.primary_selection
@@ -1735,8 +1907,7 @@ fn hit_graph_target(
             let handle = graph_to_screen(
                 rect,
                 MotionGraphPoint::new(anchor.time + vector.time, anchor.progress + vector.progress),
-                progress_minimum,
-                progress_maximum,
+                viewport,
             );
             if (point.x - handle.x).abs() <= 10.0 && (point.y - handle.y).abs() <= 10.0 {
                 return target;
@@ -1747,8 +1918,7 @@ fn hit_graph_target(
         let screen = graph_to_screen(
             rect,
             MotionGraphPoint::new(anchor.time, anchor.progress),
-            progress_minimum,
-            progress_maximum,
+            viewport,
         );
         if (point.x - screen.x).abs() <= 10.0 && (point.y - screen.y).abs() <= 10.0 {
             return MotionEditorTarget::Anchor(index);
@@ -1756,26 +1926,95 @@ fn hit_graph_target(
     }
     let playhead = graph_to_screen(
         rect,
-        MotionGraphPoint::new(state.snapshot.playhead, progress_minimum),
-        progress_minimum,
-        progress_maximum,
+        MotionGraphPoint::new(state.snapshot.playhead, viewport.progress_start()),
+        viewport,
     );
     if (point.x - playhead.x).abs() <= 7.0 {
         return MotionEditorTarget::Playhead;
     }
-    let graph = screen_to_graph(point, rect, progress_minimum, progress_maximum);
+    let graph = screen_to_graph(point, rect, viewport);
     let curve_progress = state.compiled.sample(graph.time);
     let curve = graph_to_screen(
         rect,
         MotionGraphPoint::new(graph.time, curve_progress),
-        progress_minimum,
-        progress_maximum,
+        viewport,
     );
     if (point.y - curve.y).abs() <= 10.0 {
         MotionEditorTarget::Curve
     } else {
         MotionEditorTarget::Playhead
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewportGestureSample {
+    position: Point,
+    delta: Point,
+    modifiers: Modifiers,
+    rect: Rect,
+    viewport: MotionGraphViewport,
+}
+
+impl ViewportGestureSample {
+    const fn new(
+        position: Point,
+        delta: Point,
+        modifiers: Modifiers,
+        rect: Rect,
+        viewport: MotionGraphViewport,
+    ) -> Self {
+        Self {
+            position,
+            delta,
+            modifiers,
+            rect,
+            viewport,
+        }
+    }
+}
+
+fn viewport_input(
+    id: MotionEditorEditId,
+    phase: MotionEditorGesturePhase,
+    device: MotionEditorDevice,
+    sample: ViewportGestureSample,
+) -> MotionEditorInput {
+    let anchor = screen_to_graph(sample.position, sample.rect, sample.viewport);
+    let time_span = sample.viewport.time_end() - sample.viewport.time_start();
+    let progress_span = sample.viewport.progress_end() - sample.viewport.progress_start();
+    let (translation, time_scale, progress_scale) = if sample.modifiers.control {
+        let scale = (-f64::from(sample.delta.y) * 0.012).exp().clamp(0.25, 4.0);
+        (MotionGraphPoint::default(), scale, scale)
+    } else {
+        let horizontal = sample.delta.x
+            + if sample.modifiers.shift {
+                sample.delta.y
+            } else {
+                0.0
+            };
+        let vertical = if sample.modifiers.shift {
+            0.0
+        } else {
+            sample.delta.y
+        };
+        (
+            MotionGraphPoint::new(
+                f64::from(horizontal / sample.rect.width.max(1.0)) * time_span,
+                f64::from(vertical / sample.rect.height.max(1.0)) * progress_span,
+            ),
+            1.0,
+            1.0,
+        )
+    };
+    MotionEditorInput::Viewport(MotionEditorViewportInput {
+        id,
+        phase,
+        device,
+        anchor,
+        translation,
+        time_scale,
+        progress_scale,
+    })
 }
 
 fn editor_modifiers(modifiers: Modifiers) -> MotionEditorModifiers {
