@@ -13,8 +13,10 @@ use crate::text::{TextLayout, TextWrap};
 use crate::theme::{mix, with_alpha};
 use crate::{
     ArrangeCtx, Constraints, EventCtx, Invalidation, Key, MaterialCapabilities, MaterialTier,
-    MeasureCtx, Modifiers, MotionFamily, PaintCtx, PointerButton, Reactive, ScalarMotion,
-    SemanticRole, Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, UiError, UiEvent, UpdateCtx,
+    MeasureCtx, Modifiers, MotionFamily, MotionFeature, MotionPropertyDomain, MotionRuntimeProfile,
+    MotionScopeData, MotionSemanticFamilyData, PaintCtx, PointerButton, Reactive,
+    ResolvedSemanticFluid, ScalarMotion, SelectionMassMotion, SelectionMassSample, SemanticRole,
+    Semantics, SemanticsCtx, Size, Theme, ThemeReadSet, ThemeSnapshot, UiError, UiEvent, UpdateCtx,
     Widget,
 };
 
@@ -395,6 +397,9 @@ pub struct List {
     material_tier: MaterialTier,
     paint_panel_surface: bool,
     square_selection_node: bool,
+    conserved_fluid_selection: bool,
+    fluid_selection_scope: MotionScopeData,
+    motion_runtime: Option<Arc<MotionRuntimeProfile>>,
     capabilities: MaterialCapabilities,
     virtual_window: ListVirtualWindow,
     page_step: usize,
@@ -442,6 +447,13 @@ impl List {
             material_tier: MaterialTier::ContentSurface,
             paint_panel_surface: true,
             square_selection_node: false,
+            conserved_fluid_selection: false,
+            fluid_selection_scope: MotionScopeData::transition(
+                MotionSemanticFamilyData::ListTransfer,
+                "list",
+                "selection",
+            ),
+            motion_runtime: None,
             capabilities: MaterialCapabilities::default(),
             virtual_window: ListVirtualWindow::default(),
             page_step: 5,
@@ -476,6 +488,23 @@ impl List {
     /// preserving the default full-row selection geometry for ordinary lists.
     pub fn square_selection_node(mut self, square: bool) -> Self {
         self.square_selection_node = square;
+        self
+    }
+
+    /// Moves one conserved selection quantity through the visible topology.
+    /// Rapid retargeting keeps the current distribution and tangent instead
+    /// of restarting a canned clip. This is opt-in because object lists retain
+    /// their quieter scalar selection by default.
+    pub fn conserved_fluid_selection(mut self, enabled: bool) -> Self {
+        self.conserved_fluid_selection = enabled;
+        self
+    }
+
+    /// Gives a fluid list a stable component scope for professional motion
+    /// overrides. Invalid scopes fail at the same runtime resolution boundary
+    /// as all other authored motion rather than silently falling back.
+    pub fn fluid_selection_scope(mut self, scope: MotionScopeData) -> Self {
+        self.fluid_selection_scope = scope;
         self
     }
 
@@ -591,6 +620,7 @@ struct ListState {
     last_selection: Option<u64>,
     last_position: Option<usize>,
     initialized: bool,
+    fluid_selection: Option<SelectionMassMotion>,
     row_rects: Vec<Rect>,
     reorder_drag: Option<ReorderDrag>,
     typeahead: String,
@@ -606,6 +636,7 @@ impl Default for ListState {
             last_selection: None,
             last_position: None,
             initialized: false,
+            fluid_selection: None,
             row_rects: Vec::new(),
             reorder_drag: None,
             typeahead: String::new(),
@@ -634,6 +665,11 @@ impl Widget for List {
         self.theme = theme;
     }
 
+    fn apply_theme_snapshot(&mut self, snapshot: Arc<ThemeSnapshot>) {
+        self.theme = snapshot.theme();
+        self.motion_runtime = Some(snapshot.motion_runtime());
+    }
+
     fn create_state(&self) -> Box<dyn Any> {
         Box::<ListState>::default()
     }
@@ -656,6 +692,15 @@ impl Widget for List {
             state
                 .selection_opacity
                 .settle(state.selection_opacity.target());
+            if let (Some(selection), Some(fluid)) =
+                (self.selection.cursor(), state.fluid_selection.as_mut())
+            {
+                fluid.settle(selection.to_string());
+            }
+        } else if !self.conserved_fluid_selection {
+            ctx.state_mut::<ListState>()
+                .expect("List owns ListState")
+                .fluid_selection = None;
         }
     }
 
@@ -719,14 +764,40 @@ impl Widget for List {
             .map(|position| ctx.child_rect(position))
             .transpose()?;
         let now = ctx.now();
-        let (single_mass, active, drag) = {
+        let single = matches!(selection, SelectionSnapshot::Single(_));
+        let fluid_policy = if self.conserved_fluid_selection && single {
+            self.motion_runtime
+                .as_ref()
+                .map(|runtime| {
+                    Ok::<_, UiError>((
+                        runtime
+                            .resolve(&self.fluid_selection_scope, MotionPropertyDomain::Spatial)
+                            .map_err(|error| UiError::Text(error.to_string()))?,
+                        runtime
+                            .resolve_fluid(&self.fluid_selection_scope)
+                            .map_err(|error| UiError::Text(error.to_string()))?,
+                        runtime.allows(MotionFeature::FluidTopology),
+                    ))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let (single_mass, fluid_sample, active, drag) = {
             let state = ctx.state_mut::<ListState>()?;
-            let single = matches!(selection, SelectionSnapshot::Single(_));
             if single && !state.initialized {
                 if let Some(selected) = selected_rect {
                     state.selection_y.settle(selected.y);
                     state.selection_height.settle(selected.height);
                     state.selection_opacity.settle(1.0);
+                }
+                if fluid_policy.is_some()
+                    && let Some(identity) = selection.cursor()
+                {
+                    state.fluid_selection = Some(
+                        SelectionMassMotion::new(identity.to_string(), 1.0)
+                            .map_err(|error| UiError::Text(error.to_string()))?,
+                    );
                 }
                 state.last_selection = selection.cursor();
                 state.last_position = selected_position;
@@ -736,10 +807,35 @@ impl Widget for List {
                     || state.last_position != selected_position)
             {
                 if let Some(selected) = selected_rect {
-                    let nearby = state
+                    if let (Some((spec, _, topology_allowed)), Some(identity)) =
+                        (fluid_policy.as_ref(), selection.cursor())
+                    {
+                        let initial = state.last_selection.unwrap_or(identity).to_string();
+                        let fluid = match state.fluid_selection.as_mut() {
+                            Some(fluid) => fluid,
+                            None => {
+                                state.fluid_selection = Some(
+                                    SelectionMassMotion::new(initial, 1.0)
+                                        .map_err(|error| UiError::Text(error.to_string()))?,
+                                );
+                                state
+                                    .fluid_selection
+                                    .as_mut()
+                                    .expect("fluid selection was just initialized")
+                            }
+                        };
+                        if *topology_allowed && !spec.is_immediate() {
+                            let _ = fluid.retarget(now, identity.to_string(), spec.clone());
+                        } else {
+                            fluid.settle(identity.to_string());
+                        }
+                        state.selection_y.settle(selected.y);
+                        state.selection_height.settle(selected.height);
+                    } else if state
                         .last_position
-                        .is_some_and(|previous| previous.abs_diff(selected_position.unwrap()) <= 3);
-                    if nearby && self.theme.motion.spatial_motion_enabled() {
+                        .is_some_and(|previous| previous.abs_diff(selected_position.unwrap()) <= 3)
+                        && self.theme.motion.spatial_motion_enabled()
+                    {
                         let spec = self.theme.motion.spec(MotionFamily::ListTransfer);
                         state.selection_y.retarget(now, selected.y, spec);
                         state.selection_height.retarget(now, selected.height, spec);
@@ -763,35 +859,71 @@ impl Widget for List {
                 state.last_position = selected_position;
             } else if !single {
                 state.selection_opacity.settle(0.0);
+                state.fluid_selection = None;
                 state.last_selection = selection.cursor();
                 state.last_position = selected_position;
                 state.initialized = true;
             }
+            if let (Some((spec, _, topology_allowed)), Some(identity), Some(fluid)) = (
+                fluid_policy.as_ref(),
+                selection.cursor(),
+                state.fluid_selection.as_mut(),
+            ) && (!*topology_allowed || spec.is_immediate())
+            {
+                fluid.settle(identity.to_string());
+            }
+            let fluid_sample = state
+                .fluid_selection
+                .as_mut()
+                .map(|fluid| fluid.advance(now).sample);
+            let fluid_active = fluid_sample
+                .as_ref()
+                .is_some_and(|sample| sample.active_run.is_some());
             (
                 (
                     state.selection_y.value(now),
                     state.selection_height.value(now),
                     state.selection_opacity.value(now).clamp(0.0, 1.0),
                 ),
+                fluid_sample,
                 state.selection_y.is_active(now)
                     || state.selection_height.is_active(now)
-                    || state.selection_opacity.is_active(now),
+                    || state.selection_opacity.is_active(now)
+                    || fluid_active,
                 state.reorder_drag,
             )
         };
         if active {
             ctx.request_animation_frame();
         }
-        if matches!(selection, SelectionSnapshot::Single(_)) {
-            paint_selection_mass(
-                ctx,
-                rect,
-                single_mass.0,
-                single_mass.1,
-                single_mass.2,
-                &self.theme,
-                self.square_selection_node,
-            )?;
+        let fluid_distortion = if single {
+            if let (Some(sample), Some((_, fluid, _))) =
+                (fluid_sample.as_ref(), fluid_policy.as_ref())
+            {
+                paint_conserved_selection_mass(
+                    ctx,
+                    rect,
+                    &self.entries,
+                    sample,
+                    single_mass.2,
+                    &self.theme,
+                    self.square_selection_node,
+                    self.capabilities,
+                    fluid,
+                    now,
+                )?
+            } else {
+                paint_selection_mass(
+                    ctx,
+                    rect,
+                    single_mass.0,
+                    single_mass.1,
+                    single_mass.2,
+                    &self.theme,
+                    self.square_selection_node,
+                )?;
+                None
+            }
         } else {
             for (index, entry) in self.entries.iter().enumerate() {
                 if selection.contains(entry.identity) {
@@ -807,7 +939,8 @@ impl Widget for List {
                     )?;
                 }
             }
-        }
+            None
+        };
 
         for (index, entry) in self.entries.iter().enumerate() {
             let row = ctx.child_rect(index)?;
@@ -844,7 +977,11 @@ impl Widget for List {
             if drag.is_some_and(|drag| drag.source == index) {
                 continue;
             }
-            ctx.paint_child(index)?;
+            let row = ctx.child_rect(index)?;
+            let (offset_x, offset_y) = fluid_distortion
+                .map(|distortion| distortion.offset_for(row, index))
+                .unwrap_or((0.0, 0.0));
+            ctx.paint_child_translated(index, offset_x, offset_y)?;
         }
         if let Some(drag) = drag {
             ctx.paint_child_translated(drag.source, 0.0, drag.delta_y)?;
@@ -1171,6 +1308,290 @@ impl Widget for List {
     fn clips_children(&self) -> bool {
         true
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FluidSelectionDistortion {
+    center_y: f32,
+    reach: f32,
+    amplitude: f32,
+    phase: f32,
+}
+
+impl FluidSelectionDistortion {
+    fn offset_for(self, row: Rect, index: usize) -> (f32, f32) {
+        if self.reach <= 0.0 || self.amplitude <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let row_center = row.y + row.height * 0.5;
+        let influence = (1.0 - (row_center - self.center_y).abs() / self.reach).clamp(0.0, 1.0);
+        let wave = (self.phase + index as f32 * 0.91).sin();
+        (
+            self.amplitude * influence * wave,
+            self.amplitude * 0.18 * influence * (self.phase * 0.73 + index as f32).cos(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FluidSelectionNode {
+    center_y: f32,
+    row_height: f32,
+    mass: f32,
+    velocity: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_conserved_selection_mass(
+    ctx: &mut PaintCtx<'_>,
+    list_rect: Rect,
+    entries: &[ListEntry],
+    sample: &SelectionMassSample,
+    opacity: f32,
+    theme: &Theme,
+    square: bool,
+    capabilities: MaterialCapabilities,
+    fluid: &ResolvedSemanticFluid,
+    now: Duration,
+) -> Result<Option<FluidSelectionDistortion>, UiError> {
+    if opacity <= 0.0 || sample.total_mass <= 0.0 {
+        return Ok(None);
+    }
+    let mut nodes = Vec::with_capacity(sample.entries.len());
+    for mass in &sample.entries {
+        if mass.mass <= f64::EPSILON {
+            continue;
+        }
+        let Ok(identity) = mass.id.parse::<u64>() else {
+            continue;
+        };
+        let Some(index) = entries
+            .iter()
+            .position(|entry| entry.identity == identity)
+            .filter(|index| *index < ctx.child_count())
+        else {
+            continue;
+        };
+        let row = ctx.child_rect(index)?;
+        nodes.push(FluidSelectionNode {
+            center_y: row.y + row.height * 0.5,
+            row_height: row.height,
+            mass: mass.mass as f32,
+            velocity: mass.velocity as f32,
+        });
+    }
+    if nodes.is_empty() {
+        return Ok(None);
+    }
+
+    let total_mass = sample.total_mass as f32;
+    let visible_mass = nodes.iter().map(|node| node.mass).sum::<f32>();
+    let weighted_y = nodes
+        .iter()
+        .map(|node| node.center_y * node.mass)
+        .sum::<f32>()
+        / visible_mass;
+    let row_height = nodes
+        .iter()
+        .map(|node| node.row_height * node.mass)
+        .sum::<f32>()
+        / visible_mass;
+    let maximum_mass = nodes.iter().map(|node| node.mass).fold(0.0_f32, f32::max);
+    let activity = if sample.active_run.is_some() {
+        ((1.0 - maximum_mass / total_mass) * 2.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let minimum_y = nodes
+        .iter()
+        .map(|node| node.center_y)
+        .fold(f32::INFINITY, f32::min);
+    let maximum_y = nodes
+        .iter()
+        .map(|node| node.center_y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let span = (maximum_y - minimum_y).max(0.0);
+    let seed = stable_selection_seed(&sample.target)
+        ^ sample
+            .active_run
+            .map(|run| run.get().wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .unwrap_or(0);
+    let transfer_progress = sample
+        .entries
+        .iter()
+        .find(|entry| entry.id == sample.target)
+        .map(|entry| entry.mass / sample.total_mass)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let envelope = fluid.sample(transfer_progress, seed);
+    let path_offset = (envelope.path_offset as f32 * 0.18).clamp(-4.5, 4.5);
+    let surface = (envelope.surface_displacement as f32).clamp(-4.0, 4.0);
+    let base_height = (row_height - 8.0).max(1.0);
+    let base_width = if square {
+        (list_rect.width - 8.0).max(0.0).min(base_height)
+    } else {
+        (list_rect.width - 8.0).max(1.0)
+    };
+    let center_x = list_rect.x + list_rect.width * 0.5;
+
+    if activity > 0.001 && span > 0.5 {
+        let extension = ((envelope.neck_extension + envelope.trail_extension) as f32 * 0.16)
+            .clamp(0.0, base_height * 0.55);
+        let bridge_height = span + base_height * 0.58 + extension;
+        let bridge_width_factor = if square { 0.30 } else { 0.27 };
+        let bridge_width = (base_width * bridge_width_factor + surface.abs() * 0.22)
+            .clamp(if square { 8.0 } else { 18.0 }, base_width * 0.62);
+        let bridge = Rect::new(
+            center_x + path_offset * 0.56 - bridge_width * 0.5,
+            (minimum_y + maximum_y) * 0.5 - bridge_height * 0.5,
+            bridge_width,
+            bridge_height,
+        );
+        paint_gel_selection_shape(
+            ctx,
+            bridge,
+            CornerRadii::all((bridge_width * 0.5).min(theme.radii.control)),
+            theme,
+            capabilities,
+            opacity * (0.30 + activity * 0.22),
+            true,
+        )?;
+
+        for node in &nodes {
+            let fraction = (node.mass / total_mass).clamp(0.0, 1.0);
+            if fraction <= 0.035 || fraction >= 0.965 {
+                continue;
+            }
+            let lobe_width = base_width * fraction.sqrt() * if square { 0.52 } else { 0.34 };
+            let lobe_height = base_height * fraction.sqrt() * 0.58;
+            let direction = node.velocity.signum();
+            let lobe = Rect::new(
+                center_x + path_offset * direction * 0.24 - lobe_width * 0.5,
+                node.center_y - lobe_height * 0.5,
+                lobe_width.max(4.0),
+                lobe_height.max(4.0),
+            );
+            paint_gel_selection_shape(
+                ctx,
+                lobe,
+                CornerRadii::all((lobe_height * 0.5).min(theme.radii.control)),
+                theme,
+                capabilities,
+                opacity * 0.28 * activity,
+                true,
+            )?;
+        }
+    }
+
+    let core_width = base_width * (1.0 - activity * if square { 0.10 } else { 0.16 });
+    let core_height = base_height * (1.0 + activity * 0.10) + surface.abs() * 0.16;
+    let core = Rect::new(
+        center_x + path_offset - core_width * 0.5,
+        weighted_y + surface * 0.18 - core_height * 0.5,
+        core_width,
+        core_height,
+    );
+    let fluid_radius = theme.radii.control
+        + activity * ((core_height * 0.5).min(core_width * 0.5) - theme.radii.control).max(0.0);
+    paint_gel_selection_shape(
+        ctx,
+        core,
+        CornerRadii::all(fluid_radius),
+        theme,
+        capabilities,
+        opacity,
+        false,
+    )?;
+
+    if activity <= 0.001 {
+        return Ok(None);
+    }
+    let momentum = nodes
+        .iter()
+        .map(|node| node.velocity.abs())
+        .fold(0.0_f32, f32::max);
+    let phase = now.as_secs_f32() * 8.0 + (seed & 0xffff) as f32 * 0.000_17;
+    Ok(Some(FluidSelectionDistortion {
+        center_y: weighted_y,
+        reach: span * 0.55 + base_height * 1.15,
+        amplitude: activity.sqrt() * (1.35 + path_offset.abs() * 0.16 + momentum.min(8.0) * 0.08),
+        phase,
+    }))
+}
+
+fn stable_selection_seed(text: &str) -> u64 {
+    text.as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_gel_selection_shape(
+    ctx: &mut PaintCtx<'_>,
+    rect: Rect,
+    radii: CornerRadii,
+    theme: &Theme,
+    capabilities: MaterialCapabilities,
+    opacity: f32,
+    attached: bool,
+) -> Result<(), UiError> {
+    if rect.is_empty() || opacity <= 0.0 {
+        return Ok(());
+    }
+    let material = theme.resolve_material(MaterialTier::CompactNode, capabilities);
+    let base = mix(material.fill, theme.palette.accent, 0.30);
+    let tones = resolve_fluid_material_tones(theme, base, true);
+    if !attached {
+        ctx.builder().shadow(
+            rect,
+            radii,
+            Shadow::new(3.0, 3.0, 7.0, 0.0, with_alpha(tones.shade, 0.23 * opacity)),
+        )?;
+    }
+    ctx.builder().rounded_rect(
+        rect,
+        radii,
+        with_alpha(base, (if attached { 0.46 } else { 0.76 }) * opacity),
+    )?;
+    ctx.builder().inset_shadow(
+        rect,
+        radii,
+        Shadow::new(
+            2.0,
+            2.0,
+            if attached { 4.0 } else { 5.0 },
+            0.0,
+            with_alpha(
+                tones.highlight,
+                tones.highlight_strength * if attached { 0.27 } else { 0.66 } * opacity,
+            ),
+        ),
+    )?;
+    ctx.builder().inset_shadow(
+        rect,
+        radii,
+        Shadow::new(
+            -2.0,
+            -2.0,
+            if attached { 4.0 } else { 5.0 },
+            0.0,
+            with_alpha(
+                tones.shade,
+                tones.shade_strength * if attached { 0.30 } else { 0.70 } * opacity,
+            ),
+        ),
+    )?;
+    if !attached {
+        ctx.builder().border(
+            rect,
+            radii,
+            1.0,
+            with_alpha(tones.highlight, 0.04 * opacity),
+        )?;
+    }
+    Ok(())
 }
 
 fn paint_selection_mass(

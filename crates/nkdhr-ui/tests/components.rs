@@ -9,6 +9,7 @@ use cosmic_text::{FontSystem, fontdb};
 use nkdhr_render::{
     Color, DisplayListBuilder, Point, Primitive, TextureStore, software::SoftwareRenderer,
 };
+use nkdhr_theme::ThemeProfile;
 use nkdhr_ui::text::{TextConfig, TextResources, TextSystem};
 use nkdhr_ui::{
     Axis, Button, ButtonVariant, ClipboardRequest, Constraints, CrossAxisAlignment, Density,
@@ -18,8 +19,9 @@ use nkdhr_ui::{
     Reactive, Scroll, ScrollAnchor, ScrollAxis, ScrollOffset, ScrollPhase, ScrollReveal,
     SemanticRole, Size, Slider, Text, TextInput, TextInputEdit, TextInputTabBehavior,
     TextInputValidationRequest, TextInputValidationResult, TextInputValidationTrigger, TextRole,
-    Theme, Toggle, UiEvent, UiRoot, Widget,
+    Theme, ThemeRuntime, Toggle, UiEvent, UiRoot, Widget,
 };
+use serde_json::json;
 
 fn prepare(root: &mut UiRoot, size: Size) -> nkdhr_render::DisplayList {
     root.layout(size).unwrap();
@@ -634,6 +636,132 @@ fn list_items_share_selection_and_navigation_activation() {
         })
         .unwrap();
     assert_eq!(selected.semantics.label.as_deref(), Some("Item 1"));
+}
+
+fn fluid_navigation_root(
+    clock: ManualClock,
+    runtime: ThemeRuntime,
+    selection: Reactive<Option<u64>>,
+) -> UiRoot {
+    let theme = runtime.snapshot().theme();
+    let mut rows = Vec::new();
+    for identity in 100..104 {
+        rows.push(
+            Element::new(ListItem::new(
+                identity,
+                format!("Item {identity}"),
+                selection.clone(),
+                Arc::clone(&theme),
+            ))
+            .keyed(identity)
+            .child(Element::new(LabelBlock)),
+        );
+    }
+    let list = List::new(
+        "Fluid pages",
+        selection,
+        [100, 101, 102, 103],
+        Arc::clone(&theme),
+    )
+    .unwrap()
+    .panel_surface(false)
+    .square_selection_node(true)
+    .conserved_fluid_selection(true);
+    let mut root = UiRoot::with_clock(Element::new(list).children(rows), clock).unwrap();
+    root.set_theme_runtime(runtime);
+    root
+}
+
+#[test]
+fn conserved_fluid_list_stretches_distorts_and_continuously_retargets() {
+    let clock = ManualClock::default();
+    let selection = Reactive::new(Some(100_u64));
+    let mut root = fluid_navigation_root(clock.clone(), ThemeRuntime::default(), selection.clone());
+    prepare(&mut root, Size::new(56.0, 192.0));
+
+    selection.set(Some(103));
+    prepare(&mut root, Size::new(56.0, 192.0));
+    let mut stretched = false;
+    let mut distorted = false;
+    for frame in 0..10 {
+        clock.advance(Duration::from_millis(14));
+        assert!(root.tick());
+        let list = prepare(&mut root, Size::new(56.0, 192.0));
+        stretched |= list.primitives().iter().any(|primitive| {
+            matches!(
+                primitive,
+                Primitive::Shape(shape)
+                    if shape.rect.height > shape.rect.width * 1.8 && shape.rect.width < 30.0
+            )
+        });
+        distorted |= list.primitives().iter().any(|primitive| match primitive {
+            Primitive::Shape(shape) => shape.transform != nkdhr_render::Transform::IDENTITY,
+            Primitive::Texture(texture) => texture.transform != nkdhr_render::Transform::IDENTITY,
+            Primitive::BackdropBlur(blur) => blur.transform != nkdhr_render::Transform::IDENTITY,
+        });
+        if let Some(directory) = std::env::var_os("DUMP_FLUID_NAV") {
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut renderer = SoftwareRenderer::new(56, 192).unwrap();
+            renderer.clear(Color::from_srgba8(27, 31, 51, 255));
+            renderer.render(&list, &TextureStore::new(), 1.0).unwrap();
+            std::fs::write(
+                std::path::PathBuf::from(directory).join(format!("fluid-{frame:02}.ppm")),
+                renderer.ppm(),
+            )
+            .unwrap();
+        }
+        if frame == 2 {
+            selection.set(Some(101));
+            prepare(&mut root, Size::new(56.0, 192.0));
+        }
+    }
+    assert!(stretched, "the conserved mass must form a visible gel neck");
+    assert!(
+        distorted,
+        "content crossed by the live gel topology must receive visual refraction"
+    );
+
+    clock.advance(Duration::from_millis(300));
+    root.tick();
+    let settled = prepare(&mut root, Size::new(56.0, 192.0));
+    assert!(
+        settled
+            .primitives()
+            .iter()
+            .all(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform == nkdhr_render::Transform::IDENTITY,
+            })
+    );
+}
+
+#[test]
+fn reduced_motion_settles_conserved_fluid_navigation_without_spatial_frames() {
+    let runtime = ThemeRuntime::new(ThemeProfile {
+        overrides: json!({"motion": {"mode": "reduced"}}),
+        ..ThemeProfile::default()
+    })
+    .unwrap();
+    let selection = Reactive::new(Some(100_u64));
+    let mut root = fluid_navigation_root(ManualClock::default(), runtime, selection.clone());
+    prepare(&mut root, Size::new(56.0, 192.0));
+    selection.set(Some(103));
+    let changed = prepare(&mut root, Size::new(56.0, 192.0));
+    assert!(
+        changed
+            .primitives()
+            .iter()
+            .all(|primitive| match primitive {
+                Primitive::Shape(shape) => shape.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::Texture(texture) =>
+                    texture.transform == nkdhr_render::Transform::IDENTITY,
+                Primitive::BackdropBlur(blur) =>
+                    blur.transform == nkdhr_render::Transform::IDENTITY,
+            })
+    );
 }
 
 #[test]

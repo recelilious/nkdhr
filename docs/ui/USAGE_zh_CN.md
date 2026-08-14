@@ -254,6 +254,13 @@ Balanced revision 1 是已验收旧默认值的精确快照。Lively、Calm、Di
 会恢复有效资料库；两个键中任意一个缺失或损坏都只会各自回退。UI-7B 先建立非视觉边界，
 UI-7E 现已组合经所有者确认的检查器控件与跨宿主剪贴板传输，事务语义保持不变。
 
+`List::conserved_fluid_selection(true)` 是导航专用的显式接入。把实时
+`ThemeRuntime` 绑定到 root，并按需提供稳定 `fluid_selection_scope` 后，List 会从同一不可变
+主题代次解析执行曲线和流体参数。一个单位的 `SelectionMassMotion` 在快速改目标时保留
+可见质量与速度，绘制附着式胶体颈部和移动的立体核心，并对经过的子项施加有界、仅绘制层
+的折射偏移；普通 List 不受影响。Reduced/Off 会把质量立即收束到最新目标，且不产生任何
+内容空间变换帧。
+
 ## 策略动效运行时（`nkdhr-ui`，UI-7C）
 
 组件执行应使用 `ThemeSnapshot::motion_runtime`，而不是只供创作检查的
@@ -268,8 +275,8 @@ UI-7E 现已组合经所有者确认的检查器控件与跨宿主剪贴板传�
 seed；常动水面需要稳定 component seed 与绝对时间。显式为零的振荡保持静止；非零振荡
 会在 Standard/Expressive 中持续活动，并在 Reduced/Off 中被强制精确归零。
 
-本阶段只提供框架与执行行为。现有组件继续保持已验收外观，直到每个组件的视觉接入与
-数值调校逐项和所有者确认；这里没有开始组合 Settings 编辑器或流体组件造型。
+策略运行时本身仍保持无样式。视觉接入必须逐组件显式开启；Settings 左侧导航现在是首个
+接入者，其余组件在逐项确认前继续保持已验收外观。
 
 ## 无样式动画编辑器（`nkdhr-ui`，UI-7D）
 

@@ -742,6 +742,21 @@ impl SelectionMassMotion {
         self.total_mass
     }
 
+    /// Applies a policy-forced terminal state without manufacturing an
+    /// animation run. Consumers use this when reduced/off motion becomes
+    /// authoritative while a spatial transfer is already in flight.
+    pub fn settle(&mut self, target: impl Into<Arc<str>>) {
+        let target = target.into();
+        self.settled_target = Arc::clone(&target);
+        self.settled.clear();
+        self.settled.push(SelectionMassEntry {
+            id: target,
+            mass: self.total_mass,
+            velocity: 0.0,
+        });
+        self.active = None;
+    }
+
     pub fn sample(&self, now: Duration) -> SelectionMassSample {
         let mut entries = Vec::new();
         let (target, active_run) = self.sample_into(now, &mut entries);
@@ -1337,6 +1352,26 @@ mod tests {
             assert_eq!(after.velocity, 0.0);
         }
         assert!((frozen.entries.iter().map(|entry| entry.mass).sum::<f64>() - 1.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn policy_settle_removes_an_active_selection_topology_exactly() {
+        let mut selection = SelectionMassMotion::new("first", 1.0).unwrap();
+        let _ = selection.retarget(Duration::ZERO, "second", spec(Duration::from_secs(1)));
+        assert!(
+            selection
+                .sample(Duration::from_millis(300))
+                .active_run
+                .is_some()
+        );
+        selection.settle("third");
+        let settled = selection.sample(Duration::from_millis(300));
+        assert!(settled.active_run.is_none());
+        assert_eq!(settled.target.as_ref(), "third");
+        assert_eq!(settled.entries.len(), 1);
+        assert_eq!(settled.entries[0].id.as_ref(), "third");
+        assert_eq!(settled.entries[0].mass, 1.0);
+        assert_eq!(settled.entries[0].velocity, 0.0);
     }
 
     #[test]

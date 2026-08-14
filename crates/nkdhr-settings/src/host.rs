@@ -68,7 +68,8 @@ impl AppearanceSurface {
         let element = model
             .element(viewport, snapshot.theme(), &assets, capabilities)
             .map_err(AppearanceHostError::new)?;
-        let root = UiRoot::with_text(element, text).map_err(AppearanceHostError::new)?;
+        let mut root = UiRoot::with_text(element, text).map_err(AppearanceHostError::new)?;
+        root.set_theme_runtime(theme_runtime.clone());
         let host = UiHost::new(root, viewport, output_scale).map_err(AppearanceHostError::new)?;
         let composition_revision = model.composition_revision();
         Ok(Self {
@@ -424,6 +425,15 @@ mod tests {
         compositor.render(size, 1.0).unwrap();
         standalone.render(size, 1.0).unwrap();
 
+        assert_eq!(
+            compositor
+                .host
+                .root()
+                .theme_snapshot()
+                .expect("Settings host attaches its live theme runtime")
+                .generation(),
+            compositor.theme_runtime.snapshot().generation()
+        );
         assert_eq!(compositor.display_list(), standalone.display_list());
         assert_eq!(compositor.commit(), standalone.commit());
     }

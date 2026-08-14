@@ -264,6 +264,16 @@ reduced-transparency host paints the specified compensation. See the UI-3
 checkpoint in `plan/ROADMAP.md` before treating any of these APIs as milestone-
 complete.
 
+`List::conserved_fluid_selection(true)` is the opt-in navigation treatment.
+Attach a live `ThemeRuntime` to the root and optionally provide a stable
+`fluid_selection_scope`; the list resolves both execution and fluid parameters
+from that one immutable generation. Its one-unit `SelectionMassMotion` keeps
+visible mass and velocity across rapid retargets, paints an attached gel neck
+and moving volumetric core, and applies bounded paint-only offsets to crossed
+children as refraction. Ordinary lists do not change. Reduced/Off policy
+settles the mass at the newest target immediately and produces no transformed
+content frame.
+
 ## Themes (`nkdhr-ui`, UI-4)
 
 The first UI-4 foundation is implemented. `nkdhr-theme` owns the portable,
@@ -520,10 +530,9 @@ a stable event seed. Idle water requires a stable component seed and absolute
 time. An authored zero oscillation is stationary; a non-zero oscillation stays
 alive in Standard/Expressive and is forced to exact rest in Reduced/Off.
 
-This stage supplies framework and execution behavior only. Existing widgets
-still render their accepted appearance until each component's visual adoption
-and numeric tuning are reviewed with the owner; no Settings editor or fluid
-component composition is introduced here.
+The policy runtime remains style-neutral. Visual adoption is explicit per
+component; the Settings navigation is currently the first adopter, while other
+widgets retain their accepted appearance until reviewed.
 
 ## Style-neutral motion editor (`nkdhr-ui`, UI-7D)
 

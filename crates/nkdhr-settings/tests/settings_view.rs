@@ -54,10 +54,11 @@ fn settings_list(
 ) -> (UiRoot, DisplayList) {
     let mut text_resources = fixture_text_resources();
     let assets = SettingsAssets::load(text_resources.textures_mut()).unwrap();
-    let element = model
-        .element(size, Arc::new(Theme::default()), &assets, capabilities)
-        .unwrap();
+    let runtime = model.theme_runtime();
+    let theme = runtime.snapshot().theme();
+    let element = model.element(size, theme, &assets, capabilities).unwrap();
     let mut root = UiRoot::with_text(element, text_resources).unwrap();
+    root.set_theme_runtime(runtime);
     root.layout(size).unwrap();
     let mut builder = DisplayListBuilder::new();
     wallpaper(&mut builder, size);

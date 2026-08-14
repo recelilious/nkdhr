@@ -777,10 +777,11 @@ corrected exactly. Retargeting preserves the visible per-node mass/tangent and
 redirects all mass to only the newest node. Completion collapses to that node;
 cancellation freezes the current distribution with zero velocity. This is the
 runtime basis for the approved left/right split, return and fluid selection
-transfer, but UI-7C deliberately does not compose or restyle any existing
-component. Numerical visual tuning and component adoption remain owner-guided.
+transfer. UI-7C introduced it without restyling existing components; UI-7E now
+uses it for the explicitly opted-in Settings navigation while ordinary lists
+retain their accepted scalar treatment.
 
-The owner-approved future left-edge navigation consumer is explicitly not a
+The owner-approved left-edge navigation consumer is explicitly not a
 rounded selection rectangle translated between rows. It must treat selection
 as one continuously conserved fluid mass: the mass deforms around intervening
 items, locally refracts/distorts sampled content beneath it, and retargets from
@@ -790,6 +791,15 @@ stock transition. The renderer must keep backdrop sampling, geometry and the
 selection envelope separate so theme/material changes do not alter hit bounds.
 Reduced and Off policy retain the same direct navigation result while removing
 distortion, topology and procedural variation as already required above.
+`List::conserved_fluid_selection` implements that contract with a scoped
+`ListTransfer/settings.navigation/page-selection` execution. The retained
+selection state owns `SelectionMassMotion`; paint derives an attached gel neck,
+moving clay/glass core and bounded per-row refraction from its normalized
+sample. Those transforms are paint-only, so layout, hit geometry and focus do
+not move. `UiRoot` receives the same `ThemeRuntime` used to compose Settings,
+making authored component/transition curves and final accessibility policy
+authoritative at the widget boundary. A policy change in flight calls the
+runtime's explicit settle boundary instead of leaving a spatial run alive.
 
 ## UI-7D: style-neutral editor state and unified targeted input
 
@@ -908,8 +918,9 @@ discard or a successful immutable draft snapshot first. User revisions support
 search, grouped history, deletion and clipboard import/export; built-ins remain
 read-only. The same host worker serializes writes, while a Config1 signal
 watcher can confirm them before the worker reply and follows valid external
-profile/library changes without polling. The future conserved-liquid navigation
-selection remains subsequent UI-7E work.
+profile/library changes without polling. The compact and expanded left
+navigation now opt into the conserved-liquid selection described above, with
+continuous latest-target interruption and no queued clips.
 
 Clay/glass depth follows an explicit edge/content separation invariant. Outer
 directional shadow keeps describing the surface's elevation, while theme-aware

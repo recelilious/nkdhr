@@ -2123,6 +2123,12 @@ impl AppearanceSettings {
             .material_tier(MaterialTier::Ghost)
             .panel_surface(self.state.page.get() != SettingsPage::MotionEditor)
             .square_selection_node(compact)
+            .conserved_fluid_selection(true)
+            .fluid_selection_scope(MotionScopeData::transition(
+                MotionSemanticFamilyData::ListTransfer,
+                "settings.navigation",
+                "page-selection",
+            ))
             .capabilities(capabilities);
         Ok(Element::new(
             Scroll::new(

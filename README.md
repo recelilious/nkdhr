@@ -122,8 +122,11 @@ bounded transactional history, safe keyframe clipboard, normalized/real-time
 viewport, host-clock preview and unified targeted mouse/pen/touch/touchpad/
 keyboard input semantics. UI-7E now composes the owner-reviewed professional
 workspace, persistent transition editing, immutable preset browser and safe
-draft replacement flow in the real shared Settings surface. The remaining
-motion slice is the conserved-liquid navigation selection treatment.
+draft replacement flow in the real shared Settings surface. Its left
+navigation is the first policy-runtime visual adopter: one conserved selection
+mass stretches through intervening nodes, refracts their painted content and
+retargets continuously from the visible mass and tangent. Reduced/Off settle
+directly without spatial topology.
 
 ## Documentation
 
