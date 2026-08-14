@@ -901,9 +901,15 @@ At host construction, a valid active profile is read before the editor session
 is seeded, so a persisted `PanelEnter/settings.drawer/open` transition becomes
 the clean baseline instead of being replaced by the review fixture.
 Selected-keyframe numeric bindings are now live. Preset snapshot/import/export
-and recovery are complete below the presentation layer; their visible controls,
-plus the future conserved-liquid navigation selection, remain subsequent
-owner-guided UI-7E work.
+and recovery are also composed in the inspector's preset mode. Selecting a
+revision swaps only the graph/preview render source; it cannot mutate the live
+editor document. Applying a preset with a dirty draft requires an explicit
+discard or a successful immutable draft snapshot first. User revisions support
+search, grouped history, deletion and clipboard import/export; built-ins remain
+read-only. The same host worker serializes writes, while a Config1 signal
+watcher can confirm them before the worker reply and follows valid external
+profile/library changes without polling. The future conserved-liquid navigation
+selection remains subsequent UI-7E work.
 
 Clay/glass depth follows an explicit edge/content separation invariant. Outer
 directional shadow keeps describing the surface's elevation, while theme-aware

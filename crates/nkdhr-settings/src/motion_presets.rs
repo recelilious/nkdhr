@@ -191,6 +191,17 @@ impl MotionPresetLibraryEditor {
         begin_write(&mut state, candidate, "正在导入动画预设资料库")
     }
 
+    pub fn begin_remove(
+        &self,
+        id: &str,
+        revision: u32,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
+        let mut state = self.state.borrow_mut();
+        let mut candidate = candidate_library(&state);
+        candidate.remove(id, revision)?;
+        begin_write(&mut state, candidate, "正在删除动画预设修订")
+    }
+
     pub fn export_preset(
         &self,
         id: &str,
@@ -492,5 +503,21 @@ mod tests {
         assert!(!editor.complete_persistence(first.persistence().token(), Ok("stale".into())));
         assert!(editor.complete_persistence(second.persistence().token(), Ok("saved".into())));
         assert_eq!(editor.snapshot().library.presets.len(), 2);
+    }
+
+    #[test]
+    fn deletion_is_atomic_and_missing_revisions_do_not_create_writes() {
+        let editor = MotionPresetLibraryEditor::default();
+        let insert = editor.begin_insert(balanced()).unwrap();
+        assert!(editor.complete_persistence(insert.token(), Ok("saved".into())));
+
+        assert!(editor.begin_remove("balanced", 99).is_err());
+        assert!(!editor.snapshot().pending);
+        assert_eq!(editor.snapshot().library.presets.len(), 1);
+
+        let remove = editor.begin_remove("balanced", 1).unwrap();
+        assert_eq!(editor.snapshot().library.presets.len(), 1);
+        assert!(editor.complete_persistence(remove.token(), Ok("removed".into())));
+        assert!(editor.snapshot().library.presets.is_empty());
     }
 }

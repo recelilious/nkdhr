@@ -4,6 +4,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     fmt,
     rc::Rc,
     sync::Arc,
@@ -11,22 +12,26 @@ use std::{
 };
 
 use nkdhr_render::{Color, CornerRadii, Point, Rect, Shadow, Transform};
+use nkdhr_theme::ResolvedMotionValuesData;
 use nkdhr_ui::text::FontSlant;
 use nkdhr_ui::{
     Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, CompiledMotionCurve,
     Constraints, CrossAxisAlignment, CubicBezier, Element, EventCtx, Flex, Insets, Invalidation,
     Key, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, Modifiers,
     MotionCurveConsumer, MotionCurveConsumerDomain, MotionCurveConsumerSet, MotionCurveEditor,
-    MotionCurveEditorConfig, MotionCurveEditorSnapshot, MotionEditorClipboardAction,
-    MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId, MotionEditorGesturePhase,
-    MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
-    MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
-    MotionEditorTarget, MotionEditorViewportInput, MotionFluidOverridesData, MotionGraphPoint,
-    MotionGraphViewport, MotionValuesData, Padding, PaintCtx, PointerButton, Reactive, ScrollPhase,
-    SemanticRole, Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text,
-    TextInput, TextInputStatus, TextRole, Theme, ThemeReadSet, Toggle, UiError, UiEvent, Widget,
-    paint_fluid_well, resolve_fluid_material_tones, resolve_motion_curve_handles,
+    MotionCurveEditorConfig, MotionCurveEditorError, MotionCurveEditorSnapshot,
+    MotionEditorClipboardAction, MotionEditorDevice, MotionEditorDirectInput, MotionEditorEditId,
+    MotionEditorGesturePhase, MotionEditorInput, MotionEditorInputController,
+    MotionEditorInputError, MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers,
+    MotionEditorPlayback, MotionEditorTarget, MotionEditorViewportInput, MotionFluidOverridesData,
+    MotionGraphPoint, MotionGraphViewport, MotionValuesData, Padding, PaintCtx, PointerButton,
+    Reactive, Scroll, ScrollOffset, ScrollPhase, SemanticRole, Semantics, SemanticsCtx, Size,
+    Slider, SliderError, SurfaceState, Text, TextInput, TextInputStatus, TextRole, Theme,
+    ThemeReadSet, Toggle, UiError, UiEvent, Widget, paint_fluid_well, resolve_fluid_material_tones,
+    resolve_motion_curve_handles,
 };
+
+use crate::{AppearanceSettings, MotionPresetFilter, MotionPresetOrigin, SettingsViewError};
 
 const SCOPE_RAIL_HEIGHT: f32 = 88.0;
 const PREVIEW_HEIGHT: f32 = 176.0;
@@ -69,7 +74,10 @@ pub(crate) struct MotionEditorSession {
 
 struct MotionEditorSessionInner {
     editor: RefCell<MotionCurveEditor>,
-    inherited_compiled: CompiledMotionCurve,
+    inherited_compiled: RefCell<CompiledMotionCurve>,
+    inherited_fluid: Cell<MotionFluidOverridesData>,
+    preset_preview: RefCell<Option<MotionPresetPreview>>,
+    inspector_scroll: Reactive<ScrollOffset>,
     input: RefCell<MotionEditorInputController>,
     next_edit_id: Cell<u64>,
     duration_text: Reactive<String>,
@@ -77,6 +85,13 @@ struct MotionEditorSessionInner {
     fluid_overrides: Cell<MotionFluidOverridesData>,
     composition_revision: Reactive<u64>,
     visual_revision: Reactive<u64>,
+}
+
+#[derive(Clone)]
+struct MotionPresetPreview {
+    curve: nkdhr_theme::MotionCurveData,
+    duration: Duration,
+    compiled: CompiledMotionCurve,
 }
 
 impl fmt::Debug for MotionEditorSession {
@@ -149,7 +164,10 @@ impl MotionEditorSession {
         Self {
             inner: Rc::new(MotionEditorSessionInner {
                 editor: RefCell::new(editor),
-                inherited_compiled,
+                inherited_compiled: RefCell::new(inherited_compiled),
+                inherited_fluid: Cell::new(MotionFluidOverridesData::default()),
+                preset_preview: RefCell::new(None),
+                inspector_scroll: Reactive::new(ScrollOffset::ZERO),
                 input: RefCell::new(MotionEditorInputController::default()),
                 next_edit_id: Cell::new(1),
                 duration_text: Reactive::new(duration_text),
@@ -181,12 +199,114 @@ impl MotionEditorSession {
 
     fn render_state(&self) -> MotionEditorRenderState {
         let editor = self.inner.editor.borrow();
-        let snapshot = editor.snapshot();
+        let mut snapshot = editor.snapshot();
+        if let Some(preview) = self.inner.preset_preview.borrow().as_ref() {
+            snapshot.curve = preview.curve.clone();
+            snapshot.curve_source = nkdhr_ui::MotionCurveSource::Inherited;
+            snapshot.duration = preview.duration;
+            snapshot.duration_source = nkdhr_ui::MotionCurveSource::Inherited;
+            snapshot.selection.clear();
+            snapshot.primary_selection = None;
+            return MotionEditorRenderState {
+                inherited_compiled: preview.compiled.clone(),
+                snapshot,
+                compiled: preview.compiled.clone(),
+            };
+        }
         MotionEditorRenderState {
-            inherited_compiled: self.inner.inherited_compiled.clone(),
+            inherited_compiled: self.inner.inherited_compiled.borrow().clone(),
             snapshot,
             compiled: editor.compiled().clone(),
         }
+    }
+
+    pub(crate) fn preview_preset(
+        &self,
+        values: &ResolvedMotionValuesData,
+    ) -> Result<(), MotionCurveEditorError> {
+        let curve = values.curve.clone();
+        let duration = Duration::from_millis(values.duration_ms);
+        let compiled = CompiledMotionCurve::compile(&curve)?;
+        self.inner.preset_preview.replace(Some(MotionPresetPreview {
+            curve,
+            duration,
+            compiled,
+        }));
+        self.bump_visual_revision();
+        Ok(())
+    }
+
+    pub(crate) fn clear_preset_preview(&self) {
+        if self.inner.preset_preview.borrow_mut().take().is_some() {
+            self.bump_visual_revision();
+        }
+    }
+
+    pub(crate) fn preset_preview_active(&self) -> bool {
+        self.inner.preset_preview.borrow().is_some()
+    }
+
+    fn inspector_scroll(&self) -> Reactive<ScrollOffset> {
+        self.inner.inspector_scroll.clone()
+    }
+
+    /// Replace the inherited document after an explicit preset-use
+    /// confirmation. This is an intentional authoring-context boundary, so
+    /// old per-anchor history is discarded instead of being replayed against
+    /// another immutable base.
+    pub(crate) fn use_preset_base(
+        &self,
+        values: &ResolvedMotionValuesData,
+    ) -> Result<(), MotionCurveEditorError> {
+        self.replace_style_context(values, None)
+    }
+
+    pub(crate) fn replace_style_context(
+        &self,
+        inherited: &ResolvedMotionValuesData,
+        explicit: Option<&MotionValuesData>,
+    ) -> Result<(), MotionCurveEditorError> {
+        let values = inherited;
+        let curve = values.curve.clone();
+        let duration = Duration::from_millis(values.duration_ms);
+        let curve_override = explicit.and_then(|values| values.curve.clone());
+        let duration_override = explicit
+            .and_then(|values| values.duration_ms)
+            .map(Duration::from_millis);
+        let (consumers, config, looping, axis) = {
+            let editor = self.inner.editor.borrow();
+            let snapshot = editor.snapshot();
+            (
+                editor.consumers().clone(),
+                editor.config(),
+                snapshot.looping,
+                snapshot.time_axis,
+            )
+        };
+        let mut replacement = MotionCurveEditor::new(
+            curve.clone(),
+            curve_override,
+            duration,
+            duration_override,
+            consumers,
+            config,
+        )?;
+        replacement.set_looping(looping);
+        replacement.set_time_axis(axis);
+        replacement.fit_viewport();
+        self.inner.editor.replace(replacement);
+        self.inner
+            .inherited_compiled
+            .replace(CompiledMotionCurve::compile(&curve)?);
+        self.inner.inherited_fluid.set(values.fluid);
+        self.inner
+            .fluid_overrides
+            .set(explicit.map_or_else(MotionFluidOverridesData::default, |values| values.fluid));
+        self.inner.preset_preview.replace(None);
+        self.sync_duration_control();
+        self.bump_visual_revision();
+        self.bump_composition_revision();
+        Ok(())
     }
 
     fn next_edit_id(&self) -> nkdhr_ui::MotionEditorEditId {
@@ -320,14 +440,21 @@ impl MotionEditorSession {
 
     fn fluid_material(&self) -> FluidMaterialValues {
         let inherited = FluidMaterialValues::default();
+        let inherited_values = self.inner.inherited_fluid.get();
         let overrides = self.fluid_overrides();
         FluidMaterialValues {
-            viscosity: semantic_fluid_percent(overrides.viscosity, inherited.viscosity),
+            viscosity: semantic_fluid_percent(
+                overrides.viscosity,
+                semantic_fluid_percent(inherited_values.viscosity, inherited.viscosity),
+            ),
             surface_tension: semantic_fluid_percent(
                 overrides.surface_tension,
-                inherited.surface_tension,
+                semantic_fluid_percent(inherited_values.surface_tension, inherited.surface_tension),
             ),
-            attraction: semantic_fluid_percent(overrides.attraction, inherited.attraction),
+            attraction: semantic_fluid_percent(
+                overrides.attraction,
+                semantic_fluid_percent(inherited_values.attraction, inherited.attraction),
+            ),
         }
     }
 
@@ -427,10 +554,13 @@ pub(crate) fn inspector(
     capabilities: MaterialCapabilities,
     drawer: bool,
     session: MotionEditorSession,
-    save_dirty: bool,
-    save_pending: bool,
-    save_action: Rc<dyn Fn()>,
-) -> Result<Element, SliderError> {
+    model: AppearanceSettings,
+) -> Result<Element, SettingsViewError> {
+    if model.motion_preset_library_open() {
+        return preset_library_inspector(theme, capabilities, drawer, model);
+    }
+    let save_dirty = model.motion_editor_is_dirty();
+    let save_pending = model.motion_editor_save_pending();
     let snapshot = session.snapshot();
     let inherited = text(
         if save_pending {
@@ -463,6 +593,75 @@ pub(crate) fn inspector(
         &theme,
     ))
     .child(inherited);
+
+    let current_preset = model.current_motion_preset();
+    let preset_name = current_preset
+        .as_ref()
+        .map_or("自定义工作副本", |preset| preset.name.as_str());
+    let preset_revision = current_preset.as_ref().map_or_else(
+        || "未绑定预设".to_owned(),
+        |preset| format!("{} · r{}", preset.identity.id, preset.identity.revision),
+    );
+    let preset_model = model.clone();
+    let preset_entry = Element::new(
+        Button::new("打开动画预设资料库", Arc::clone(&theme))
+            .variant(ButtonVariant::Fluid)
+            .capabilities(capabilities)
+            .on_activate(move || {
+                if let Err(error) = preset_model.open_motion_preset_library() {
+                    preset_model.report_motion_preset_error("打开动画预设资料库", error);
+                }
+            }),
+    )
+    .child(
+        Element::new(Padding {
+            insets: Insets::symmetric(8.0, 2.0),
+        })
+        .child(
+            Element::new(Flex {
+                axis: Axis::Vertical,
+                gap: 2.0,
+                main_alignment: MainAxisAlignment::Start,
+                cross_alignment: CrossAxisAlignment::Stretch,
+            })
+            .child(
+                Element::new(Flex {
+                    axis: Axis::Horizontal,
+                    gap: 8.0,
+                    main_alignment: MainAxisAlignment::SpaceBetween,
+                    cross_alignment: CrossAxisAlignment::Center,
+                })
+                .child(text(
+                    "当前动画预设",
+                    TextRole::BodySmall,
+                    theme.palette.text_secondary,
+                    &theme,
+                ))
+                .child(text(
+                    if save_dirty { "已修改" } else { "已同步" },
+                    TextRole::Caption,
+                    if save_dirty {
+                        theme.palette.accent_secondary
+                    } else {
+                        theme.palette.success
+                    },
+                    &theme,
+                )),
+            )
+            .child(text(
+                preset_name,
+                TextRole::Label,
+                theme.palette.text_primary,
+                &theme,
+            ))
+            .child(italic_text(
+                preset_revision,
+                TextRole::Caption,
+                theme.palette.text_muted,
+                &theme,
+            )),
+        ),
+    );
 
     let duration_source = match snapshot.duration_source {
         nkdhr_ui::MotionCurveSource::Inherited => "ms · 继承",
@@ -594,6 +793,7 @@ pub(crate) fn inspector(
     .child(attraction);
 
     let reset_session = session.clone();
+    let save_model = model.clone();
     let actions = Element::new(Flex {
         axis: Axis::Horizontal,
         gap: 8.0,
@@ -613,9 +813,36 @@ pub(crate) fn inspector(
             .capabilities(capabilities)
             .pending(save_pending)
             .enabled(save_dirty && !save_pending)
-            .on_activate(move || save_action()),
+            .on_activate(move || save_model.queue_motion_editor_save()),
     ));
 
+    let property_content = Element::new(Flex {
+        axis: Axis::Vertical,
+        gap: 10.0,
+        main_alignment: MainAxisAlignment::Start,
+        cross_alignment: CrossAxisAlignment::Stretch,
+    })
+    .child(heading)
+    .child(preset_entry)
+    .child(divider(with_alpha(theme.palette.edge, 0.055)))
+    .child(duration)
+    .child(curve)
+    .child(divider(with_alpha(theme.palette.edge, 0.035)))
+    .child(capability_rows)
+    .child(divider(with_alpha(theme.palette.edge, 0.035)))
+    .child(fluid);
+    let property_scroll = Element::new(
+        Scroll::new(
+            "动画参数检查器",
+            Size::new(248.0, 548.0),
+            session.inspector_scroll(),
+            Arc::clone(&theme),
+        )?
+        .horizontal(false)
+        .vertical(true),
+    )
+    .child(property_content)
+    .flex(1.0);
     let content = Element::new(Padding {
         insets: Insets::all(20.0),
     })
@@ -626,14 +853,494 @@ pub(crate) fn inspector(
             main_alignment: MainAxisAlignment::Start,
             cross_alignment: CrossAxisAlignment::Stretch,
         })
-        .child(heading)
-        .child(divider(with_alpha(theme.palette.edge, 0.055)))
-        .child(duration)
-        .child(curve)
-        .child(divider(with_alpha(theme.palette.edge, 0.035)))
-        .child(capability_rows)
-        .child(divider(with_alpha(theme.palette.edge, 0.035)))
-        .child(fluid)
+        .child(property_scroll)
+        .child(actions),
+    );
+    let panel = Element::new(GelSurface::new(
+        Arc::clone(&theme),
+        if drawer {
+            MaterialTier::ContentSurface
+        } else {
+            MaterialTier::ExpandedPanel
+        },
+        capabilities,
+        if drawer {
+            theme.radii.popover
+        } else {
+            theme.radii.major
+        },
+        Insets::ZERO,
+        GelElevation::Raised,
+    ))
+    .child(content);
+    Ok(panel)
+}
+
+fn preset_library_inspector(
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    drawer: bool,
+    model: AppearanceSettings,
+) -> Result<Element, SettingsViewError> {
+    let pending = model.motion_preset_library().pending;
+    let selected = model.motion_preset_selection();
+    let visible = model.visible_motion_preset_catalog();
+    let mut groups = BTreeMap::<String, Vec<crate::MotionPresetCatalogEntry>>::new();
+    for entry in visible {
+        groups
+            .entry(entry.identity.id.clone())
+            .or_default()
+            .push(entry);
+    }
+    for revisions in groups.values_mut() {
+        revisions.sort_by_key(|entry| std::cmp::Reverse(entry.identity.revision));
+    }
+
+    let close_model = model.clone();
+    let import_response_model = model.clone();
+    let export_library_model = model.clone();
+    let header = Element::new(Flex {
+        axis: Axis::Vertical,
+        gap: 5.0,
+        main_alignment: MainAxisAlignment::Start,
+        cross_alignment: CrossAxisAlignment::Stretch,
+    })
+    .child(
+        Element::new(Flex {
+            axis: Axis::Horizontal,
+            gap: 8.0,
+            main_alignment: MainAxisAlignment::SpaceBetween,
+            cross_alignment: CrossAxisAlignment::Center,
+        })
+        .child(Element::new(
+            Button::new("返回", Arc::clone(&theme))
+                .variant(ButtonVariant::Fluid)
+                .capabilities(capabilities)
+                .on_activate(move || close_model.close_motion_preset_library()),
+        ))
+        .child(
+            Element::new(Flex {
+                axis: Axis::Vertical,
+                gap: 1.0,
+                main_alignment: MainAxisAlignment::Start,
+                cross_alignment: CrossAxisAlignment::End,
+            })
+            .child(text(
+                "动画预设",
+                TextRole::Section,
+                theme.palette.text_primary,
+                &theme,
+            ))
+            .child(italic_text(
+                "预览不会覆盖草稿",
+                TextRole::Caption,
+                theme.palette.text_muted,
+                &theme,
+            )),
+        ),
+    )
+    .child(
+        Element::new(Flex {
+            axis: Axis::Horizontal,
+            gap: 4.0,
+            main_alignment: MainAxisAlignment::End,
+            cross_alignment: CrossAxisAlignment::Center,
+        })
+        .child(Element::new(
+            Button::new("导入", Arc::clone(&theme))
+                .variant(ButtonVariant::Fluid)
+                .capabilities(capabilities)
+                .pending(pending)
+                .on_activate_with_context(move |ctx| ctx.read_clipboard_text())
+                .on_clipboard_text(move |contents| {
+                    let result = import_response_model
+                        .queue_motion_preset_import(contents)
+                        .or_else(|_| {
+                            import_response_model.queue_motion_preset_library_import(contents)
+                        });
+                    if let Err(error) = result {
+                        import_response_model.report_motion_preset_error("导入动画预设", error);
+                    }
+                }),
+        ))
+        .child(Element::new(
+            Button::new("全部导出", Arc::clone(&theme))
+                .variant(ButtonVariant::Fluid)
+                .capabilities(capabilities)
+                .on_activate_with_context(move |ctx| {
+                    match export_library_model.export_motion_preset_library() {
+                        Ok(contents) => ctx.write_clipboard_text(contents),
+                        Err(error) => export_library_model
+                            .report_motion_preset_error("导出动画预设资料库", error),
+                    }
+                }),
+        )),
+    );
+
+    let search_model = model.clone();
+    let search = Element::new(Flex {
+        axis: Axis::Vertical,
+        gap: 2.0,
+        main_alignment: MainAxisAlignment::Start,
+        cross_alignment: CrossAxisAlignment::Stretch,
+    })
+    .child(italic_text(
+        "搜索名称、ID 或修订号",
+        TextRole::Caption,
+        theme.palette.text_muted,
+        &theme,
+    ))
+    .child(Element::new(
+        TextInput::new(
+            "搜索动画预设",
+            model.motion_preset_search(),
+            Arc::clone(&theme),
+        )
+        .capabilities(capabilities)
+        .on_change(move |_| search_model.motion_preset_text_changed()),
+    ));
+    let filter = model.motion_preset_filter();
+    let filters = Element::new(Flex {
+        axis: Axis::Horizontal,
+        gap: 4.0,
+        main_alignment: MainAxisAlignment::Start,
+        cross_alignment: CrossAxisAlignment::Center,
+    })
+    .children(
+        [
+            (MotionPresetFilter::All, "全部"),
+            (MotionPresetFilter::BuiltIn, "内置"),
+            (MotionPresetFilter::User, "自定义"),
+        ]
+        .into_iter()
+        .map(|(choice, label)| {
+            let filter_model = model.clone();
+            Element::new(
+                Button::new(label, Arc::clone(&theme))
+                    .variant(if filter == choice {
+                        ButtonVariant::FluidSelected
+                    } else {
+                        ButtonVariant::Fluid
+                    })
+                    .capabilities(capabilities)
+                    .on_activate(move || filter_model.set_motion_preset_filter(choice)),
+            )
+        }),
+    );
+
+    let mut list_rows = Vec::new();
+    for (id, revisions) in groups {
+        let expanded = model.motion_preset_group_expanded(&id);
+        let count = revisions.len();
+        for (index, entry) in revisions.into_iter().enumerate() {
+            if index > 0 && !expanded {
+                continue;
+            }
+            let identity = entry.identity.clone();
+            let selected_entry = selected.as_ref() == Some(&identity);
+            let select_model = model.clone();
+            let preview = model
+                .motion_preset_preview_values(&identity)
+                .ok()
+                .and_then(|values| CompiledMotionCurve::compile(&values.curve).ok());
+            let mut row = Element::new(Flex {
+                axis: Axis::Horizontal,
+                gap: 8.0,
+                main_alignment: MainAxisAlignment::SpaceBetween,
+                cross_alignment: CrossAxisAlignment::Center,
+            })
+            .child(
+                Element::new(Flex {
+                    axis: Axis::Vertical,
+                    gap: 1.0,
+                    main_alignment: MainAxisAlignment::Start,
+                    cross_alignment: CrossAxisAlignment::Start,
+                })
+                .child(text(
+                    entry.name,
+                    TextRole::Label,
+                    theme.palette.text_primary,
+                    &theme,
+                ))
+                .child(italic_text(
+                    format!(
+                        "{} · r{}",
+                        match entry.origin {
+                            MotionPresetOrigin::BuiltIn => "内置",
+                            MotionPresetOrigin::User => "自定义",
+                            MotionPresetOrigin::Active => "当前使用",
+                        },
+                        identity.revision
+                    ),
+                    TextRole::Caption,
+                    theme.palette.text_muted,
+                    &theme,
+                ))
+                .flex(1.0),
+            );
+            if let Some(compiled) = preview {
+                row = row.child(Element::new(PresetCurveThumbnail {
+                    compiled,
+                    color: if selected_entry {
+                        theme.palette.accent_secondary
+                    } else {
+                        theme.palette.accent
+                    },
+                }));
+            }
+            list_rows.push(
+                Element::new(
+                    Button::new(
+                        format!("{} revision {}", identity.id, identity.revision),
+                        Arc::clone(&theme),
+                    )
+                    .variant(if selected_entry {
+                        ButtonVariant::FluidSelected
+                    } else {
+                        ButtonVariant::Fluid
+                    })
+                    .capabilities(capabilities)
+                    .on_activate(move || {
+                        if let Err(error) = select_model.select_motion_preset(identity.clone()) {
+                            select_model.report_motion_preset_error("预览动画预设", error);
+                        }
+                    }),
+                )
+                .child(
+                    Element::new(Padding {
+                        insets: Insets::symmetric(8.0, 3.0),
+                    })
+                    .child(row),
+                ),
+            );
+        }
+        if count > 1 {
+            let expand_model = model.clone();
+            let expand_id = id.clone();
+            list_rows.push(Element::new(
+                Button::new(
+                    if expanded {
+                        format!("收起其余 {} 个修订", count - 1)
+                    } else {
+                        format!("展开其余 {} 个修订", count - 1)
+                    },
+                    Arc::clone(&theme),
+                )
+                .variant(ButtonVariant::Quiet)
+                .capabilities(capabilities)
+                .on_activate(move || expand_model.toggle_motion_preset_group(expand_id.clone())),
+            ));
+        }
+    }
+    if list_rows.is_empty() {
+        list_rows.push(text(
+            "没有匹配的动画预设",
+            TextRole::BodySmall,
+            theme.palette.text_muted,
+            &theme,
+        ));
+    }
+    let list_height = (list_rows.len() as f32 * 52.0).max(72.0);
+    let list = Element::new(
+        Scroll::new(
+            "动画预设列表",
+            Size::new(240.0, list_height),
+            model.motion_preset_scroll(),
+            Arc::clone(&theme),
+        )?
+        .horizontal(false)
+        .vertical(true),
+    )
+    .child(
+        Element::new(Flex {
+            axis: Axis::Vertical,
+            gap: 6.0,
+            main_alignment: MainAxisAlignment::Start,
+            cross_alignment: CrossAxisAlignment::Stretch,
+        })
+        .children(list_rows),
+    )
+    .flex(1.0);
+
+    let name_change_model = model.clone();
+    let name_submit_model = model.clone();
+    let name = Element::new(
+        TextInput::new(
+            "新动画预设名称",
+            model.motion_preset_name(),
+            Arc::clone(&theme),
+        )
+        .status(model.motion_preset_name_status())
+        .capabilities(capabilities)
+        .on_change(move |_| name_change_model.motion_preset_text_changed())
+        .on_submit(move |_| {
+            if let Err(error) = name_submit_model.queue_named_motion_preset_save() {
+                name_submit_model.report_motion_preset_error("保存当前动画预设", error);
+            }
+        }),
+    );
+
+    let confirmation = model.motion_preset_replace_confirmation();
+    let actions = if confirmation {
+        let cancel_model = model.clone();
+        let preserve_model = model.clone();
+        let discard_model = model.clone();
+        Element::new(Flex {
+            axis: Axis::Vertical,
+            gap: 6.0,
+            main_alignment: MainAxisAlignment::Start,
+            cross_alignment: CrossAxisAlignment::Stretch,
+        })
+        .child(italic_text(
+            "当前草稿尚未保存。可先保存成新预设，或明确放弃后使用所选预设。",
+            TextRole::Caption,
+            theme.palette.text_secondary,
+            &theme,
+        ))
+        .child(name)
+        .child(
+            Element::new(Flex {
+                axis: Axis::Horizontal,
+                gap: 4.0,
+                main_alignment: MainAxisAlignment::SpaceBetween,
+                cross_alignment: CrossAxisAlignment::Center,
+            })
+            .child(Element::new(
+                Button::new("返回", Arc::clone(&theme))
+                    .variant(ButtonVariant::Fluid)
+                    .capabilities(capabilities)
+                    .on_activate(move || cancel_model.cancel_motion_preset_replacement()),
+            ))
+            .child(Element::new(
+                Button::new("放弃并使用", Arc::clone(&theme))
+                    .variant(ButtonVariant::Destructive)
+                    .capabilities(capabilities)
+                    .on_activate(move || {
+                        if let Err(error) =
+                            discard_model.confirm_replace_with_selected_motion_preset()
+                        {
+                            discard_model.report_motion_preset_error("使用动画预设", error);
+                        }
+                    }),
+            )),
+        )
+        .child(Element::new(
+            Button::new("保存草稿后使用", Arc::clone(&theme))
+                .variant(ButtonVariant::FluidSelected)
+                .capabilities(capabilities)
+                .pending(pending)
+                .on_activate(move || {
+                    if let Err(error) =
+                        preserve_model.queue_motion_draft_before_preset_replacement()
+                    {
+                        preserve_model.report_motion_preset_error("保存当前动画草稿", error);
+                    }
+                }),
+        ))
+    } else {
+        let use_model = model.clone();
+        let save_model = model.clone();
+        let export_model = model.clone();
+        let delete_model = model.clone();
+        let selected_identity = selected.clone();
+        let selected_origin = selected.as_ref().and_then(|identity| {
+            model
+                .motion_preset_catalog()
+                .into_iter()
+                .find(|entry| entry.identity == *identity)
+                .map(|entry| entry.origin)
+        });
+        Element::new(Flex {
+            axis: Axis::Vertical,
+            gap: 6.0,
+            main_alignment: MainAxisAlignment::Start,
+            cross_alignment: CrossAxisAlignment::Stretch,
+        })
+        .child(italic_text(
+            "保存当前编辑为预设",
+            TextRole::Caption,
+            theme.palette.text_muted,
+            &theme,
+        ))
+        .child(name)
+        .child(Element::new(
+            Button::new("保存当前", Arc::clone(&theme))
+                .variant(ButtonVariant::Fluid)
+                .capabilities(capabilities)
+                .pending(pending)
+                .on_activate(move || {
+                    if let Err(error) = save_model.queue_named_motion_preset_save() {
+                        save_model.report_motion_preset_error("保存当前动画预设", error);
+                    }
+                }),
+        ))
+        .child(
+            Element::new(Flex {
+                axis: Axis::Horizontal,
+                gap: 4.0,
+                main_alignment: MainAxisAlignment::SpaceBetween,
+                cross_alignment: CrossAxisAlignment::Center,
+            })
+            .child(Element::new(
+                Button::new("导出所选", Arc::clone(&theme))
+                    .variant(ButtonVariant::Fluid)
+                    .capabilities(capabilities)
+                    .enabled(selected_identity.is_some())
+                    .on_activate_with_context(move |ctx| {
+                        let Some(identity) = &selected_identity else {
+                            return;
+                        };
+                        match export_model.export_motion_preset(&identity.id, identity.revision) {
+                            Ok(contents) => ctx.write_clipboard_text(contents),
+                            Err(error) => {
+                                export_model.report_motion_preset_error("导出所选动画预设", error)
+                            }
+                        }
+                    }),
+            ))
+            .child(Element::new(
+                Button::new("删除", Arc::clone(&theme))
+                    .variant(ButtonVariant::Destructive)
+                    .capabilities(capabilities)
+                    .pending(pending)
+                    .enabled(selected_origin == Some(MotionPresetOrigin::User))
+                    .on_activate(move || {
+                        let Some(identity) = delete_model.motion_preset_selection() else {
+                            return;
+                        };
+                        if let Err(error) = delete_model.queue_remove_motion_preset(&identity) {
+                            delete_model.report_motion_preset_error("删除动画预设", error);
+                        }
+                    }),
+            ))
+            .child(Element::new(
+                Button::new("使用所选", Arc::clone(&theme))
+                    .variant(ButtonVariant::FluidSelected)
+                    .capabilities(capabilities)
+                    .enabled(selected.is_some())
+                    .on_activate(move || {
+                        if let Err(error) = use_model.request_use_selected_motion_preset() {
+                            use_model.report_motion_preset_error("使用动画预设", error);
+                        }
+                    }),
+            )),
+        )
+    };
+
+    let content = Element::new(Padding {
+        insets: Insets::all(16.0),
+    })
+    .child(
+        Element::new(Flex {
+            axis: Axis::Vertical,
+            gap: 8.0,
+            main_alignment: MainAxisAlignment::Start,
+            cross_alignment: CrossAxisAlignment::Stretch,
+        })
+        .child(header)
+        .child(search)
+        .child(filters)
+        .child(list)
         .child(actions),
     );
     let panel = Element::new(GelSurface::new(
@@ -1737,6 +2444,9 @@ impl Widget for MotionCurvePlot {
     }
 
     fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> Result<(), UiError> {
+        if self.session.preset_preview_active() {
+            return Ok(());
+        }
         let frame = ctx.rect().inset(6.0);
         let plot = frame.inset(GRAPH_CONTENT_INSET);
         let render = self.session.render_state();
@@ -2399,6 +3109,40 @@ impl Widget for PreviewStage {
         Semantics {
             role: SemanticRole::Group,
             label: Some("真实设置面板动画预览".to_owned()),
+            ..Semantics::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PresetCurveThumbnail {
+    compiled: CompiledMotionCurve,
+    color: Color,
+}
+
+impl Widget for PresetCurveThumbnail {
+    fn measure(
+        &self,
+        _ctx: &mut MeasureCtx<'_>,
+        constraints: Constraints,
+    ) -> Result<Size, UiError> {
+        Ok(constraints.constrain(Size::new(58.0, 30.0)))
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx<'_>) -> Result<(), UiError> {
+        draw_curve(
+            ctx,
+            ctx.rect().inset(4.0),
+            &self.compiled,
+            MotionGraphViewport::default(),
+            CurveStroke::new(self.color, 1.6),
+        )
+    }
+
+    fn semantics(&self, _ctx: &mut SemanticsCtx<'_>) -> Semantics {
+        Semantics {
+            role: SemanticRole::Generic,
+            label: Some("动画曲线缩略图".to_owned()),
             ..Semantics::default()
         }
     }

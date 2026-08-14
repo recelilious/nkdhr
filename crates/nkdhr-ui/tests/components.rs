@@ -136,6 +136,51 @@ fn button_activates_on_valid_release_and_keyboard_but_not_outside_release() {
 }
 
 #[test]
+fn button_context_activation_supports_targeted_clipboard_round_trips() {
+    let received = Rc::new(RefCell::new(None));
+    let received_text = Rc::clone(&received);
+    let mut root = UiRoot::with_text(
+        Element::new(
+            Button::new("Import", Arc::new(Theme::default()))
+                .on_activate_with_context(|ctx| ctx.read_clipboard_text())
+                .on_clipboard_text(move |text| {
+                    received_text.replace(Some(text.to_owned()));
+                }),
+        ),
+        fixture_text_resources(),
+    )
+    .unwrap();
+    prepare(&mut root, Size::new(120.0, 44.0));
+
+    let result = root
+        .dispatch(&UiEvent::PointerDown {
+            position: Point::new(20.0, 20.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    assert!(result.clipboard.is_empty());
+    let result = root
+        .dispatch(&UiEvent::PointerUp {
+            position: Point::new(20.0, 20.0),
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        })
+        .unwrap();
+    let [ClipboardRequest::ReadText { target }] = result.clipboard.as_slice() else {
+        panic!("button activation should request one targeted clipboard read")
+    };
+    root.dispatch(&UiEvent::ClipboardText {
+        target: *target,
+        text: "portable preset".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(received.borrow().as_deref(), Some("portable preset"));
+}
+
+#[test]
 fn text_rendering_components_reject_a_root_without_text_resources() {
     let mut root = UiRoot::new(Element::new(Button::new(
         "Apply",

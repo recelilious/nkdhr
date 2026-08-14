@@ -11,6 +11,9 @@ use crate::{
 
 use super::surface::{SurfaceState, paint_fluid_surface, paint_surface, surface_theme_reads};
 
+type ContextActivation = dyn for<'a> Fn(&mut EventCtx<'a>);
+type ClipboardTextHandler = dyn Fn(&str);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ButtonVariant {
     Primary,
@@ -31,6 +34,8 @@ pub struct Button {
     enabled: bool,
     pending: bool,
     on_activate: Option<Rc<dyn Fn()>>,
+    on_activate_with_context: Option<Rc<ContextActivation>>,
+    on_clipboard_text: Option<Rc<ClipboardTextHandler>>,
 }
 
 impl Button {
@@ -43,6 +48,8 @@ impl Button {
             enabled: true,
             pending: false,
             on_activate: None,
+            on_activate_with_context: None,
+            on_clipboard_text: None,
         }
     }
 
@@ -71,15 +78,31 @@ impl Button {
         self
     }
 
+    pub fn on_activate_with_context(
+        mut self,
+        callback: impl for<'a> Fn(&mut EventCtx<'a>) + 'static,
+    ) -> Self {
+        self.on_activate_with_context = Some(Rc::new(callback));
+        self
+    }
+
+    pub fn on_clipboard_text(mut self, callback: impl Fn(&str) + 'static) -> Self {
+        self.on_clipboard_text = Some(Rc::new(callback));
+        self
+    }
+
     fn interactive(&self) -> bool {
         self.enabled && !self.pending
     }
 
-    fn activate(&self) {
-        if self.interactive()
-            && let Some(callback) = &self.on_activate
-        {
-            callback();
+    fn activate(&self, ctx: &mut EventCtx<'_>) {
+        if self.interactive() {
+            if let Some(callback) = &self.on_activate {
+                callback();
+            }
+            if let Some(callback) = &self.on_activate_with_context {
+                callback(ctx);
+            }
         }
     }
 }
@@ -429,7 +452,7 @@ impl Widget for Button {
                     }
                 };
                 if activate {
-                    self.activate();
+                    self.activate(ctx);
                 }
                 ctx.release_pointer();
                 ctx.set_handled();
@@ -473,7 +496,7 @@ impl Widget for Button {
                     activate
                 };
                 if activate {
-                    self.activate();
+                    self.activate(ctx);
                 }
                 ctx.set_handled();
                 ctx.invalidate(Invalidation::PAINT);
@@ -484,8 +507,14 @@ impl Widget for Button {
                 repeat: false,
                 ..
             } if self.interactive() => {
-                self.activate();
+                self.activate(ctx);
                 ctx.set_handled();
+            }
+            UiEvent::ClipboardText { text, .. } if self.interactive() => {
+                if let Some(callback) = &self.on_clipboard_text {
+                    callback(text);
+                    ctx.set_handled();
+                }
             }
             _ => {}
         }

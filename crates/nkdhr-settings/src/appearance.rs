@@ -16,16 +16,19 @@ use std::{
 
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
 use nkdhr_theme::{
-    BuiltInTheme, MotionSemanticFamilyData, MotionStyleProfileData, MotionValuesData, PaletteData,
-    ThemeBase, ThemeProfile, ThemeProfileError,
+    BALANCED_MOTION_STYLE_REVISION, BuiltInMotionStyle, BuiltInTheme, MotionScopeData,
+    MotionSemanticFamilyData, MotionStyleBaseData, MotionStyleError, MotionStylePresetData,
+    MotionStyleProfileData, MotionValuesData, PaletteData, ResolvedMotionValuesData, ThemeBase,
+    ThemeProfile, ThemeProfileError,
 };
 use nkdhr_ui::{
     Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, Constraints,
     CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
-    ListItem, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx, MotionFamily,
-    Padding, PaintCtx, Reactive, ScalarMotion, Scroll, ScrollOffset, SemanticRole, Semantics,
-    SemanticsCtx, Size, Slider, Text, TextInput, TextInputStatus, TextRole, Theme, ThemeReadSet,
-    ThemeRuntime, Toggle, UiError, UpdateCtx, Widget,
+    ListItem, MainAxisAlignment, MaterialCapabilities, MaterialTier, MeasureCtx,
+    MotionCurveEditorError, MotionFamily, Padding, PaintCtx, Reactive, ScalarMotion, Scroll,
+    ScrollOffset, SemanticRole, Semantics, SemanticsCtx, Size, Slider, Text, TextInput,
+    TextInputStatus, TextRole, Theme, ThemeReadSet, ThemeRuntime, Toggle, UiError, UpdateCtx,
+    Widget,
 };
 
 use crate::{
@@ -427,7 +430,83 @@ enum UndoAction {
 #[derive(Debug, Clone, PartialEq)]
 struct PendingMotionEditorSave {
     token: ThemePersistenceToken,
-    values: MotionValuesData,
+    style: MotionStyleProfileData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionPresetIdentity {
+    pub id: String,
+    pub revision: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionPresetOrigin {
+    BuiltIn,
+    User,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionPresetFilter {
+    All,
+    BuiltIn,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionPresetCatalogEntry {
+    pub identity: MotionPresetIdentity,
+    pub name: String,
+    pub origin: MotionPresetOrigin,
+}
+
+#[derive(Debug)]
+pub enum MotionPresetInteractionError {
+    Preset(MotionPresetEditorError),
+    Style(MotionStyleError),
+    Editor(MotionCurveEditorError),
+    Missing(MotionPresetIdentity),
+    BuiltInReadOnly,
+    ActiveSnapshotNotStored,
+}
+
+impl fmt::Display for MotionPresetInteractionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preset(error) => error.fmt(formatter),
+            Self::Style(error) => error.fmt(formatter),
+            Self::Editor(error) => error.fmt(formatter),
+            Self::Missing(identity) => write!(
+                formatter,
+                "missing motion preset {} revision {}",
+                identity.id, identity.revision
+            ),
+            Self::BuiltInReadOnly => formatter.write_str("built-in motion presets are read-only"),
+            Self::ActiveSnapshotNotStored => {
+                formatter.write_str("the active embedded preset is not stored in the user library")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MotionPresetInteractionError {}
+
+impl From<MotionPresetEditorError> for MotionPresetInteractionError {
+    fn from(value: MotionPresetEditorError) -> Self {
+        Self::Preset(value)
+    }
+}
+
+impl From<MotionStyleError> for MotionPresetInteractionError {
+    fn from(value: MotionStyleError) -> Self {
+        Self::Style(value)
+    }
+}
+
+impl From<MotionCurveEditorError> for MotionPresetInteractionError {
+    fn from(value: MotionCurveEditorError) -> Self {
+        Self::Editor(value)
+    }
 }
 
 struct AppearanceState {
@@ -456,10 +535,22 @@ struct AppearanceState {
     mobile_navigation_open: Reactive<bool>,
     composition_revision: Reactive<u64>,
     motion_editor: crate::motion_editor_view::MotionEditorSession,
-    motion_editor_saved: RefCell<Option<MotionValuesData>>,
+    motion_editor_style: RefCell<MotionStyleProfileData>,
+    motion_editor_saved_style: RefCell<MotionStyleProfileData>,
     motion_editor_pending: RefCell<Option<PendingMotionEditorSave>>,
     motion_editor_persistence_outbox: RefCell<Option<ThemePersistenceRequest>>,
     motion_preset_persistence_outbox: RefCell<Option<MotionPresetPersistenceRequest>>,
+    motion_preset_library_open: Reactive<bool>,
+    motion_preset_selection: RefCell<Option<MotionPresetIdentity>>,
+    motion_preset_replace_confirmation: Reactive<bool>,
+    motion_preset_filter: Reactive<MotionPresetFilter>,
+    motion_preset_search: Reactive<String>,
+    motion_preset_name: Reactive<String>,
+    motion_preset_name_status: Reactive<TextInputStatus>,
+    motion_preset_scroll: Reactive<ScrollOffset>,
+    motion_preset_replacement_save:
+        RefCell<Option<(MotionPresetPersistenceToken, MotionPresetIdentity)>>,
+    motion_preset_expanded_groups: RefCell<std::collections::BTreeSet<String>>,
     next_apply_generation: Cell<u64>,
     pending_apply: RefCell<BTreeMap<AppearanceSetting, SettingsApplyToken>>,
     undo: RefCell<Option<UndoAction>>,
@@ -494,12 +585,21 @@ impl AppearanceSettings {
         motion_presets: MotionPresetLibraryEditor,
     ) -> Self {
         let scheme = scheme_for_profile(&theme_profiles.snapshot().committed_profile);
+        let motion_editor_style = active_motion_editor_style(&theme_profiles);
         let saved_motion_editor = persisted_motion_editor_values(&theme_profiles);
         let composition_revision = Reactive::new(1);
         let motion_editor = crate::motion_editor_view::MotionEditorSession::new(
             composition_revision.clone(),
             saved_motion_editor.clone(),
         );
+        if (saved_motion_editor.is_some()
+            || motion_editor_style != MotionStyleProfileData::default())
+            && let Ok((inherited, explicit)) = motion_editor_context(&motion_editor_style)
+        {
+            motion_editor
+                .replace_style_context(&inherited, explicit.as_ref())
+                .expect("the already-resolved active motion style is editor-compatible");
+        }
         Self {
             state: Rc::new(AppearanceState {
                 theme_profiles,
@@ -527,10 +627,21 @@ impl AppearanceSettings {
                 mobile_navigation_open: Reactive::new(false),
                 composition_revision,
                 motion_editor,
-                motion_editor_saved: RefCell::new(saved_motion_editor),
+                motion_editor_style: RefCell::new(motion_editor_style.clone()),
+                motion_editor_saved_style: RefCell::new(motion_editor_style),
                 motion_editor_pending: RefCell::new(None),
                 motion_editor_persistence_outbox: RefCell::new(None),
                 motion_preset_persistence_outbox: RefCell::new(None),
+                motion_preset_library_open: Reactive::new(false),
+                motion_preset_selection: RefCell::new(None),
+                motion_preset_replace_confirmation: Reactive::new(false),
+                motion_preset_filter: Reactive::new(MotionPresetFilter::All),
+                motion_preset_search: Reactive::new(String::new()),
+                motion_preset_name: Reactive::new(String::new()),
+                motion_preset_name_status: Reactive::new(TextInputStatus::Idle),
+                motion_preset_scroll: Reactive::new(ScrollOffset::ZERO),
+                motion_preset_replacement_save: RefCell::new(None),
+                motion_preset_expanded_groups: RefCell::new(Default::default()),
                 next_apply_generation: Cell::new(1),
                 pending_apply: RefCell::new(BTreeMap::new()),
                 undo: RefCell::new(None),
@@ -559,6 +670,347 @@ impl AppearanceSettings {
         self.state.motion_presets.clone()
     }
 
+    pub fn motion_preset_catalog(&self) -> Vec<MotionPresetCatalogEntry> {
+        let balanced = MotionStylePresetData::built_in(
+            BuiltInMotionStyle::Balanced,
+            BALANCED_MOTION_STYLE_REVISION,
+        )
+        .expect("the pinned Balanced motion preset is always available");
+        let mut entries = vec![MotionPresetCatalogEntry {
+            identity: MotionPresetIdentity {
+                id: balanced.id.clone(),
+                revision: balanced.revision,
+            },
+            name: balanced.name,
+            origin: MotionPresetOrigin::BuiltIn,
+        }];
+        let library = self.state.motion_presets.snapshot().library;
+        for preset in library.presets {
+            let identity = MotionPresetIdentity {
+                id: preset.id,
+                revision: preset.revision,
+            };
+            if !entries.iter().any(|entry| entry.identity == identity) {
+                entries.push(MotionPresetCatalogEntry {
+                    identity,
+                    name: preset.name,
+                    origin: MotionPresetOrigin::User,
+                });
+            }
+        }
+        if let MotionStyleBaseData::Embedded { preset } =
+            &self.state.motion_editor_style.borrow().base
+        {
+            let identity = MotionPresetIdentity {
+                id: preset.id.clone(),
+                revision: preset.revision,
+            };
+            if !entries.iter().any(|entry| entry.identity == identity) {
+                entries.push(MotionPresetCatalogEntry {
+                    identity,
+                    name: preset.name.clone(),
+                    origin: MotionPresetOrigin::Active,
+                });
+            }
+        }
+        entries.sort_by(|left, right| {
+            let left_origin = !matches!(left.origin, MotionPresetOrigin::BuiltIn);
+            let right_origin = !matches!(right.origin, MotionPresetOrigin::BuiltIn);
+            left_origin
+                .cmp(&right_origin)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| right.identity.revision.cmp(&left.identity.revision))
+        });
+        entries
+    }
+
+    pub fn motion_preset_library_open(&self) -> bool {
+        self.state.motion_preset_library_open.get()
+    }
+
+    pub fn motion_preset_filter(&self) -> MotionPresetFilter {
+        self.state.motion_preset_filter.get()
+    }
+
+    pub fn set_motion_preset_filter(&self, filter: MotionPresetFilter) {
+        if self.state.motion_preset_filter.set_if_changed(filter) {
+            self.request_reconcile();
+        }
+    }
+
+    pub fn motion_preset_search(&self) -> Reactive<String> {
+        self.state.motion_preset_search.clone()
+    }
+
+    pub fn motion_preset_name(&self) -> Reactive<String> {
+        self.state.motion_preset_name.clone()
+    }
+
+    pub fn motion_preset_name_status(&self) -> Reactive<TextInputStatus> {
+        self.state.motion_preset_name_status.clone()
+    }
+
+    pub fn motion_preset_scroll(&self) -> Reactive<ScrollOffset> {
+        self.state.motion_preset_scroll.clone()
+    }
+
+    pub fn visible_motion_preset_catalog(&self) -> Vec<MotionPresetCatalogEntry> {
+        let query = self.state.motion_preset_search.get().trim().to_lowercase();
+        let filter = self.motion_preset_filter();
+        self.motion_preset_catalog()
+            .into_iter()
+            .filter(|entry| match filter {
+                MotionPresetFilter::All => true,
+                MotionPresetFilter::BuiltIn => entry.origin == MotionPresetOrigin::BuiltIn,
+                MotionPresetFilter::User => entry.origin != MotionPresetOrigin::BuiltIn,
+            })
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.name.to_lowercase().contains(&query)
+                    || entry.identity.id.to_lowercase().contains(&query)
+                    || format!("r{}", entry.identity.revision).contains(&query)
+            })
+            .collect()
+    }
+
+    pub fn motion_preset_selection(&self) -> Option<MotionPresetIdentity> {
+        self.state.motion_preset_selection.borrow().clone()
+    }
+
+    pub fn current_motion_preset(&self) -> Option<MotionPresetCatalogEntry> {
+        let identity = self.current_motion_preset_identity()?;
+        self.motion_preset_catalog()
+            .into_iter()
+            .find(|entry| entry.identity == identity)
+    }
+
+    pub fn motion_preset_replace_confirmation(&self) -> bool {
+        self.state.motion_preset_replace_confirmation.get()
+    }
+
+    pub fn motion_preset_group_expanded(&self, id: &str) -> bool {
+        self.state
+            .motion_preset_expanded_groups
+            .borrow()
+            .contains(id)
+    }
+
+    pub fn toggle_motion_preset_group(&self, id: impl Into<String>) {
+        let id = id.into();
+        let mut expanded = self.state.motion_preset_expanded_groups.borrow_mut();
+        if !expanded.insert(id.clone()) {
+            expanded.remove(&id);
+        }
+        drop(expanded);
+        self.request_reconcile();
+    }
+
+    pub(crate) fn motion_preset_text_changed(&self) {
+        self.state
+            .motion_preset_name_status
+            .set(TextInputStatus::Idle);
+        self.request_reconcile();
+    }
+
+    pub(crate) fn report_motion_preset_error(&self, action: &str, error: impl fmt::Display) {
+        self.state.feedback.set(SettingsFeedbackKind::Error);
+        self.state
+            .feedback_setting
+            .set(Some(AppearanceSetting::Motion));
+        self.state.status.set(format!("{action}失败：{error}"));
+        self.request_reconcile();
+    }
+
+    pub fn open_motion_preset_library(&self) -> Result<(), MotionPresetInteractionError> {
+        let identity = self
+            .current_motion_preset_identity()
+            .filter(|identity| {
+                self.motion_preset_catalog()
+                    .iter()
+                    .any(|entry| &entry.identity == identity)
+            })
+            .or_else(|| {
+                self.motion_preset_catalog()
+                    .first()
+                    .map(|entry| entry.identity.clone())
+            })
+            .ok_or_else(|| {
+                MotionPresetInteractionError::Missing(MotionPresetIdentity {
+                    id: "balanced".to_owned(),
+                    revision: BALANCED_MOTION_STYLE_REVISION,
+                })
+            })?;
+        self.state.motion_preset_library_open.set(true);
+        self.state.motion_preset_replace_confirmation.set(false);
+        self.select_motion_preset(identity)
+    }
+
+    pub fn close_motion_preset_library(&self) {
+        self.state.motion_editor.clear_preset_preview();
+        self.state.motion_preset_library_open.set(false);
+        self.state.motion_preset_replace_confirmation.set(false);
+        self.state.motion_preset_selection.replace(None);
+        self.state.status.set("已返回动画参数检查器".to_owned());
+        self.request_reconcile();
+    }
+
+    pub fn select_motion_preset(
+        &self,
+        identity: MotionPresetIdentity,
+    ) -> Result<(), MotionPresetInteractionError> {
+        let (_, values) = self.motion_preset_profile_and_values(&identity)?;
+        self.state.motion_editor.preview_preset(&values)?;
+        self.state.motion_preset_selection.replace(Some(identity));
+        self.state.motion_preset_library_open.set(true);
+        self.state.motion_preset_replace_confirmation.set(false);
+        self.state
+            .status
+            .set("正在预览动画预设；当前草稿保持不变".to_owned());
+        self.request_reconcile();
+        Ok(())
+    }
+
+    /// Returns `true` when the selected preset was applied immediately. A
+    /// dirty draft instead opens the explicit replacement confirmation.
+    pub fn request_use_selected_motion_preset(&self) -> Result<bool, MotionPresetInteractionError> {
+        if self.motion_editor_is_dirty() {
+            self.state.motion_preset_replace_confirmation.set(true);
+            self.state
+                .status
+                .set("当前动画仍有未保存修改；请先保存为预设或明确放弃修改".to_owned());
+            self.request_reconcile();
+            return Ok(false);
+        }
+        self.apply_selected_motion_preset()?;
+        Ok(true)
+    }
+
+    pub fn confirm_replace_with_selected_motion_preset(
+        &self,
+    ) -> Result<(), MotionPresetInteractionError> {
+        self.apply_selected_motion_preset()
+    }
+
+    pub fn cancel_motion_preset_replacement(&self) {
+        self.state.motion_preset_replace_confirmation.set(false);
+        self.state.status.set("当前动画草稿保持不变".to_owned());
+        self.request_reconcile();
+    }
+
+    fn apply_selected_motion_preset(&self) -> Result<(), MotionPresetInteractionError> {
+        let identity = self.motion_preset_selection().ok_or_else(|| {
+            MotionPresetInteractionError::Missing(MotionPresetIdentity {
+                id: "".to_owned(),
+                revision: 0,
+            })
+        })?;
+        let (profile, values) = self.motion_preset_profile_and_values(&identity)?;
+        self.state.motion_editor.use_preset_base(&values)?;
+        self.state.motion_editor_style.replace(profile);
+        self.state.motion_preset_library_open.set(false);
+        self.state.motion_preset_replace_confirmation.set(false);
+        self.state.motion_preset_selection.replace(None);
+        self.state.status.set(format!(
+            "已加载动画预设 {} r{}；尚未保存到活动主题",
+            identity.id, identity.revision
+        ));
+        self.state.feedback.set(SettingsFeedbackKind::Informational);
+        self.state
+            .feedback_setting
+            .set(Some(AppearanceSetting::Motion));
+        self.request_reconcile();
+        Ok(())
+    }
+
+    fn current_motion_preset_identity(&self) -> Option<MotionPresetIdentity> {
+        match &self.state.motion_editor_style.borrow().base {
+            MotionStyleBaseData::BuiltIn { style, revision } => Some(MotionPresetIdentity {
+                id: built_in_motion_style_id(*style).to_owned(),
+                revision: *revision,
+            }),
+            MotionStyleBaseData::Embedded { preset } => Some(MotionPresetIdentity {
+                id: preset.id.clone(),
+                revision: preset.revision,
+            }),
+        }
+    }
+
+    fn motion_preset_profile_and_values(
+        &self,
+        identity: &MotionPresetIdentity,
+    ) -> Result<(MotionStyleProfileData, ResolvedMotionValuesData), MotionPresetInteractionError>
+    {
+        let preset = self.motion_preset_data(identity)?;
+        let profile = if identity.id == built_in_motion_style_id(BuiltInMotionStyle::Balanced)
+            && identity.revision == BALANCED_MOTION_STYLE_REVISION
+        {
+            MotionStyleProfileData {
+                schema_version: nkdhr_theme::MOTION_STYLE_SCHEMA_VERSION,
+                id: preset.id.clone(),
+                name: preset.name.clone(),
+                base: MotionStyleBaseData::BuiltIn {
+                    style: BuiltInMotionStyle::Balanced,
+                    revision: BALANCED_MOTION_STYLE_REVISION,
+                },
+                overrides: Default::default(),
+            }
+        } else {
+            MotionStyleProfileData::from_embedded_preset(
+                preset.id.clone(),
+                preset.name.clone(),
+                preset,
+            )?
+        };
+        let values = profile
+            .resolve()?
+            .resolve_scope(&MotionScopeData::transition(
+                MotionSemanticFamilyData::PanelEnter,
+                "settings.drawer",
+                "open",
+            ))?;
+        Ok((profile, values))
+    }
+
+    pub fn motion_preset_preview_values(
+        &self,
+        identity: &MotionPresetIdentity,
+    ) -> Result<ResolvedMotionValuesData, MotionPresetInteractionError> {
+        self.motion_preset_profile_and_values(identity)
+            .map(|(_, values)| values)
+    }
+
+    fn motion_preset_data(
+        &self,
+        identity: &MotionPresetIdentity,
+    ) -> Result<MotionStylePresetData, MotionPresetInteractionError> {
+        if identity.id == built_in_motion_style_id(BuiltInMotionStyle::Balanced)
+            && identity.revision == BALANCED_MOTION_STYLE_REVISION
+        {
+            return Ok(MotionStylePresetData::built_in(
+                BuiltInMotionStyle::Balanced,
+                BALANCED_MOTION_STYLE_REVISION,
+            )?);
+        }
+        if let Some(preset) = self
+            .state
+            .motion_presets
+            .snapshot()
+            .library
+            .get(&identity.id, identity.revision)
+            .cloned()
+        {
+            return Ok(preset);
+        }
+        if let MotionStyleBaseData::Embedded { preset } =
+            &self.state.motion_editor_style.borrow().base
+            && preset.id == identity.id
+            && preset.revision == identity.revision
+        {
+            return Ok(preset.as_ref().clone());
+        }
+        Err(MotionPresetInteractionError::Missing(identity.clone()))
+    }
+
     /// Freeze the currently previewed motion document, including unsaved
     /// professional-editor values, into the next immutable preset revision.
     pub fn begin_save_motion_preset(
@@ -566,18 +1018,7 @@ impl AppearanceSettings {
         id: impl Into<String>,
         name: impl Into<String>,
     ) -> Result<MotionPresetSnapshotRequest, MotionPresetEditorError> {
-        let mut style = self
-            .state
-            .theme_profiles
-            .runtime()
-            .snapshot()
-            .resolved()
-            .data
-            .motion
-            .style
-            .clone()
-            .unwrap_or_default();
-        apply_motion_editor_values(&mut style, self.state.motion_editor.authored_values());
+        let style = self.current_motion_editor_style();
         self.state.motion_presets.begin_snapshot(&style, id, name)
     }
 
@@ -593,6 +1034,66 @@ impl AppearanceSettings {
         self.state
             .motion_preset_persistence_outbox
             .replace(Some(request.persistence().clone()));
+        self.state.status.set(format!(
+            "正在保存动画预设 {} r{}",
+            request.preset_id(),
+            request.revision()
+        ));
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.state
+            .feedback_setting
+            .set(Some(AppearanceSetting::Motion));
+        self.request_reconcile();
+        Ok(request)
+    }
+
+    pub fn queue_motion_draft_before_preset_replacement(
+        &self,
+    ) -> Result<MotionPresetSnapshotRequest, MotionPresetInteractionError> {
+        let name = self.state.motion_preset_name.get().trim().to_owned();
+        if name.is_empty() {
+            self.state
+                .motion_preset_name_status
+                .set(TextInputStatus::Invalid("请先输入预设名称".to_owned()));
+            self.request_reconcile();
+            return Err(MotionPresetInteractionError::Style(
+                MotionStyleError::InvalidMetadata("name"),
+            ));
+        }
+        let id = motion_preset_id_from_name(&name);
+        let selected = self.motion_preset_selection().ok_or_else(|| {
+            MotionPresetInteractionError::Missing(MotionPresetIdentity {
+                id: "".to_owned(),
+                revision: 0,
+            })
+        })?;
+        let request = self.queue_motion_preset_save(id, name)?;
+        self.state
+            .motion_preset_replacement_save
+            .replace(Some((request.persistence().token(), selected)));
+        self.state
+            .motion_preset_name_status
+            .set(TextInputStatus::Valid);
+        Ok(request)
+    }
+
+    pub fn queue_named_motion_preset_save(
+        &self,
+    ) -> Result<MotionPresetSnapshotRequest, MotionPresetInteractionError> {
+        let name = self.state.motion_preset_name.get().trim().to_owned();
+        if name.is_empty() {
+            self.state
+                .motion_preset_name_status
+                .set(TextInputStatus::Invalid("请先输入预设名称".to_owned()));
+            self.request_reconcile();
+            return Err(MotionPresetInteractionError::Style(
+                MotionStyleError::InvalidMetadata("name"),
+            ));
+        }
+        let request = self.queue_motion_preset_save(motion_preset_id_from_name(&name), name)?;
+        self.state
+            .motion_preset_name_status
+            .set(TextInputStatus::Valid);
         Ok(request)
     }
 
@@ -611,6 +1112,9 @@ impl AppearanceSettings {
         self.state
             .motion_preset_persistence_outbox
             .replace(Some(request.clone()));
+        self.state.status.set("正在导入动画预设".to_owned());
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.request_reconcile();
         Ok(request)
     }
 
@@ -629,6 +1133,40 @@ impl AppearanceSettings {
         self.state
             .motion_preset_persistence_outbox
             .replace(Some(request.clone()));
+        self.state.status.set("正在导入动画预设资料库".to_owned());
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.request_reconcile();
+        Ok(request)
+    }
+
+    pub fn queue_remove_motion_preset(
+        &self,
+        identity: &MotionPresetIdentity,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetInteractionError> {
+        let entry = self
+            .motion_preset_catalog()
+            .into_iter()
+            .find(|entry| entry.identity == *identity)
+            .ok_or_else(|| MotionPresetInteractionError::Missing(identity.clone()))?;
+        if entry.origin == MotionPresetOrigin::BuiltIn {
+            return Err(MotionPresetInteractionError::BuiltInReadOnly);
+        }
+        if entry.origin == MotionPresetOrigin::Active {
+            return Err(MotionPresetInteractionError::ActiveSnapshotNotStored);
+        }
+        let request = self
+            .state
+            .motion_presets
+            .begin_remove(&identity.id, identity.revision)?;
+        self.state
+            .motion_preset_persistence_outbox
+            .replace(Some(request.clone()));
+        self.state.status.set(format!(
+            "正在删除动画预设 {} r{}",
+            identity.id, identity.revision
+        ));
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.request_reconcile();
         Ok(request)
     }
 
@@ -649,16 +1187,82 @@ impl AppearanceSettings {
         token: MotionPresetPersistenceToken,
         result: Result<String, String>,
     ) -> bool {
-        self.state
+        let succeeded = result.is_ok();
+        let continuation = self
+            .state
+            .motion_preset_replacement_save
+            .borrow()
+            .as_ref()
+            .filter(|(pending, _)| *pending == token)
+            .cloned();
+        let completed = self
+            .state
             .motion_presets
-            .complete_persistence(token, result)
+            .complete_persistence(token, result);
+        if !completed {
+            return false;
+        }
+        let library_status = self.state.motion_presets.snapshot().status;
+        self.state.feedback.set(if succeeded {
+            SettingsFeedbackKind::Success
+        } else {
+            SettingsFeedbackKind::Error
+        });
+        let mut applied_continuation = false;
+        if let Some((_, selected)) = continuation {
+            self.state.motion_preset_replacement_save.replace(None);
+            if succeeded {
+                self.state.motion_preset_selection.replace(Some(selected));
+                if let Err(error) = self.apply_selected_motion_preset() {
+                    self.state.feedback.set(SettingsFeedbackKind::Error);
+                    self.state
+                        .status
+                        .set(format!("草稿已保存，但加载所选动画预设失败：{error}"));
+                } else {
+                    applied_continuation = true;
+                }
+            }
+        }
+        if !applied_continuation {
+            self.state.status.set(library_status);
+        }
+        if let Some(selected) = self.motion_preset_selection()
+            && !self
+                .motion_preset_catalog()
+                .iter()
+                .any(|entry| entry.identity == selected)
+        {
+            self.state.motion_editor.clear_preset_preview();
+            self.state.motion_preset_selection.replace(None);
+        }
+        self.request_reconcile();
+        true
     }
 
     pub fn accept_external_motion_preset_library_json(
         &self,
         text: &str,
     ) -> Result<ThemeExternalOutcome, MotionPresetEditorError> {
-        self.state.motion_presets.accept_external_json(text)
+        let outcome = self.state.motion_presets.accept_external_json(text)?;
+        if outcome == ThemeExternalOutcome::ConfirmedPendingWrite
+            && let Some((_, selected)) = self.state.motion_preset_replacement_save.take()
+        {
+            self.state.motion_preset_selection.replace(Some(selected));
+            if let Err(error) = self.apply_selected_motion_preset() {
+                self.report_motion_preset_error("草稿已保存，但加载所选动画预设", error);
+            }
+        }
+        if let Some(selected) = self.motion_preset_selection()
+            && !self
+                .motion_preset_catalog()
+                .iter()
+                .any(|entry| entry.identity == selected)
+        {
+            self.state.motion_editor.clear_preset_preview();
+            self.state.motion_preset_selection.replace(None);
+        }
+        self.request_reconcile();
+        Ok(outcome)
     }
 
     pub fn take_motion_preset_persistence_request(&self) -> Option<MotionPresetPersistenceRequest> {
@@ -769,7 +1373,7 @@ impl AppearanceSettings {
             if let Some(pending) = motion_save {
                 self.state.motion_editor_pending.replace(None);
                 if succeeded {
-                    self.state.motion_editor_saved.replace(Some(pending.values));
+                    self.state.motion_editor_saved_style.replace(pending.style);
                 }
             }
             self.sync_theme_editor_feedback();
@@ -824,16 +1428,55 @@ impl AppearanceSettings {
     }
 
     pub fn accept_external_theme_profile_json(&self, text: &str) -> Result<(), ThemeEditorError> {
-        self.state
+        let locally_dirty = self.motion_editor_is_dirty();
+        let outcome = self
+            .state
             .theme_profiles
             .accept_external_profile_json(text)?;
+        self.sync_theme_editor_feedback();
+        if outcome == ThemeExternalOutcome::ConfirmedPendingWrite
+            && let Some(pending) = self.state.motion_editor_pending.take()
+        {
+            self.state.motion_editor_saved_style.replace(pending.style);
+        } else if outcome != ThemeExternalOutcome::ConfirmedPendingWrite {
+            let external_style = active_motion_editor_style(&self.state.theme_profiles);
+            if locally_dirty {
+                self.state.motion_editor_saved_style.replace(external_style);
+                self.state.feedback.set(SettingsFeedbackKind::Informational);
+                self.state
+                    .status
+                    .set("外部主题动画已变化；当前本地动画草稿仍被保留".to_owned());
+                self.state
+                    .feedback_setting
+                    .set(Some(AppearanceSetting::Motion));
+            } else {
+                match motion_editor_context(&external_style).and_then(|(inherited, explicit)| {
+                    self.state
+                        .motion_editor
+                        .replace_style_context(&inherited, explicit.as_ref())
+                        .map_err(|error| MotionStyleError::Syntax(error.to_string()))
+                }) {
+                    Ok(()) => {
+                        self.state
+                            .motion_editor_style
+                            .replace(external_style.clone());
+                        self.state.motion_editor_saved_style.replace(external_style);
+                    }
+                    Err(error) => {
+                        self.state.feedback.set(SettingsFeedbackKind::Error);
+                        self.state
+                            .status
+                            .set(format!("外部主题已载入，但动画编辑器同步失败：{error}"));
+                    }
+                }
+            }
+        }
         let snapshot = self.state.theme_profiles.snapshot();
         if snapshot.preview_profile.is_none() {
             self.state
                 .scheme
                 .set(scheme_for_profile(&snapshot.committed_profile));
         }
-        self.sync_theme_editor_feedback();
         Ok(())
     }
 
@@ -889,9 +1532,14 @@ impl AppearanceSettings {
         self.state.motion_editor.snapshot()
     }
 
+    fn current_motion_editor_style(&self) -> MotionStyleProfileData {
+        let mut style = self.state.motion_editor_style.borrow().clone();
+        apply_motion_editor_values(&mut style, self.state.motion_editor.authored_values());
+        style
+    }
+
     pub fn motion_editor_is_dirty(&self) -> bool {
-        self.state.motion_editor_saved.borrow().as_ref()
-            != Some(&self.state.motion_editor.authored_values())
+        *self.state.motion_editor_saved_style.borrow() != self.current_motion_editor_style()
     }
 
     pub fn motion_editor_save_pending(&self) -> bool {
@@ -911,26 +1559,17 @@ impl AppearanceSettings {
             ));
         }
 
-        let values = self.state.motion_editor.authored_values();
+        let style = self.current_motion_editor_style();
         let editor = self.state.theme_profiles.snapshot();
         let mut candidate = editor
             .preview_profile
             .clone()
             .unwrap_or_else(|| editor.committed_profile.clone());
-        let runtime = self.state.theme_profiles.runtime().snapshot();
-        let mut style = runtime
-            .resolved()
-            .data
-            .motion
-            .style
-            .clone()
-            .unwrap_or_default();
-        apply_motion_editor_values(&mut style, values.clone());
         set_motion_style_override(&mut candidate, &style)?;
         candidate = ThemeProfile::from_json(&candidate.to_json_pretty()?)?;
 
         if candidate == editor.committed_profile && editor.preview_profile.is_none() {
-            self.state.motion_editor_saved.replace(Some(values));
+            self.state.motion_editor_saved_style.replace(style);
             self.state.status.set("动画设置已经是已保存值".to_owned());
             self.state.feedback.set(SettingsFeedbackKind::Success);
             self.state.feedback_setting.set(None);
@@ -945,7 +1584,7 @@ impl AppearanceSettings {
             .motion_editor_pending
             .replace(Some(PendingMotionEditorSave {
                 token: request.token(),
-                values,
+                style,
             }));
         self.state.status.set("正在保存动画设置".to_owned());
         self.state.feedback.set(SettingsFeedbackKind::Pending);
@@ -1169,15 +1808,12 @@ impl AppearanceSettings {
         };
         let content = self.content(Arc::clone(&theme), nested, spec)?;
         let inspector = if motion_editor {
-            let save_model = self.clone();
             crate::motion_editor_view::inspector(
                 Arc::clone(&theme),
                 nested,
                 spec.inspector_is_drawer,
                 self.state.motion_editor.clone(),
-                self.motion_editor_is_dirty(),
-                self.motion_editor_save_pending(),
-                Rc::new(move || save_model.queue_motion_editor_save()),
+                self.clone(),
             )?
         } else {
             self.inspector(Arc::clone(&theme), nested, spec.inspector_is_drawer)
@@ -2367,14 +3003,55 @@ impl AppearanceSettings {
     }
 }
 
-fn persisted_motion_editor_values(editor: &ThemeProfileEditor) -> Option<MotionValuesData> {
-    let runtime = editor.runtime().snapshot();
-    runtime
+fn active_motion_editor_style(editor: &ThemeProfileEditor) -> MotionStyleProfileData {
+    editor
+        .runtime()
+        .snapshot()
         .resolved()
         .data
         .motion
         .style
-        .as_ref()?
+        .clone()
+        .unwrap_or_default()
+}
+
+fn built_in_motion_style_id(style: BuiltInMotionStyle) -> &'static str {
+    match style {
+        BuiltInMotionStyle::Balanced => "balanced",
+        BuiltInMotionStyle::Lively => "lively",
+        BuiltInMotionStyle::Calm => "calm",
+        BuiltInMotionStyle::Direct => "direct",
+    }
+}
+
+fn motion_preset_id_from_name(name: &str) -> String {
+    let mut id = String::new();
+    let mut separator = false;
+    for character in name.trim().to_lowercase().chars().take(96) {
+        if character.is_alphanumeric() {
+            if separator && !id.is_empty() {
+                id.push('-');
+            }
+            id.push(character);
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if id.is_empty() {
+        "custom-motion".to_owned()
+    } else {
+        id
+    }
+}
+
+fn persisted_motion_editor_values(editor: &ThemeProfileEditor) -> Option<MotionValuesData> {
+    let runtime = editor.runtime().snapshot();
+    motion_editor_transition_override(runtime.resolved().data.motion.style.as_ref()?)
+}
+
+fn motion_editor_transition_override(style: &MotionStyleProfileData) -> Option<MotionValuesData> {
+    style
         .overrides
         .families
         .get(&MotionSemanticFamilyData::PanelEnter)?
@@ -2383,6 +3060,22 @@ fn persisted_motion_editor_values(editor: &ThemeProfileEditor) -> Option<MotionV
         .transitions
         .get("open")
         .cloned()
+}
+
+fn motion_editor_context(
+    style: &MotionStyleProfileData,
+) -> Result<(ResolvedMotionValuesData, Option<MotionValuesData>), MotionStyleError> {
+    let explicit = motion_editor_transition_override(style);
+    let mut inherited_style = style.clone();
+    apply_motion_editor_values(&mut inherited_style, MotionValuesData::default());
+    let inherited = inherited_style
+        .resolve()?
+        .resolve_scope(&MotionScopeData::transition(
+            MotionSemanticFamilyData::PanelEnter,
+            "settings.drawer",
+            "open",
+        ))?;
+    Ok((inherited, explicit))
 }
 
 fn apply_motion_editor_values(style: &mut MotionStyleProfileData, values: MotionValuesData) {
@@ -3361,6 +4054,181 @@ mod tests {
         assert_eq!(
             imported.export_motion_preset("owner-review", 1).unwrap(),
             exported
+        );
+    }
+
+    #[test]
+    fn preset_browsing_previews_without_mutating_the_dirty_draft() {
+        let preset = MotionStyleProfileData::default()
+            .resolve()
+            .unwrap()
+            .snapshot_as_preset("soft-copy", "Soft Copy", 1)
+            .unwrap();
+        let mut library = nkdhr_theme::MotionPresetLibraryData::default();
+        library.insert(preset).unwrap();
+        let model = AppearanceSettings::with_editors(
+            ThemeProfileEditor::default(),
+            MotionPresetLibraryEditor::new(library).unwrap(),
+        );
+        let draft = model.state.motion_editor.authored_values();
+        assert!(model.motion_editor_is_dirty());
+
+        model.open_motion_preset_library().unwrap();
+        model
+            .select_motion_preset(MotionPresetIdentity {
+                id: "soft-copy".to_owned(),
+                revision: 1,
+            })
+            .unwrap();
+        assert!(model.state.motion_editor.preset_preview_active());
+        assert_eq!(model.state.motion_editor.authored_values(), draft);
+        assert!(!model.request_use_selected_motion_preset().unwrap());
+        assert!(model.motion_preset_replace_confirmation());
+        assert_eq!(model.state.motion_editor.authored_values(), draft);
+
+        model.confirm_replace_with_selected_motion_preset().unwrap();
+        assert!(!model.state.motion_editor.preset_preview_active());
+        assert!(!model.motion_preset_library_open());
+        assert!(model.motion_editor_is_dirty());
+        let style = model.current_motion_editor_style();
+        let MotionStyleBaseData::Embedded { preset } = style.base else {
+            panic!("a user preset becomes the active immutable base")
+        };
+        assert_eq!(preset.id, "soft-copy");
+        assert!(style.overrides.values.is_empty());
+        assert!(style.overrides.families.is_empty());
+    }
+
+    #[test]
+    fn dirty_draft_can_be_saved_before_the_selected_preset_is_applied() {
+        let preset = MotionStyleProfileData::default()
+            .resolve()
+            .unwrap()
+            .snapshot_as_preset("next", "Next", 1)
+            .unwrap();
+        let mut library = nkdhr_theme::MotionPresetLibraryData::default();
+        library.insert(preset).unwrap();
+        let model = AppearanceSettings::with_editors(
+            ThemeProfileEditor::default(),
+            MotionPresetLibraryEditor::new(library).unwrap(),
+        );
+        model
+            .select_motion_preset(MotionPresetIdentity {
+                id: "next".to_owned(),
+                revision: 1,
+            })
+            .unwrap();
+        assert!(!model.request_use_selected_motion_preset().unwrap());
+        model.state.motion_preset_name.set("我的草稿".to_owned());
+        let save = model
+            .queue_motion_draft_before_preset_replacement()
+            .unwrap();
+
+        assert!(model.complete_motion_preset_persistence(
+            save.persistence().token(),
+            Ok("草稿预设已保存".to_owned())
+        ));
+        assert!(!model.motion_preset_library_open());
+        assert!(
+            model
+                .motion_preset_library()
+                .library
+                .latest("我的草稿")
+                .is_some()
+        );
+        let MotionStyleBaseData::Embedded { preset } = model.current_motion_editor_style().base
+        else {
+            panic!("the selected preset becomes active after the draft is durable")
+        };
+        assert_eq!(preset.id, "next");
+    }
+
+    #[test]
+    fn ctrl5_signal_can_confirm_motion_writes_before_worker_completion() {
+        let model = AppearanceSettings::new();
+        let MotionEditorSaveOutcome::PersistenceRequired(theme_request) =
+            model.begin_motion_editor_save().unwrap()
+        else {
+            panic!("the review fixture starts dirty")
+        };
+        model
+            .accept_external_theme_profile_json(theme_request.value())
+            .unwrap();
+        assert!(!model.motion_editor_save_pending());
+        assert!(!model.motion_editor_is_dirty());
+        assert!(!model.complete_theme_persistence(
+            theme_request.token(),
+            Ok("later worker completion".to_owned())
+        ));
+
+        let preset_request = model
+            .queue_motion_preset_save("confirmed", "Confirmed")
+            .unwrap();
+        assert_eq!(
+            model
+                .accept_external_motion_preset_library_json(preset_request.persistence().value())
+                .unwrap(),
+            ThemeExternalOutcome::ConfirmedPendingWrite
+        );
+        assert!(!model.motion_preset_library().pending);
+        assert!(
+            model
+                .motion_preset_library()
+                .library
+                .latest("confirmed")
+                .is_some()
+        );
+        assert!(!model.complete_motion_preset_persistence(
+            preset_request.persistence().token(),
+            Ok("later worker completion".to_owned())
+        ));
+    }
+
+    #[test]
+    fn external_theme_change_adopts_clean_editor_but_preserves_dirty_draft() {
+        let clean_source = AppearanceSettings::new();
+        let MotionEditorSaveOutcome::PersistenceRequired(save) =
+            clean_source.begin_motion_editor_save().unwrap()
+        else {
+            panic!("the review fixture starts dirty")
+        };
+        let persisted = ThemeProfile::from_json(save.value()).unwrap();
+        let clean = AppearanceSettings::with_theme_profiles(
+            ThemeProfileEditor::new(persisted.clone(), Default::default()).unwrap(),
+        );
+        assert!(!clean.motion_editor_is_dirty());
+
+        let mut external = persisted;
+        external.name = "External Motion".to_owned();
+        let mut style = external.resolve().unwrap().data.motion.style.unwrap();
+        apply_motion_editor_values(
+            &mut style,
+            MotionValuesData {
+                duration_ms: Some(640),
+                ..Default::default()
+            },
+        );
+        set_motion_style_override(&mut external, &style).unwrap();
+        let external = ThemeProfile::from_json(&external.to_json_pretty().unwrap()).unwrap();
+        clean
+            .accept_external_theme_profile_json(&external.to_json_pretty().unwrap())
+            .unwrap();
+        assert_eq!(
+            clean.motion_editor_snapshot().duration,
+            std::time::Duration::from_millis(640)
+        );
+        assert!(!clean.motion_editor_is_dirty());
+
+        let dirty = AppearanceSettings::new();
+        let draft = dirty.state.motion_editor.authored_values();
+        dirty
+            .accept_external_theme_profile_json(&external.to_json_pretty().unwrap())
+            .unwrap();
+        assert_eq!(dirty.state.motion_editor.authored_values(), draft);
+        assert!(dirty.motion_editor_is_dirty());
+        assert_eq!(
+            dirty.snapshot().feedback,
+            SettingsFeedbackKind::Informational
         );
     }
 

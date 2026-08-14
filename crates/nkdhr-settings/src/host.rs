@@ -39,6 +39,7 @@ pub struct AppearanceSurface {
     viewport: Size,
     capabilities: MaterialCapabilities,
     persistence: SettingsPersistenceWorker,
+    external_updates: Receiver<SettingsExternalUpdate>,
     host: UiHost,
 }
 
@@ -80,6 +81,7 @@ impl AppearanceSurface {
             viewport,
             capabilities,
             persistence: SettingsPersistenceWorker::default(),
+            external_updates: spawn_settings_watcher(),
             host,
         })
     }
@@ -109,6 +111,7 @@ impl AppearanceSurface {
     }
 
     fn flush_persistence(&mut self) {
+        self.flush_external_updates();
         if let Some(request) = self.model.take_motion_editor_persistence_request() {
             let token = request.token();
             if let Err(error) = self.persistence.submit_theme(request) {
@@ -132,6 +135,25 @@ impl AppearanceSurface {
                 }
                 SettingsPersistenceCompletion::MotionPreset { token, result } => {
                     self.model.complete_motion_preset_persistence(token, result);
+                }
+            }
+        }
+    }
+
+    fn flush_external_updates(&mut self) {
+        while let Ok(update) = self.external_updates.try_recv() {
+            match update {
+                SettingsExternalUpdate::ThemeProfile(text) => {
+                    if let Err(error) = self.model.accept_external_theme_profile_json(&text) {
+                        eprintln!("nkdhr-settings: rejected changed theme.profile: {error}");
+                    }
+                }
+                SettingsExternalUpdate::MotionPresetLibrary(text) => {
+                    if let Err(error) = self.model.accept_external_motion_preset_library_json(&text)
+                    {
+                        self.model
+                            .report_motion_preset_error("同步外部动画预设资料库", error);
+                    }
                 }
             }
         }
@@ -204,6 +226,11 @@ enum SettingsPersistenceCompletion {
         token: MotionPresetPersistenceToken,
         result: Result<String, String>,
     },
+}
+
+enum SettingsExternalUpdate {
+    ThemeProfile(String),
+    MotionPresetLibrary(String),
 }
 
 impl SettingsPersistenceWorker {
@@ -316,6 +343,47 @@ fn owned_string(stored: OwnedValue) -> Option<String> {
         return None;
     };
     Some(text.as_str().to_owned())
+}
+
+fn spawn_settings_watcher() -> Receiver<SettingsExternalUpdate> {
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::Builder::new()
+        .name("nkdhr-settings-config-watch".to_owned())
+        .spawn(move || {
+            let Ok(connection) = Connection::session() else {
+                return;
+            };
+            let Ok(config) = ConfigProxyBlocking::new(&connection) else {
+                return;
+            };
+            let Ok(changed) = config.receive_changed() else {
+                return;
+            };
+            for signal in changed {
+                let Ok(args) = signal.args() else {
+                    continue;
+                };
+                let update = match args.key().as_str() {
+                    ACTIVE_THEME_PROFILE_KEY => config
+                        .get(ACTIVE_THEME_PROFILE_KEY)
+                        .ok()
+                        .and_then(owned_string)
+                        .map(SettingsExternalUpdate::ThemeProfile),
+                    MOTION_PRESET_LIBRARY_KEY => config
+                        .get(MOTION_PRESET_LIBRARY_KEY)
+                        .ok()
+                        .and_then(owned_string)
+                        .map(SettingsExternalUpdate::MotionPresetLibrary),
+                    _ => None,
+                };
+                if let Some(update) = update
+                    && sender.send(update).is_err()
+                {
+                    break;
+                }
+            }
+        });
+    receiver
 }
 
 #[derive(Debug)]

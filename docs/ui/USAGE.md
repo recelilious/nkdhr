@@ -498,9 +498,9 @@ now freeze the live professional-editor document as the next immutable
 revision, import/export either one preset or the complete library, and queue
 the scalar write on the same non-blocking host worker as `theme.profile`.
 Valid libraries restore at host startup; either key can fall back independently
-if its stored value is unavailable or invalid. These are nonvisual APIs: the
-owner-reviewed preset controls and file-picker composition remain a later
-UI-7E slice.
+if its stored value is unavailable or invalid. UI-7B introduced this as a
+nonvisual boundary; UI-7E now composes its owner-reviewed inspector controls
+and cross-host clipboard transfer without weakening the transaction.
 
 ## Policy motion runtime (`nkdhr-ui`, UI-7C)
 
@@ -574,8 +574,13 @@ percentages map into sparse semantic overrides and survive reconciliation. The
 Save action writes the current transition into `theme.profile` through the
 shared host's non-blocking CTRL-5 worker. Pending, success and failure remain
 visible in both the inspector and status bar. Preset snapshot/import/export and
-startup recovery now have complete model and host APIs, while their visible
-controls remain owner-guided work.
+startup recovery are now available from the inspector's preset mode. Search and
+origin filters keep revision groups compact; selection is a non-destructive
+central-graph preview, and `Use selected` protects a dirty draft with explicit
+save/discard choices. Import reads portable preset or library JSON from the
+clipboard, while selected or complete-library export writes portable JSON back
+to it. Valid external CTRL-5 changes are followed through signals without
+polling.
 
 ## Verification tools
 

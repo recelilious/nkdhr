@@ -414,6 +414,69 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
 }
 
 #[test]
+fn motion_preset_library_is_a_bounded_non_destructive_inspector_mode() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let draft = model.motion_editor_snapshot();
+    model.open_motion_preset_library().unwrap();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, list) = settings_list(&model, size, capabilities());
+    let semantics = root.semantic_tree();
+
+    for label in [
+        "动画预设",
+        "返回",
+        "导入",
+        "全部导出",
+        "保存当前",
+        "导出所选",
+        "使用所选",
+    ] {
+        assert!(
+            semantics
+                .iter()
+                .any(|node| node.semantics.label.as_deref() == Some(label)),
+            "preset inspector is missing {label}"
+        );
+    }
+    assert!(semantics.iter().any(|node| {
+        node.semantics.role == SemanticRole::ScrollArea
+            && node.semantics.label.as_deref() == Some("动画预设列表")
+    }));
+    assert_eq!(model.motion_editor_snapshot().curve, draft.curve);
+    assert_eq!(model.motion_editor_snapshot().duration, draft.duration);
+
+    let [_navigation, _workspace, inspector] = body_children(&root);
+    let inspector_rect = root.rect(inspector).unwrap();
+    for node in semantics.iter().filter(|node| {
+        matches!(
+            node.semantics.label.as_deref(),
+            Some("保存当前" | "导出所选" | "使用所选")
+        )
+    }) {
+        assert!(inspector_rect.contains(Point::new(
+            node.bounds.x + node.bounds.width * 0.5,
+            node.bounds.y + node.bounds.height * 0.5,
+        )));
+        assert!(inspector_rect.bottom() - node.bounds.bottom() >= 15.0);
+    }
+
+    if let Some(directory) = std::env::var_os("DUMP_MOTION_PRESETS") {
+        fs::create_dir_all(&directory).unwrap();
+        let mut renderer = SoftwareRenderer::new(GOLDEN_WIDTH, GOLDEN_HEIGHT).unwrap();
+        renderer.clear(Color::from_srgba8(14, 19, 35, 255));
+        renderer
+            .render(&list, root.texture_store().unwrap(), 1.0)
+            .unwrap();
+        fs::write(
+            PathBuf::from(directory).join("motion-presets.ppm"),
+            renderer.ppm(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn professional_motion_graph_edits_the_persistent_editor_session() {
     let model = AppearanceSettings::new();
     model.open_motion_editor();

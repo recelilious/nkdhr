@@ -829,6 +829,24 @@ impl MotionPresetLibraryData {
             .max_by_key(|preset| preset.revision)
     }
 
+    pub fn remove(
+        &mut self,
+        id: &str,
+        revision: u32,
+    ) -> Result<MotionStylePresetData, MotionPresetLibraryError> {
+        let index = self
+            .presets
+            .iter()
+            .position(|preset| preset.id == id && preset.revision == revision)
+            .ok_or_else(|| MotionPresetLibraryError::MissingPreset {
+                id: id.to_owned(),
+                revision,
+            })?;
+        let removed = self.presets.remove(index);
+        self.validate()?;
+        Ok(removed)
+    }
+
     pub fn insert(
         &mut self,
         preset: MotionStylePresetData,

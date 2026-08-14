@@ -120,8 +120,10 @@ signals. UI-7D adds the style-neutral professional curve-editor document,
 consumer capability intersection, exact insertion, tangent/numeric editing,
 bounded transactional history, safe keyframe clipboard, normalized/real-time
 viewport, host-clock preview and unified targeted mouse/pen/touch/touchpad/
-keyboard input semantics. These are still framework foundations only: no
-Settings layout or existing component visual has been composed or restyled.
+keyboard input semantics. UI-7E now composes the owner-reviewed professional
+workspace, persistent transition editing, immutable preset browser and safe
+draft replacement flow in the real shared Settings surface. The remaining
+motion slice is the conserved-liquid navigation selection treatment.
 
 ## Documentation
 
