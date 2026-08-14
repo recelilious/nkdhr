@@ -1,0 +1,19 @@
+[package]
+name = "nkdhr-shell"
+description = "Output-local shell surfaces and desktop interaction models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
+nkdhr-render = { version = "0.1.0", path = "../nkdhr-render" }
+nkdhr-ui = { version = "0.1.0", path = "../nkdhr-ui" }
+
+[dev-dependencies]
+cosmic-text = { version = "0.19.0", features = ["shape-run-cache"] }

@@ -1483,6 +1483,7 @@ dependencies = [
  "nkdhr-ipc",
  "nkdhr-render",
  "nkdhr-settings",
+ "nkdhr-shell",
  "nkdhr-ui",
  "smithay",
  "smithay-drm-extras",
@@ -1530,6 +1531,16 @@ dependencies = [
  "smithay",
  "wayland-egl",
  "zbus",
+]
+
+[[package]]
+name = "nkdhr-shell"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "libc",
+ "nkdhr-render",
+ "nkdhr-ui",
 ]
 
 [[package]]

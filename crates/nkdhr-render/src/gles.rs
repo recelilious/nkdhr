@@ -44,6 +44,7 @@ pub enum GlesBackendError {
     ShaderInterface(&'static str),
     Smithay(String),
     GlOperation(u32),
+    GlOperationAt { stage: &'static str, code: u32 },
 }
 
 impl fmt::Display for GlesBackendError {
@@ -72,6 +73,12 @@ impl fmt::Display for GlesBackendError {
             Self::Smithay(error) => write!(formatter, "Smithay GLES error: {error}"),
             Self::GlOperation(code) => {
                 write!(formatter, "OpenGL ES operation failed with 0x{code:04x}")
+            }
+            Self::GlOperationAt { stage, code } => {
+                write!(
+                    formatter,
+                    "OpenGL ES operation failed during {stage} with 0x{code:04x}"
+                )
             }
         }
     }
@@ -167,6 +174,45 @@ impl Scissor {
 
     fn rectangle(self) -> Rectangle<i32, Physical> {
         Rectangle::new((self.x, self.y).into(), (self.width, self.height).into())
+    }
+
+    /// Map output-space damage/clip coordinates into the active OpenGL
+    /// framebuffer. Smithay's projection includes the output transform while
+    /// `glScissor` and framebuffer copies always use bottom-left framebuffer
+    /// coordinates, so using the unprojected top-left rectangles silently
+    /// clips text and backdrop filters on flipped outputs.
+    fn projected(self, projection: &[f32; 9], target: Size<i32, Physical>) -> Option<Self> {
+        let corners = [
+            (self.x as f32, self.y as f32),
+            ((self.x + self.width) as f32, self.y as f32),
+            (self.x as f32, (self.y + self.height) as f32),
+            ((self.x + self.width) as f32, (self.y + self.height) as f32),
+        ];
+        let mut left = f32::INFINITY;
+        let mut top = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
+        let mut bottom = f32::NEG_INFINITY;
+        for (x, y) in corners {
+            let clip_x = projection[0] * x + projection[3] * y + projection[6];
+            let clip_y = projection[1] * x + projection[4] * y + projection[7];
+            let framebuffer_x = (clip_x + 1.0) * 0.5 * target.w as f32;
+            let framebuffer_y = (clip_y + 1.0) * 0.5 * target.h as f32;
+            left = left.min(framebuffer_x);
+            top = top.min(framebuffer_y);
+            right = right.max(framebuffer_x);
+            bottom = bottom.max(framebuffer_y);
+        }
+        Self::from_damage(
+            Rectangle::new(
+                (left.floor() as i32, top.floor() as i32).into(),
+                (
+                    right.ceil() as i32 - left.floor() as i32,
+                    bottom.ceil() as i32 - top.floor() as i32,
+                )
+                    .into(),
+            ),
+            target,
+        )
     }
 }
 
@@ -1220,10 +1266,19 @@ fn draw_batches(
     let damage: Vec<Scissor> = damage
         .iter()
         .filter_map(|damage| Scissor::from_damage(*damage, prepared.target))
+        .filter_map(|damage| damage.projected(projection, prepared.target))
         .collect();
     for batch in &prepared.batches {
         match batch {
-            Batch::BackdropBlur { output, .. } => {
+            Batch::BackdropBlur {
+                output, dependency, ..
+            } => {
+                let Some(output) = output.projected(projection, prepared.target) else {
+                    continue;
+                };
+                let Some(dependency) = dependency.projected(projection, prepared.target) else {
+                    continue;
+                };
                 let scissors: Vec<Scissor> = damage
                     .iter()
                     .filter_map(|damage| output.intersect(*damage))
@@ -1234,16 +1289,17 @@ fn draw_batches(
                         resources,
                         batch,
                         &scissors,
+                        dependency,
                         prepared.target,
                         projection,
                     )?;
                 }
             }
             Batch::Shapes { .. } | Batch::Texture { .. } => {
-                for scissor in damage
-                    .iter()
-                    .filter_map(|damage| batch.clip().intersect(*damage))
-                {
+                let Some(clip) = batch.clip().projected(projection, prepared.target) else {
+                    continue;
+                };
+                for scissor in damage.iter().filter_map(|damage| clip.intersect(*damage)) {
                     set_scissor(gl, scissor);
                     match batch {
                         Batch::Shapes {
@@ -1302,11 +1358,11 @@ fn draw_backdrop_batch(
     resources: &mut Resources,
     batch: &Batch,
     damage: &[Scissor],
+    dependency: Scissor,
     target: Size<i32, Physical>,
     projection: &[f32; 9],
 ) -> Result<(), GlesBackendError> {
     let Batch::BackdropBlur {
-        dependency,
         buffer_offset,
         rect,
         radii,
@@ -1318,14 +1374,22 @@ fn draw_backdrop_batch(
         unreachable!()
     };
     ensure_blur_targets(gl, resources, target)?;
+    gl_operation_ok(gl, "backdrop target allocation")?;
     let targets = resources
         .blur_targets
         .as_ref()
         .expect("blur targets were just allocated");
 
     let mut original_framebuffer = 0_i32;
+    let mut original_read_buffer = 0_i32;
     unsafe {
         gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut original_framebuffer);
+        gl.GetIntegerv(ffi::READ_BUFFER, &mut original_read_buffer);
+        gl.ReadBuffer(if original_framebuffer == 0 {
+            ffi::BACK
+        } else {
+            ffi::COLOR_ATTACHMENT0
+        });
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, targets.snapshot);
         gl.CopyTexSubImage2D(
@@ -1338,12 +1402,15 @@ fn draw_backdrop_batch(
             dependency.width,
             dependency.height,
         );
-
+        gl.ReadBuffer(original_read_buffer as u32);
+    }
+    gl_operation_ok(gl, "backdrop snapshot")?;
+    unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, targets.framebuffer);
         gl.Viewport(0, 0, target.w, target.h);
         gl.Disable(ffi::BLEND);
     }
-    set_scissor(gl, *dependency);
+    set_scissor(gl, dependency);
     draw_horizontal_blur(
         gl,
         resources,
@@ -1353,32 +1420,49 @@ fn draw_backdrop_batch(
         target,
         projection,
     );
+    let horizontal_result = gl_operation_ok(gl, "horizontal backdrop blur");
 
     unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, original_framebuffer as u32);
         gl.Viewport(0, 0, target.w, target.h);
     }
-    for scissor in damage {
-        set_scissor(gl, *scissor);
-        draw_backdrop_composite(
-            gl,
-            resources,
-            targets.snapshot,
-            targets.horizontal,
-            *radius,
-            *effective_scale,
-            *rect,
-            *radii,
-            *buffer_offset + 6 * size_of::<BlurVertex>(),
-            target,
-            projection,
-        );
+    let mut result = horizontal_result;
+    if result.is_ok() {
+        for scissor in damage {
+            set_scissor(gl, *scissor);
+            draw_backdrop_composite(
+                gl,
+                resources,
+                targets.snapshot,
+                targets.horizontal,
+                *radius,
+                *effective_scale,
+                *rect,
+                *radii,
+                *buffer_offset + 6 * size_of::<BlurVertex>(),
+                target,
+                projection,
+            );
+            if let Err(error) = gl_operation_ok(gl, "backdrop composite") {
+                result = Err(error);
+                break;
+            }
+        }
     }
     unsafe {
         gl.Enable(ffi::BLEND);
         gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
     }
-    Ok(())
+    result
+}
+
+fn gl_operation_ok(gl: &Gles2, stage: &'static str) -> Result<(), GlesBackendError> {
+    let code = unsafe { gl.GetError() };
+    if code == ffi::NO_ERROR {
+        Ok(())
+    } else {
+        Err(GlesBackendError::GlOperationAt { stage, code })
+    }
 }
 
 fn draw_horizontal_blur(
@@ -1682,6 +1766,31 @@ mod tests {
 
     fn target() -> Size<i32, Physical> {
         (100, 100).into()
+    }
+
+    #[test]
+    fn scissor_projection_tracks_the_active_framebuffer_orientation() {
+        let scissor = Scissor {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+        let top_left_projection = [0.02, 0.0, 0.0, 0.0, -0.02, 0.0, -1.0, 1.0, 1.0];
+        let projected = scissor
+            .projected(&top_left_projection, target())
+            .expect("visible scissor remains visible");
+        assert!(projected.x <= 10 && projected.x + projected.width >= 40);
+        assert!(projected.y <= 40 && projected.y + projected.height >= 80);
+        assert!(projected.width <= 32 && projected.height <= 42);
+
+        let bottom_left_projection = [0.02, 0.0, 0.0, 0.0, 0.02, 0.0, -1.0, -1.0, 1.0];
+        let projected = scissor
+            .projected(&bottom_left_projection, target())
+            .expect("visible scissor remains visible");
+        assert!(projected.x <= 10 && projected.x + projected.width >= 40);
+        assert!(projected.y <= 20 && projected.y + projected.height >= 60);
+        assert!(projected.width <= 32 && projected.height <= 42);
     }
 
     #[test]

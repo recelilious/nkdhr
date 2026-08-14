@@ -138,6 +138,51 @@ where
     .into()
 }
 
+/// Render the full-size transparent output-local shell surface after canvas
+/// content. Its display list paints only the occupied edge regions, allowing
+/// real backdrop blur without tying shell geometry to a workspace viewport.
+pub fn shell_render_elements<R>(
+    ui_renderer: &mut PinnedGlesRenderer,
+    renderer: &mut R,
+    shell: &mut crate::shell_host::ShellHost,
+    output_name: &str,
+    physical_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    output_scale: f64,
+) -> Vec<CanvasRenderElement<R>>
+where
+    R: Renderer + ImportAll + ImportMem + GlesTargetRenderer,
+    R::TextureId: Clone + Send + 'static,
+{
+    let Some(data) = shell.render_data(output_name) else {
+        return Vec::new();
+    };
+    let geometry = Rectangle::from_size(physical_size);
+    let signature = PlacementSignature {
+        node_commit: data.commit,
+        geometry,
+        target: physical_size,
+        logical_x_bits: 0,
+        logical_y_bits: 0,
+        zoom_bits: 1.0_f64.to_bits(),
+        output_scale_bits: output_scale.to_bits(),
+    };
+    ui_renderer
+        .prepare(
+            renderer,
+            &format!("shell:{output_name}"),
+            data.display_list,
+            data.textures,
+            signature,
+            output_scale as f32,
+        )
+        .map(CanvasRenderElement::from)
+        .map(|element| vec![element])
+        .unwrap_or_else(|error| {
+            eprintln!("nkdhr-canvas: output-local shell prepare failed: {error}");
+            Vec::new()
+        })
+}
+
 /// Fire every pending `wl_surface.frame` callback in a surface tree after
 /// the compositor has presented that canvas frame.
 pub fn send_frame_callbacks(surface: &WlSurface, time: u32) {

@@ -6,6 +6,7 @@ mod input;
 mod protocols;
 mod render;
 mod settings;
+mod shell_host;
 mod state;
 mod ui_render;
 mod widget_host;

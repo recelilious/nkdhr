@@ -237,6 +237,14 @@ fn run() -> BackendResult {
                     resolved.global_location,
                     resolved.scale,
                 ));
+                elements.extend(render::shell_render_elements(
+                    &mut pinned_ui_renderer,
+                    renderer,
+                    &mut app.shell,
+                    NESTED_OUTPUT_NAME,
+                    size,
+                    resolved.scale,
+                ));
                 elements.extend(render::placement_preview_render_elements(
                     &app,
                     viewport,

@@ -28,6 +28,7 @@ tty = [
 nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
 nkdhr-render = { version = "0.1.0", path = "../nkdhr-render" }
 nkdhr-settings = { version = "0.1.0", path = "../nkdhr-settings" }
+nkdhr-shell = { version = "0.1.0", path = "../nkdhr-shell" }
 nkdhr-ui = { version = "0.1.0", path = "../nkdhr-ui" }
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "xwayland"] }
 smithay-drm-extras = { version = "0.1.0", default-features = false, optional = true }

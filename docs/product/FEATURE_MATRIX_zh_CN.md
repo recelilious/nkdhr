@@ -25,11 +25,11 @@
 |---|---|---|---|---|
 | V-01 | 静态为模糊液态玻璃 + claymorphism 体积；动态为灵动粘稠史莱姆 | partial | `nkdhr-render` blur/inset shadow；Settings 正式 golden | 后续所有 shell 组件统一采用，不允许平面占位皮肤 |
 | V-02 | 斜向左上→右下阴影、弱边线、窄主题感知内阴影、内容避开阴影 | done | theme surface token 与 Settings golden/组件测试 | 新组件必须复用相同 token |
-| V-03 | 圆角按组件尺寸变化；Maple Mono 默认；适当斜体 | partial | Settings 组合已采用尺寸层级与字体资源 | shell、launcher、画板完整采用 |
+| V-03 | 圆角按组件尺寸变化；Maple Mono 默认；适当斜体 | partial | Settings 组合与上中 calm clock 已采用尺寸层级/Maple Mono 字体资源 | 其余 shell、launcher、画板完整采用 |
 | V-04 | Tokyo Night/Nord 内置、自定义、壁纸取色、完整语义色、覆盖/保存/导入导出 | foundation | `nkdhr-theme` profile/library/wallpaper palette 与原子热同步 | 完整主题设置 UI、真实壁纸源与 shell 消费 |
 | V-05 | 普通/专业模式；普通模式 UI 优先，专业模式开放参数与命令 | partial | Settings 专业 motion 工作区与主题事务 | 全设置分类、专业开关、命令入口 |
 | V-06 | 动画曲线坐标轴、双击插点、切线/数值、撤销、预览、导入导出 | done | UI-7A…E、`motion_editor*`、Settings 集成与 golden | 新 motion consumer 覆盖 |
-| V-07 | 动画曲线/时长/流体参数热重载；Reduced/Off 无空间动效 | done | `motion_runtime`、`theme_runtime`、CTRL-5 bridge | shell consumer 集成 |
+| V-07 | 动画曲线/时长/流体参数热重载；Reduced/Off 无空间动效 | done | `motion_runtime`、`theme_runtime`、CTRL-5 bridge；output-local shell 共享同一热主题 runtime | 后续 shell 动效逐项复用 |
 | V-08 | 选中质量像粘液/磁流体传递，连续重定向、穿越内容折射 | done | `SelectionMassMotion` 与 Settings 左导航动态/策略测试 | 左上/右上 shell 链复用并做视觉验收 |
 | V-09 | 动画存在小幅确定性差异，水面/待机信号持续运动 | foundation | semantic fluid/idle-water runtime | 应用聚合水面和系统链真实绘制 |
 
@@ -37,14 +37,14 @@
 
 | ID | 要求 | 状态 | 当前证据 | 进入验收仍需 |
 |---|---|---|---|---|
-| S-01 | 输出本地 overlay 层；四角与四边中心独立布局/命中/动画 | missing | 现有 pinned node 是世界坐标，不是 shell overlay | 先实现 output-local retained host |
+| S-01 | 输出本地 overlay 层；四角与四边中心独立布局/命中/动画 | partial | `nkdhr-shell` + `shell_host.rs`；每物理输出独立 retained surface、八个稳定区域 ID、输入隔离、热插拔清理；nested GLES 冒烟通过 | 组合其余七区并完成各区动画/命中回归 |
 | S-02 | 左上：项目图标独立；悬停系统信息，点击居中设置 | missing | — | shell host、设置调起与系统摘要 |
 | S-03 | 左上：已打开应用链，应用聚合多一层背景，工作区独立 | missing | 窗口与焦点基础存在 | app identity、窗口聚合、液态节点 UI |
 | S-04 | Alt+Tab 快按普通轮换；按住 Alt 展开当前工作区空间预览 | partial | 快按 Alt+Tab 已有 | hold 状态机、预览图、连线、选中移动 |
 | S-05 | 预览按真实相对位置；重叠窗口图标可重叠；聚合应用可分裂左右并按最近使用收回 | missing | — | app/window MRU、空间投影、分裂/回收动效 |
 | S-06 | 多页面同应用：母图标水面常动，最多五份水面分割；点/星数量守恒 | foundation | 通用流体 runtime | 专用聚合组件与所有计数状态测试 |
 | S-07 | 应用过多时专用折叠节点，仍按同样逻辑分裂展开 | missing | — | overflow identity 与预览展开 |
-| S-08 | 上中：默认数字时间，交互时扩展为复杂“灵动岛” | missing | — | 由正式需求子状态实现，不擅自补产品行为 |
+| S-08 | 上中：默认数字时间，交互时扩展为复杂“灵动岛” | partial | output-local calm 数字时间已真实组合；Maple Mono、Tokyo Night clay/glass、背景模糊与输入屏障通过 nested 截图 | 由后续正式需求实现扩展子状态，不擅自补产品行为 |
 | S-09 | 右上：电源/Wi‑Fi/蓝牙/音量/亮度等粘稠节点链；悬停摘要、点击详情 | foundation | `nkdhrd` 已有 power/network/audio/brightness/session | Bluetooth、UI、动作与状态 generation |
 | S-10 | 左中：鼠标靠近显示的画板工具栏；设置/命令可完全关闭 | missing | — | 与绘制层共同实现 |
 | S-11 | 右中：插件自定义栏，可承载 AI/临时终端等 | missing | — | 沙箱化插件 API、生命周期、权限与示例 |

@@ -1037,3 +1037,28 @@ returning renderer-independent payloads for the host to adapt into a thin
 `CanvasRenderElement` is the same boundary: Phase 3 does not need to expose
 backend-specific input or renderer types to the node registry when it gives
 `nkdhr-ui` a real primitive layer.
+
+## Phase 4 output-local shell host
+
+`nkdhr-shell::ShellSurface` is separate from world-space `PinnedNode`s.
+`ShellHost` owns one full-output transparent retained tree per physical output
+name. Only occupied corner/edge-center regions paint and hit-test, while stable
+`EdgeRegion` identities survive hiding and rearrangement. Output-layout hot
+reload adds and removes matching surfaces and atomically clears pointer,
+keyboard and button-capture ownership for departed outputs. Surfaces share one
+`ThemeRuntime` but retain independent size, scale, focus and animation state.
+
+The shell is composed after windows/canvas and before cursor/DnD elements. A
+full-output transparent render element lets its material sample already-painted
+windows for real backdrop blur. The confirmed calm top-center digital clock is
+the first production composition; the other region identities are foundation,
+not finished product components.
+
+Custom GLES drawing projects output-space damage and clips through the active
+frame projection before using OpenGL's bottom-left framebuffer coordinates.
+The nested backend uses `Flipped180`; submitting top-left clips directly to
+`glScissor` leaves unclipped glass visible while silently clipping text and
+local blur on the opposite edge. Backdrop snapshots also select `BACK` on the
+default framebuffer (`COLOR_ATTACHMENT0` on FBOs), then restore the previous
+read buffer. Unit tests cover both coordinate orientations, and a live
+Weston/Pixman nested smoke verifies glyphs, blur and compositor survival.

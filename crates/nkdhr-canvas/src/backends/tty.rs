@@ -303,6 +303,7 @@ fn run() -> BackendResult {
             .values()
             .any(|view| view.animation.is_some() || view.workspace_fade.is_some())
             || state.app.placement_settle_pending()
+            || state.app.shell.frame_requested()
             || state
                 .app
                 .canvases
@@ -998,6 +999,14 @@ impl TtyState {
                 &mut renderer,
                 &self.app,
                 resolved_output.global_location,
+                resolved_output.scale,
+            ));
+            elements.extend(render::shell_render_elements(
+                &mut self.pinned_ui_renderer,
+                &mut renderer,
+                &mut self.app.shell,
+                &output_name,
+                resolved_output.physical_size,
                 resolved_output.scale,
             ));
             elements.extend(render::placement_preview_render_elements(

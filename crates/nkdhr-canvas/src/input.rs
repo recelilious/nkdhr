@@ -44,6 +44,8 @@ struct InputGroup {
     size: Size<i32, Logical>,
     canvas_anchor: Point<f64, Logical>,
     display_rect: Rectangle<i32, Logical>,
+    output_name: String,
+    output_global_location: Point<i32, Logical>,
 }
 
 /// Backend-independent compositor input dispatch. Backend code supplies the
@@ -595,6 +597,9 @@ fn active_group(app: &App, layout: &OutputLayout) -> Option<InputGroup> {
                 size: group.logical_size,
                 canvas_anchor: group.canvas_anchor,
                 display_rect,
+                output_name: display.map_or_else(String::new, |output| output.name.clone()),
+                output_global_location: display
+                    .map_or(group.global_location, |output| output.global_location),
             }
         })
 }
@@ -705,6 +710,20 @@ fn handle_pointer_motion(
             app,
             crate::actions::CanvasActionPayload::PointerPosition(pointer_pos),
         );
+        pointer.motion(
+            app,
+            None,
+            &MotionEvent {
+                location: pointer_pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(app);
+        return;
+    }
+    let shell_position = pointer_pos - group.output_global_location.to_f64();
+    if app.shell.pointer_motion(&group.output_name, shell_position) {
         pointer.motion(
             app,
             None,
@@ -998,6 +1017,9 @@ fn handle_keyboard<B: InputBackend>(
                     modifiers: ui_modifiers,
                 }
             };
+            if app.shell.keyboard(key_event.clone()) {
+                return FilterResult::Intercept(());
+            }
             let mut ui_handled = app.active_canvas_mut().dispatch_pinned_keyboard(&key_event)
                 == InputHandled::Captured;
             if pressed
@@ -1270,6 +1292,18 @@ fn handle_pointer_button<B: InputBackend>(
         return;
     }
 
+    let shell_position = pointer.current_location() - group.output_global_location.to_f64();
+    if app.shell.pointer_button(
+        &group.output_name,
+        shell_position,
+        button_code,
+        button_state,
+        ui_modifiers(keyboard.modifier_state()),
+        1,
+    ) {
+        return;
+    }
+
     if app.active_view().in_overview {
         if button_state == ButtonState::Pressed && button_code == BTN_LEFT {
             handle_overview_click(app, pointer, group);
@@ -1421,6 +1455,16 @@ fn handle_pointer_axis<B: InputBackend>(
         .or_else(|| event.amount_v120(Axis::Vertical).map(|v120| v120 / 6.0))
         .unwrap_or(0.0);
     if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let shell_position = pointer.current_location() - group.output_global_location.to_f64();
+    if app.shell.pointer_axis(
+        &group.output_name,
+        shell_position,
+        dx,
+        dy,
+        ui_modifiers(keyboard.modifier_state()),
+    ) {
         return;
     }
     if !has_active_pointer_constraint(pointer)

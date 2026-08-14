@@ -613,3 +613,22 @@ COMP-1 到 COMP-7 直接通过 Smithay `GlesRenderer`/`Frame` API 把所有内�
 shell，在 Phase 3/4 设计，提前做只会重复劳动。`PinnedNode::render_data` 返回与 renderer
 无关的 payload，再由宿主适配成轻量 `CanvasRenderElement`，也是同一边界：Phase 3
 接入正式图元层时，无需向节点注册表暴露后端特定输入或 renderer 类型。
+
+## Phase 4：输出本地 shell 宿主
+
+`nkdhr-shell::ShellSurface` 与世界坐标 `PinnedNode` 分离。`ShellHost` 按物理输出名持有一棵
+全输出透明 retained tree，只有实际占用的四角/四边中心区域绘制并命中；稳定的
+`EdgeRegion` 身份不会随隐藏或重排消失。输出布局热更新会增删对应 surface，并同步清理
+离开输出的 pointer、keyboard 与 button-capture 所有权。所有 surface 共享同一个
+`ThemeRuntime`，但保留各自尺寸、比例、焦点和动画状态，因此多显示器活动不会互相接管。
+
+合成顺序把 shell 放在窗口/画布之后、指针和拖放图标之前。它使用整输出透明 render
+element，使材质的 backdrop blur 能采样已经绘制的窗口，而不是把窗口先拍平到临时纹理。
+首个真实组合是已经确认的上中 calm 数字时间；其他区域只有稳定身份，还不能按成品计数。
+
+自定义 GLES 绘制必须把 output-space damage/clip 经活动 frame projection 转成 OpenGL
+bottom-left framebuffer 坐标。nested 后端使用 `Flipped180`；若直接把 top-left clip 交给
+`glScissor`，无裁剪的玻璃外框仍可见，但文字与局部模糊会被裁到相反边。backdrop snapshot
+还会在默认 framebuffer 上显式选择 `BACK` read buffer（FBO 使用 `COLOR_ATTACHMENT0`），
+完成后恢复原 read buffer。单元测试覆盖两种坐标方向，Weston/Pixman 嵌套冒烟同时验证
+时间字形、背景模糊和合成器持续存活。

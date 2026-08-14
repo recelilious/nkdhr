@@ -51,6 +51,7 @@ use crate::canvas::world::{Animation, Canvas, Drag, ManagedWindow, Viewport};
 use crate::cursor::CursorState;
 use crate::protocols::ProtocolState;
 use crate::settings::InteractionSettings;
+use crate::shell_host::ShellHost;
 
 const DEFAULT_GROUP: &str = "default";
 const DEFAULT_CANVAS: &str = "default";
@@ -280,6 +281,9 @@ pub struct App {
     pub suppress_pointer_release: bool,
     pub suppress_gesture_remainder: bool,
     pub action_dispatcher: Option<crate::actions::CanvasActionDispatcher>,
+    /// Fixed-to-output retained shell layer, independent from every canvas
+    /// viewport and workspace transition.
+    pub shell: ShellHost,
     pub binding_generation: u64,
     /// Hot-reloadable keybindings and grid policy from CTRL-5's `canvas`
     /// namespace, shared with the `Config1.Changed` watcher.
@@ -367,6 +371,7 @@ impl App {
             suppress_pointer_release: false,
             suppress_gesture_remainder: false,
             action_dispatcher: Some(crate::actions::dispatcher()),
+            shell: ShellHost::default(),
             binding_generation,
             interaction_settings,
             marks,
@@ -408,6 +413,7 @@ impl App {
             .iter()
             .map(|group| group.name.clone())
             .collect();
+        self.shell.reconcile(layout);
         self.protocols.reconcile_outputs(
             layout
                 .groups

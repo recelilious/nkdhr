@@ -132,7 +132,11 @@ numbered workspaces remain independently active per output group, preserve
 each local canvas/viewport/focus, swap safely when a visible number is
 requested elsewhere, and cross-fade window stacks on both nested and TTY
 backends. The shared typed bindings reserve Super+1…9/0 for this model and
-move persistent canvas marks to Super+Alt+digits.
+move persistent canvas marks to Super+Alt+digits. A separate retained shell
+surface now exists per physical output, follows hot theme generations, owns
+output-local input isolation and renders the confirmed calm top-center clock
+through the production clay/glass and real backdrop-blur path. Output hotplug
+removes the matching surface and capture/focus ownership atomically.
 
 ## Documentation
 
