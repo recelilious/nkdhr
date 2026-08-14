@@ -580,7 +580,7 @@ pub(crate) fn inspector(
     .child(
         Element::new(Flex {
             axis: Axis::Vertical,
-            gap: 12.0,
+            gap: 10.0,
             main_alignment: MainAxisAlignment::Start,
             cross_alignment: CrossAxisAlignment::Stretch,
         })

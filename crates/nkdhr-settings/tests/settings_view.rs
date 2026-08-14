@@ -355,6 +355,7 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
     assert_eq!(root.rect(graph_workspace).unwrap().width, 744.0);
     assert_eq!(root.rect(inspector).unwrap().width, 288.0);
     assert_eq!(root.rect(inspector).unwrap().x, 856.0);
+    let inspector_rect = root.rect(inspector).unwrap();
     let [scope_rail, graph, preview] = root.children(graph_workspace).unwrap().try_into().unwrap();
     assert_eq!(root.rect(scope_rail).unwrap().height, 88.0);
     assert_eq!(root.rect(graph).unwrap().height, 356.0);
@@ -368,6 +369,25 @@ fn professional_motion_workspace_uses_the_owner_approved_p1_allocation() {
         "the continuous Settings workface owns the only backdrop blur"
     );
     let semantics = root.semantic_tree();
+    let reset = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("重置")
+        })
+        .expect("the motion inspector exposes its reset action");
+    let save = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("保存")
+        })
+        .expect("the motion inspector exposes its save action");
+    assert_eq!(reset.bounds.y, save.bounds.y);
+    assert!(
+        inspector_rect.bottom() - save.bounds.bottom() >= 15.0,
+        "inspector actions must retain their bottom safe inset"
+    );
     assert!(semantics.iter().any(|node| {
         node.semantics.role == SemanticRole::Group
             && node.semantics.label.as_deref() == Some("专业动画工作室")
