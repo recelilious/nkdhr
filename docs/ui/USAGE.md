@@ -565,8 +565,11 @@ precision-touchpad viewport gestures, keyboard/history/clipboard commands and
 host-clock preview playback to the owner-reviewed Settings composition. Its
 duration input accepts an integer from 1 through 60000 with an optional `ms`
 suffix; invalid submissions preserve the last-good document. Visible Fluid
-percentages map into sparse semantic overrides and survive reconciliation;
-persistence remains a later slice.
+percentages map into sparse semantic overrides and survive reconciliation. The
+Save action writes the current transition into `theme.profile` through the
+shared host's non-blocking CTRL-5 worker. Pending, success and failure remain
+visible in both the inspector and status bar; preset-library import/export is a
+later slice.
 
 ## Verification tools
 

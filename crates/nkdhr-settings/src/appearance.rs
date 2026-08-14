@@ -15,7 +15,10 @@ use std::{
 };
 
 use nkdhr_render::{Color, Rect, Sampling, TextureError, TextureId, TextureStore};
-use nkdhr_theme::{BuiltInTheme, PaletteData, ThemeBase, ThemeProfile};
+use nkdhr_theme::{
+    BuiltInTheme, MotionSemanticFamilyData, MotionStyleProfileData, MotionValuesData, PaletteData,
+    ThemeBase, ThemeProfile, ThemeProfileError,
+};
 use nkdhr_ui::{
     Align, Alignment, AnimationCtx, ArrangeCtx, Axis, Button, ButtonVariant, Constraints,
     CrossAxisAlignment, Element, Flex, GlassSurface, Insets, Invalidation, List, ListEntry,
@@ -397,6 +400,12 @@ pub struct AppearanceSnapshot {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MotionEditorSaveOutcome {
+    AlreadySaved,
+    PersistenceRequired(ThemePersistenceRequest),
+}
+
 #[derive(Debug, Clone)]
 enum UndoAction {
     Scheme {
@@ -411,6 +420,12 @@ enum UndoAction {
     FontFamily(String),
     Density(ComponentDensity),
     OpacityOverride(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingMotionEditorSave {
+    token: ThemePersistenceToken,
+    values: MotionValuesData,
 }
 
 struct AppearanceState {
@@ -438,6 +453,9 @@ struct AppearanceState {
     mobile_navigation_open: Reactive<bool>,
     composition_revision: Reactive<u64>,
     motion_editor: crate::motion_editor_view::MotionEditorSession,
+    motion_editor_saved: RefCell<Option<MotionValuesData>>,
+    motion_editor_pending: RefCell<Option<PendingMotionEditorSave>>,
+    motion_editor_persistence_outbox: RefCell<Option<ThemePersistenceRequest>>,
     next_apply_generation: Cell<u64>,
     pending_apply: RefCell<BTreeMap<AppearanceSetting, SettingsApplyToken>>,
     undo: RefCell<Option<UndoAction>>,
@@ -465,9 +483,12 @@ impl AppearanceSettings {
 
     pub fn with_theme_profiles(theme_profiles: ThemeProfileEditor) -> Self {
         let scheme = scheme_for_profile(&theme_profiles.snapshot().committed_profile);
+        let saved_motion_editor = persisted_motion_editor_values(&theme_profiles);
         let composition_revision = Reactive::new(1);
-        let motion_editor =
-            crate::motion_editor_view::MotionEditorSession::new(composition_revision.clone());
+        let motion_editor = crate::motion_editor_view::MotionEditorSession::new(
+            composition_revision.clone(),
+            saved_motion_editor.clone(),
+        );
         Self {
             state: Rc::new(AppearanceState {
                 theme_profiles,
@@ -494,6 +515,9 @@ impl AppearanceSettings {
                 mobile_navigation_open: Reactive::new(false),
                 composition_revision,
                 motion_editor,
+                motion_editor_saved: RefCell::new(saved_motion_editor),
+                motion_editor_pending: RefCell::new(None),
+                motion_editor_persistence_outbox: RefCell::new(None),
                 next_apply_generation: Cell::new(1),
                 pending_apply: RefCell::new(BTreeMap::new()),
                 undo: RefCell::new(None),
@@ -601,12 +625,42 @@ impl AppearanceSettings {
         token: ThemePersistenceToken,
         result: Result<String, String>,
     ) -> bool {
+        let succeeded = result.is_ok();
+        let motion_save = self
+            .state
+            .motion_editor_pending
+            .borrow()
+            .as_ref()
+            .filter(|pending| pending.token == token)
+            .cloned();
+        let completed_motion_save = motion_save.is_some();
         let completed = self
             .state
             .theme_profiles
             .complete_persistence(token, result);
         if completed {
+            if let Some(pending) = motion_save {
+                self.state.motion_editor_pending.replace(None);
+                if succeeded {
+                    self.state.motion_editor_saved.replace(Some(pending.values));
+                }
+            }
             self.sync_theme_editor_feedback();
+            if completed_motion_save && !succeeded {
+                self.state
+                    .feedback_setting
+                    .set(Some(AppearanceSetting::Motion));
+            }
+            if succeeded && completed_motion_save && self.motion_editor_is_dirty() {
+                self.state
+                    .status
+                    .set("动画设置已保存；较新的本地编辑仍未保存".to_owned());
+                self.state.feedback.set(SettingsFeedbackKind::Informational);
+                self.state
+                    .feedback_setting
+                    .set(Some(AppearanceSetting::Motion));
+                self.request_reconcile();
+            }
         }
         completed
     }
@@ -708,6 +762,96 @@ impl AppearanceSettings {
         self.state.motion_editor.snapshot()
     }
 
+    pub fn motion_editor_is_dirty(&self) -> bool {
+        self.state.motion_editor_saved.borrow().as_ref()
+            != Some(&self.state.motion_editor.authored_values())
+    }
+
+    pub fn motion_editor_save_pending(&self) -> bool {
+        self.state.motion_editor_pending.borrow().is_some()
+    }
+
+    pub fn begin_motion_editor_save(&self) -> Result<MotionEditorSaveOutcome, ThemeEditorError> {
+        if self
+            .state
+            .theme_profiles
+            .snapshot()
+            .pending
+            .contains(&ThemePersistenceTarget::ActiveProfile)
+        {
+            return Err(ThemeEditorError::PersistencePending(
+                ThemePersistenceTarget::ActiveProfile,
+            ));
+        }
+
+        let values = self.state.motion_editor.authored_values();
+        let editor = self.state.theme_profiles.snapshot();
+        let mut candidate = editor
+            .preview_profile
+            .clone()
+            .unwrap_or_else(|| editor.committed_profile.clone());
+        let runtime = self.state.theme_profiles.runtime().snapshot();
+        let mut style = runtime
+            .resolved()
+            .data
+            .motion
+            .style
+            .clone()
+            .unwrap_or_default();
+        apply_motion_editor_values(&mut style, values.clone());
+        set_motion_style_override(&mut candidate, &style)?;
+        candidate = ThemeProfile::from_json(&candidate.to_json_pretty()?)?;
+
+        if candidate == editor.committed_profile && editor.preview_profile.is_none() {
+            self.state.motion_editor_saved.replace(Some(values));
+            self.state.status.set("动画设置已经是已保存值".to_owned());
+            self.state.feedback.set(SettingsFeedbackKind::Success);
+            self.state.feedback_setting.set(None);
+            self.request_reconcile();
+            return Ok(MotionEditorSaveOutcome::AlreadySaved);
+        }
+
+        self.state.theme_profiles.preview(candidate)?;
+        self.sync_theme_editor_feedback();
+        let request = self.begin_theme_profile_commit()?;
+        self.state
+            .motion_editor_pending
+            .replace(Some(PendingMotionEditorSave {
+                token: request.token(),
+                values,
+            }));
+        self.state.status.set("正在保存动画设置".to_owned());
+        self.state.feedback.set(SettingsFeedbackKind::Pending);
+        self.state
+            .feedback_setting
+            .set(Some(AppearanceSetting::Motion));
+        self.request_reconcile();
+        Ok(MotionEditorSaveOutcome::PersistenceRequired(request))
+    }
+
+    pub fn take_motion_editor_persistence_request(&self) -> Option<ThemePersistenceRequest> {
+        self.state.motion_editor_persistence_outbox.take()
+    }
+
+    pub(crate) fn queue_motion_editor_save(&self) {
+        match self.begin_motion_editor_save() {
+            Ok(MotionEditorSaveOutcome::AlreadySaved) => {}
+            Ok(MotionEditorSaveOutcome::PersistenceRequired(request)) => {
+                self.state
+                    .motion_editor_persistence_outbox
+                    .replace(Some(request));
+            }
+            Err(error) => {
+                self.state.feedback.set(SettingsFeedbackKind::Error);
+                self.state
+                    .feedback_setting
+                    .set(Some(AppearanceSetting::Motion));
+                self.state.status.set(format!("动画设置保存失败：{error}"));
+                self.request_reconcile();
+            }
+        }
+    }
+
     pub fn search_query(&self) -> String {
         self.state.search.get()
     }
@@ -728,13 +872,25 @@ impl AppearanceSettings {
         let mut pending_settings: Vec<_> =
             self.state.pending_apply.borrow().keys().copied().collect();
         let theme = self.state.theme_profiles.snapshot();
-        if (theme
+        if theme
             .pending
             .contains(&ThemePersistenceTarget::ActiveProfile)
-            || theme.wallpaper_regeneration_pending)
+        {
+            let setting = if self.motion_editor_save_pending() {
+                AppearanceSetting::Motion
+            } else {
+                AppearanceSetting::Scheme
+            };
+            if !pending_settings.contains(&setting) {
+                pending_settings.push(setting);
+            }
+        }
+        if theme.wallpaper_regeneration_pending
             && !pending_settings.contains(&AppearanceSetting::Scheme)
         {
             pending_settings.push(AppearanceSetting::Scheme);
+        }
+        if !pending_settings.is_empty() {
             pending_settings.sort_unstable();
         }
         AppearanceSnapshot {
@@ -886,11 +1042,15 @@ impl AppearanceSettings {
         };
         let content = self.content(Arc::clone(&theme), nested, spec)?;
         let inspector = if motion_editor {
+            let save_model = self.clone();
             crate::motion_editor_view::inspector(
                 Arc::clone(&theme),
                 nested,
                 spec.inspector_is_drawer,
                 self.state.motion_editor.clone(),
+                self.motion_editor_is_dirty(),
+                self.motion_editor_save_pending(),
+                Rc::new(move || save_model.queue_motion_editor_save()),
             )?
         } else {
             self.inspector(Arc::clone(&theme), nested, spec.inspector_is_drawer)
@@ -2080,6 +2240,82 @@ impl AppearanceSettings {
     }
 }
 
+fn persisted_motion_editor_values(editor: &ThemeProfileEditor) -> Option<MotionValuesData> {
+    let runtime = editor.runtime().snapshot();
+    runtime
+        .resolved()
+        .data
+        .motion
+        .style
+        .as_ref()?
+        .overrides
+        .families
+        .get(&MotionSemanticFamilyData::PanelEnter)?
+        .components
+        .get("settings.drawer")?
+        .transitions
+        .get("open")
+        .cloned()
+}
+
+fn apply_motion_editor_values(style: &mut MotionStyleProfileData, values: MotionValuesData) {
+    const COMPONENT: &str = "settings.drawer";
+    const TRANSITION: &str = "open";
+
+    if values.is_empty() {
+        if let Some(family) = style
+            .overrides
+            .families
+            .get_mut(&MotionSemanticFamilyData::PanelEnter)
+        {
+            if let Some(component) = family.components.get_mut(COMPONENT) {
+                component.transitions.remove(TRANSITION);
+                if component.values.is_empty() && component.transitions.is_empty() {
+                    family.components.remove(COMPONENT);
+                }
+            }
+            if family.values.is_empty() && family.components.is_empty() {
+                style
+                    .overrides
+                    .families
+                    .remove(&MotionSemanticFamilyData::PanelEnter);
+            }
+        }
+        return;
+    }
+
+    style
+        .overrides
+        .families
+        .entry(MotionSemanticFamilyData::PanelEnter)
+        .or_default()
+        .components
+        .entry(COMPONENT.to_owned())
+        .or_default()
+        .transitions
+        .insert(TRANSITION.to_owned(), values);
+}
+
+fn set_motion_style_override(
+    profile: &mut ThemeProfile,
+    style: &MotionStyleProfileData,
+) -> Result<(), ThemeEditorError> {
+    let root = profile
+        .overrides
+        .as_object_mut()
+        .ok_or(ThemeProfileError::OverridesMustBeObject)?;
+    let motion = root
+        .entry("motion".to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    let motion = motion.as_object_mut().ok_or_else(|| {
+        ThemeProfileError::InvalidOverride("motion override must be an object".to_owned())
+    })?;
+    let style = serde_json::to_value(style)
+        .map_err(|error| ThemeProfileError::Syntax(error.to_string()))?;
+    motion.insert("style".to_owned(), style);
+    Ok(())
+}
+
 fn profile_for_scheme(scheme: ColorScheme) -> Option<ThemeProfile> {
     match scheme {
         ColorScheme::TokyoNight => Some(ThemeProfile::default()),
@@ -2830,6 +3066,125 @@ mod tests {
         assert!(model.complete_theme_persistence(request.token(), Ok("主题配置已保存".into())));
         assert_eq!(model.snapshot().feedback, SettingsFeedbackKind::Success);
         assert_eq!(model.theme_profiles().snapshot().committed_profile, nord);
+    }
+
+    #[test]
+    fn motion_editor_save_commits_the_exact_active_transition_atomically() {
+        let model = AppearanceSettings::new();
+        model.open_motion_editor();
+        let committed = model.theme_profiles().snapshot().committed_profile;
+        let edited = model.motion_editor_snapshot();
+
+        let MotionEditorSaveOutcome::PersistenceRequired(request) =
+            model.begin_motion_editor_save().unwrap()
+        else {
+            panic!("the owner-reviewed local curve starts dirty")
+        };
+        assert_eq!(request.key(), crate::ACTIVE_THEME_PROFILE_KEY);
+        assert!(model.motion_editor_save_pending());
+        assert!(model.motion_editor_is_dirty());
+        assert_eq!(
+            model.snapshot().pending_settings,
+            vec![AppearanceSetting::Motion]
+        );
+        assert_eq!(
+            model.theme_profiles().snapshot().committed_profile,
+            committed,
+            "durable state cannot change before the host confirms CTRL-5"
+        );
+
+        let candidate = ThemeProfile::from_json(request.value()).unwrap();
+        let resolved = candidate.resolve().unwrap();
+        let style = resolved.data.motion.style.as_ref().unwrap();
+        let values = &style.overrides.families[&MotionSemanticFamilyData::PanelEnter]
+            .components["settings.drawer"]
+            .transitions["open"];
+        let persisted = nkdhr_ui::CompiledMotionCurve::compile(values.curve.as_ref().unwrap())
+            .expect("the persisted curve remains compilable");
+        let edited = nkdhr_ui::CompiledMotionCurve::compile(&edited.curve).unwrap();
+        for time in [0.0, 0.2, 0.5, 0.8, 1.0] {
+            assert!((persisted.sample(time) - edited.sample(time)).abs() <= 1.0e-12);
+        }
+        assert_eq!(values.duration_ms, None, "inherited duration stays sparse");
+        assert!(values.fluid.is_empty());
+
+        assert!(model.complete_theme_persistence(request.token(), Ok("动画设置已保存".to_owned())));
+        assert!(!model.motion_editor_save_pending());
+        assert!(!model.motion_editor_is_dirty());
+        assert_eq!(
+            model.theme_profiles().snapshot().committed_profile,
+            candidate
+        );
+        assert_eq!(model.snapshot().scheme, ColorScheme::TokyoNight);
+    }
+
+    #[test]
+    fn failed_motion_editor_save_keeps_the_draft_dirty() {
+        let model = AppearanceSettings::new();
+        let MotionEditorSaveOutcome::PersistenceRequired(request) =
+            model.begin_motion_editor_save().unwrap()
+        else {
+            panic!("the initial owner-reviewed draft is unsaved")
+        };
+
+        assert!(
+            model.complete_theme_persistence(request.token(), Err("CTRL-5 暂时不可用".to_owned()))
+        );
+        assert!(!model.motion_editor_save_pending());
+        assert!(model.motion_editor_is_dirty());
+        assert_eq!(model.snapshot().feedback, SettingsFeedbackKind::Error);
+        assert_eq!(
+            model.snapshot().feedback_setting,
+            Some(AppearanceSetting::Motion)
+        );
+        assert_eq!(model.snapshot().status, "CTRL-5 暂时不可用");
+    }
+
+    #[test]
+    fn persisted_motion_transition_restores_as_the_clean_editor_baseline() {
+        let review = AppearanceSettings::new();
+        let mut style = MotionStyleProfileData::default();
+        apply_motion_editor_values(
+            &mut style,
+            MotionValuesData {
+                curve: Some(review.motion_editor_snapshot().curve),
+                duration_ms: Some(420),
+                fluid: nkdhr_theme::MotionFluidOverridesData {
+                    viscosity: Some(3.2),
+                    surface_tension: Some(2.4),
+                    attraction: Some(2.8),
+                    ..Default::default()
+                },
+            },
+        );
+        let mut profile = ThemeProfile::default();
+        set_motion_style_override(&mut profile, &style).unwrap();
+        profile = ThemeProfile::from_json(&profile.to_json_pretty().unwrap()).unwrap();
+        let persisted = profile
+            .resolve()
+            .unwrap()
+            .data
+            .motion
+            .style
+            .unwrap()
+            .overrides
+            .families[&MotionSemanticFamilyData::PanelEnter]
+            .components["settings.drawer"]
+            .transitions["open"]
+            .clone();
+        let editor = ThemeProfileEditor::new(profile, Default::default()).unwrap();
+
+        let restored = AppearanceSettings::with_theme_profiles(editor);
+        assert_eq!(restored.state.motion_editor.authored_values(), persisted);
+        assert_eq!(
+            restored.motion_editor_snapshot().duration,
+            std::time::Duration::from_millis(420)
+        );
+        assert!(!restored.motion_editor_is_dirty());
+        assert_eq!(
+            restored.begin_motion_editor_save().unwrap(),
+            MotionEditorSaveOutcome::AlreadySaved
+        );
     }
 
     #[test]

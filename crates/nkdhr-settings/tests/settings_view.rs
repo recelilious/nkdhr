@@ -6,9 +6,10 @@ use nkdhr_render::{
     software::SoftwareRenderer,
 };
 use nkdhr_settings::{
-    AppearanceSetting, AppearanceSettings, INSPECTOR_WIDTH, LAYOUT_INSET, MotionPreference,
-    SettingsAssets, SettingsFeedbackKind, SettingsLayoutMode,
+    AppearanceSetting, AppearanceSettings, INSPECTOR_WIDTH, LAYOUT_INSET, MotionEditorSaveOutcome,
+    MotionPreference, SettingsAssets, SettingsFeedbackKind, SettingsLayoutMode,
 };
+use nkdhr_theme::{MotionSemanticFamilyData, ThemeProfile};
 use nkdhr_ui::{
     CompiledMotionCurve, ManualClock, MaterialCapabilities, Modifiers, PointerButton, ScrollPhase,
     SemanticRole, Size, Theme, UiEvent, UiRoot,
@@ -571,6 +572,95 @@ fn professional_inspector_edits_duration_and_fluid_values_live() {
         })
         .expect("the rebuilt inspector retains its viscosity value");
     assert_ne!(viscosity.semantics.value.as_deref(), Some("68"));
+
+    let MotionEditorSaveOutcome::PersistenceRequired(request) =
+        model.begin_motion_editor_save().unwrap()
+    else {
+        panic!("the edited inspector has a persistence candidate")
+    };
+    let profile = ThemeProfile::from_json(request.value()).unwrap();
+    let resolved = profile.resolve().unwrap();
+    let values = &resolved
+        .data
+        .motion
+        .style
+        .as_ref()
+        .unwrap()
+        .overrides
+        .families[&MotionSemanticFamilyData::PanelEnter]
+        .components["settings.drawer"]
+        .transitions["open"];
+    assert_eq!(values.duration_ms, Some(420));
+    assert!(values.fluid.viscosity.is_some());
+}
+
+#[test]
+fn professional_inspector_save_uses_the_host_persistence_boundary() {
+    let model = AppearanceSettings::new();
+    model.open_motion_editor();
+    let size = Size::new(GOLDEN_WIDTH as f32, GOLDEN_HEIGHT as f32);
+    let (mut root, _) = settings_list(&model, size, capabilities());
+    let save = root
+        .semantic_tree()
+        .into_iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("保存")
+        })
+        .expect("the dirty inspector exposes its save action");
+    assert!(save.semantics.enabled);
+    let center = Point::new(
+        save.bounds.x + save.bounds.width * 0.5,
+        save.bounds.y + save.bounds.height * 0.5,
+    );
+    for event in [
+        UiEvent::PointerDown {
+            position: center,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        UiEvent::PointerUp {
+            position: center,
+            button: PointerButton::Primary,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+    ] {
+        root.dispatch(&event).unwrap();
+    }
+
+    let request = model
+        .take_motion_editor_persistence_request()
+        .expect("the UI queues one opaque host persistence request");
+    assert!(model.motion_editor_save_pending());
+    let (mut pending_root, _) = settings_list(&model, size, capabilities());
+    let pending = pending_root
+        .semantic_tree()
+        .into_iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("保存")
+        })
+        .unwrap();
+    assert!(!pending.semantics.enabled);
+    assert_eq!(pending.semantics.value.as_deref(), Some("pending"));
+
+    assert!(model.complete_theme_persistence(request.token(), Ok("动画设置已保存".to_owned())));
+    let (mut saved_root, _) = settings_list(&model, size, capabilities());
+    let semantics = saved_root.semantic_tree();
+    let saved = semantics
+        .iter()
+        .find(|node| {
+            node.semantics.role == SemanticRole::Button
+                && node.semantics.label.as_deref() == Some("保存")
+        })
+        .unwrap();
+    assert!(!saved.semantics.enabled);
+    assert_eq!(saved.semantics.value, None);
+    assert!(semantics.iter().any(|node| {
+        node.semantics.label.as_deref() == Some("● 当前层覆盖  ·  已保存")
+    }));
 }
 
 #[test]

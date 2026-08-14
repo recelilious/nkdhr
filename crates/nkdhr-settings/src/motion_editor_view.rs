@@ -22,9 +22,9 @@ use nkdhr_ui::{
     MotionEditorInput, MotionEditorInputController, MotionEditorInputError,
     MotionEditorInputOutcome, MotionEditorKey, MotionEditorModifiers, MotionEditorPlayback,
     MotionEditorTarget, MotionEditorViewportInput, MotionFluidOverridesData, MotionGraphPoint,
-    MotionGraphViewport, Padding, PaintCtx, PointerButton, Reactive, ScrollPhase, SemanticRole,
-    Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text, TextInput,
-    TextInputStatus, TextRole, Theme, ThemeReadSet, Toggle, UiError, UiEvent, Widget,
+    MotionGraphViewport, MotionValuesData, Padding, PaintCtx, PointerButton, Reactive, ScrollPhase,
+    SemanticRole, Semantics, SemanticsCtx, Size, Slider, SliderError, SurfaceState, Text,
+    TextInput, TextInputStatus, TextRole, Theme, ThemeReadSet, Toggle, UiError, UiEvent, Widget,
     paint_fluid_well, resolve_fluid_material_tones, resolve_motion_curve_handles,
 };
 
@@ -99,13 +99,29 @@ struct MotionEditorRenderState {
 }
 
 impl MotionEditorSession {
-    pub(crate) fn new(composition_revision: Reactive<u64>) -> Self {
+    pub(crate) fn new(
+        composition_revision: Reactive<u64>,
+        persisted_values: Option<MotionValuesData>,
+    ) -> Self {
         let inherited = CubicBezier::SETTLE
             .to_motion_curve_data()
             .expect("the approved inherited curve is portable");
-        let explicit = overshoot_curve()
-            .to_motion_curve_data()
-            .expect("the approved review curve is portable");
+        let (explicit, duration_override, fluid_overrides) = match persisted_values {
+            Some(values) => (
+                values.curve,
+                values.duration_ms.map(Duration::from_millis),
+                values.fluid,
+            ),
+            None => (
+                Some(
+                    overshoot_curve()
+                        .to_motion_curve_data()
+                        .expect("the approved review curve is portable"),
+                ),
+                None,
+                MotionFluidOverridesData::default(),
+            ),
+        };
         let consumers = MotionCurveConsumerSet::new(vec![
             MotionCurveConsumer::new("settings.drawer.open", MotionCurveConsumerDomain::Spatial)
                 .expect("the approved consumer identity is valid"),
@@ -115,9 +131,9 @@ impl MotionEditorSession {
             .expect("the approved inherited curve compiles");
         let mut editor = MotionCurveEditor::new(
             inherited,
-            Some(explicit),
+            explicit,
             Duration::from_millis(280),
-            None,
+            duration_override,
             consumers,
             MotionCurveEditorConfig::default(),
         )
@@ -129,15 +145,16 @@ impl MotionEditorSession {
         editor
             .scrub_playhead(0.46)
             .expect("the approved resting playhead is finite");
+        let duration_text = format!("{} ms", editor.snapshot().duration.as_millis());
         Self {
             inner: Rc::new(MotionEditorSessionInner {
                 editor: RefCell::new(editor),
                 inherited_compiled,
                 input: RefCell::new(MotionEditorInputController::default()),
                 next_edit_id: Cell::new(1),
-                duration_text: Reactive::new("280 ms".to_owned()),
+                duration_text: Reactive::new(duration_text),
                 duration_status: Reactive::new(TextInputStatus::Idle),
-                fluid_overrides: Cell::new(MotionFluidOverridesData::default()),
+                fluid_overrides: Cell::new(fluid_overrides),
                 composition_revision,
                 visual_revision: Reactive::new(1),
             }),
@@ -146,6 +163,20 @@ impl MotionEditorSession {
 
     pub(crate) fn snapshot(&self) -> MotionCurveEditorSnapshot {
         self.inner.editor.borrow().snapshot()
+    }
+
+    pub(crate) fn authored_values(&self) -> MotionValuesData {
+        let snapshot = self.snapshot();
+        MotionValuesData {
+            curve: matches!(snapshot.curve_source, nkdhr_ui::MotionCurveSource::Explicit)
+                .then_some(snapshot.curve),
+            duration_ms: matches!(
+                snapshot.duration_source,
+                nkdhr_ui::MotionCurveSource::Explicit
+            )
+            .then_some(snapshot.duration.as_millis() as u64),
+            fluid: self.fluid_overrides(),
+        }
     }
 
     fn render_state(&self) -> MotionEditorRenderState {
@@ -396,10 +427,19 @@ pub(crate) fn inspector(
     capabilities: MaterialCapabilities,
     drawer: bool,
     session: MotionEditorSession,
+    save_dirty: bool,
+    save_pending: bool,
+    save_action: Rc<dyn Fn()>,
 ) -> Result<Element, SliderError> {
     let snapshot = session.snapshot();
     let inherited = text(
-        "● 当前层覆盖  ·  未保存",
+        if save_pending {
+            "● 当前层覆盖  ·  正在保存"
+        } else if save_dirty {
+            "● 当前层覆盖  ·  未保存"
+        } else {
+            "● 当前层覆盖  ·  已保存"
+        },
         TextRole::Caption,
         theme.palette.text_muted,
         &theme,
@@ -571,7 +611,9 @@ pub(crate) fn inspector(
         Button::new("保存", Arc::clone(&theme))
             .variant(ButtonVariant::FluidSelected)
             .capabilities(capabilities)
-            .enabled(true),
+            .pending(save_pending)
+            .enabled(save_dirty && !save_pending)
+            .on_activate(move || save_action()),
     ));
 
     let content = Element::new(Padding {
@@ -2402,7 +2444,7 @@ mod tests {
     #[test]
     fn editor_session_keeps_authored_state_across_view_recomposition() {
         let revision = Reactive::new(1);
-        let session = MotionEditorSession::new(revision.clone());
+        let session = MotionEditorSession::new(revision.clone(), None);
         let initial = session.snapshot();
         let point = MotionGraphPoint::new(0.5, session.render_state().compiled.sample(0.5));
         let outcome = session
@@ -2436,7 +2478,7 @@ mod tests {
 
     #[test]
     fn editor_session_playback_uses_host_time_and_reaches_the_return_frame() {
-        let session = MotionEditorSession::new(Reactive::new(1));
+        let session = MotionEditorSession::new(Reactive::new(1), None);
         let _ = session
             .handle(MotionEditorInput::Key {
                 key: MotionEditorKey::Space,
@@ -2460,7 +2502,7 @@ mod tests {
     #[test]
     fn inspector_values_are_authoritative_validated_and_reset_together() {
         let revision = Reactive::new(1);
-        let session = MotionEditorSession::new(revision.clone());
+        let session = MotionEditorSession::new(revision.clone(), None);
 
         session.submit_duration("420 ms");
         let duration = session.snapshot();

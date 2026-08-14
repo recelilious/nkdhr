@@ -406,8 +406,12 @@ end/cancel 使用一个捕获的 UI-7D viewport transaction。这些操作只更
 这一切片刻意保持已确认的布局分配、Tokyo Night 配色、Maple Mono 字体和 renderer-native
 材质实现。持续时间输入现在以原子范围校验修改权威曲线文档；三个可见 Fluid 滑条写入
 稀疏 `MotionFluidOverridesData`，并在 reconcile 后保留，重置会一并移除两类显式覆盖。
-选中关键帧的数值绑定、保存/导出持久化，以及未来守恒液态导航选中块仍属于后续 UI-7E
-工作。
+保存只把这一 transition 写入活动动画风格覆盖，规范化完整 `theme.profile` payload 后产生
+一个不透明 CTRL-5 事务。共享 Settings 宿主在后台工作线程执行 D-Bus 写入；只有匹配的
+宿主确认才会清除未保存状态，失败时草稿仍可恢复。宿主创建时会先读取有效活动 profile，
+已持久化的 `PanelEnter/settings.drawer/open` transition 会成为干净基线，而不会被评审用
+初值覆盖。选中关键帧的数值绑定、预设资料库
+导入/导出，以及未来守恒液态导航选中块仍属于后续 UI-7E 工作。
 
 clay/glass 深度遵循明确的“边缘—内容分离”约束：外部斜向阴影继续表达部件悬浮高度；
 跟随主题的内高光与内暗部只占据一条窄边缘带，其模糊半径不能再复用外部悬浮阴影的

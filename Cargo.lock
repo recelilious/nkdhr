@@ -1522,12 +1522,14 @@ name = "nkdhr-settings"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "nkdhr-ipc",
  "nkdhr-render",
  "nkdhr-theme",
  "nkdhr-ui",
  "serde_json",
  "smithay",
  "wayland-egl",
+ "zbus",
 ]
 
 [[package]]

@@ -886,9 +886,16 @@ palette, Maple Mono typography and renderer-native material treatment. The
 duration field now edits the authoritative curve document with atomic range
 validation, while the three visible Fluid sliders write sparse
 `MotionFluidOverridesData` values and retain them across reconciliation. Reset
-removes both kinds of explicit override. Selected-keyframe numeric bindings,
-save/export persistence and the future conserved-liquid navigation selection
-remain subsequent UI-7E work.
+removes both kinds of explicit override. Save materializes only this transition
+into the active motion-style override, canonicalizes the complete
+`theme.profile` payload, and returns one opaque CTRL-5 transaction. The shared
+Settings host performs that D-Bus write on a background worker; the draft stays
+dirty until the matching host confirmation and remains recoverable on failure.
+At host construction, a valid active profile is read before the editor session
+is seeded, so a persisted `PanelEnter/settings.drawer/open` transition becomes
+the clean baseline instead of being replaced by the review fixture.
+Selected-keyframe numeric bindings, preset-library import/export and the future
+conserved-liquid navigation selection remain subsequent UI-7E work.
 
 Clay/glass depth follows an explicit edge/content separation invariant. Outer
 directional shadow keeps describing the surface's elevation, while theme-aware
