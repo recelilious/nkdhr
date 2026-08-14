@@ -269,10 +269,16 @@ ease-out-cubic。每次渲染循环在绘制前调用 `advance_animations`，推
 CTRL-5 引擎。COMP-5 按画布隔离，格式为
 `v2;<hex-canvas>:<digit>:<x>,<y>;...`，十六进制让任意 UTF-8 画布名无歧义；
 旧 `<digit>:<x>,<y>;...` 格式仍加载到 `default` 画布。
-`super+shift+<digit>` 保存当前中心并立即写入，`super+<digit>` 动画跳转并在需要时
+`super+alt+shift+<digit>` 保存当前中心并立即写入，`super+alt+<digit>` 动画跳转并在需要时
 退出总览。数字按键使用原始未 shift 的 level（`KeysymHandle::raw_syms()`），
-所以 `super+shift+3` 仍指“标记 3”。总览加标记就是完整的长距离导航模型，
-有意不提供小地图或窗口切换网格。
+所以 `super+alt+shift+3` 仍指“标记 3”。
+
+**编号工作区**位于第一等画布之上。`WorkspaceAssignments` 为每个正整数维护唯一的
+全局归属，并为稳定输出组名称维护一个本地活动编号。新输出组取得最小未占用编号；
+请求未显示编号会把它附着到当前组，请求已在另一组显示的编号会交换两个完整
+`GroupView`。非活动视图保留画布、视口和焦点。`WorkspaceFade` 只在 300 ms
+smoothstep 过渡期间保留旧画布/视口；输入立即指向新视图，两个后端以互补透明度按
+前后顺序绘制两套窗口。`super+1…9/0` 对应工作区 1…10。
 
 Phase 2 没有为“用键盘移动焦点窗口”分配快捷键。它被记录为 Phase 3 工具包出现后，
 与完整快捷键、可发现性、设置和视觉反馈一同设计的候选项，再由 Phase 4 确定 shell

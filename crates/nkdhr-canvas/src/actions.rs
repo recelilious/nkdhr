@@ -10,6 +10,7 @@ use nkdhr_ui::{
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Size};
 
+use crate::canvas::workspace::WorkspaceId;
 use crate::canvas::world::{Animation, Drag, ResizeEdge, Viewport, World};
 use crate::state::App;
 
@@ -246,6 +247,12 @@ fn dispatch_to_canvas(
         ("canvas.window.resize-step", ActionPhase::Invoke(_)) => {
             resize_focused_step(app, required_direction(invocation)?);
         }
+        ("canvas.workspace.switch", ActionPhase::Invoke(_)) => {
+            let workspace = WorkspaceId::new(required_workspace(invocation)?)
+                .map_err(|error| error.to_string())?;
+            app.switch_workspace(workspace)
+                .map_err(|error| error.to_string())?;
+        }
         ("canvas.mark.jump", ActionPhase::Invoke(_)) => {
             crate::input::jump_to_mark(app, required_index(invocation)?);
         }
@@ -384,6 +391,13 @@ fn required_index(invocation: &ValidatedActionInvocation) -> Result<u8, String> 
         .integer("index")
         .and_then(|value| u8::try_from(value).ok())
         .ok_or_else(|| "validated mark index is missing".to_owned())
+}
+
+fn required_workspace(invocation: &ValidatedActionInvocation) -> Result<u16, String> {
+    invocation
+        .integer("workspace")
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| "validated workspace number is missing".to_owned())
 }
 
 fn direction_delta(direction: &str, step: f64) -> Result<(f64, f64), String> {

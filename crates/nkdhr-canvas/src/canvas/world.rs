@@ -508,6 +508,7 @@ impl Viewport {
 /// by the render loop's own frame timing rather than a separate animation
 /// engine (there isn't one yet; that's a Phase 3 UI concern once there are
 /// more things than viewport moves to animate).
+#[derive(Clone)]
 pub struct Animation {
     from: Viewport,
     to: Viewport,

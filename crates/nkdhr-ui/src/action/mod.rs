@@ -1655,6 +1655,15 @@ fn built_in_descriptors() -> Vec<ActionDescriptor> {
         required: true,
         default: None,
     };
+    let workspace = ActionArgument {
+        description: "Global workspace number".to_owned(),
+        schema: ActionValueSchema::Integer {
+            minimum: 1,
+            maximum: 10,
+        },
+        required: true,
+        default: None,
+    };
     vec![
         descriptor(
             "canvas.window.close",
@@ -1716,6 +1725,13 @@ fn built_in_descriptors() -> Vec<ActionDescriptor> {
             ActionKind::Instant,
             "direction",
             direction(),
+        ),
+        descriptor_with(
+            "canvas.workspace.switch",
+            "Switch the locally active output group to a numbered workspace",
+            ActionKind::Instant,
+            "workspace",
+            workspace,
         ),
         descriptor_with(
             "canvas.mark.jump",
@@ -1836,11 +1852,20 @@ pub fn default_compositor_bindings(
     }
 
     for index in 0..=9 {
+        let workspace = if index == 0 { 10 } else { index };
+        bindings.push(key_binding(
+            &format!("workspace-switch-{workspace}"),
+            BindingContext::Canvas,
+            index.to_string(),
+            &[Modifier::Logo],
+            "canvas.workspace.switch",
+            Some(("workspace", ActionValue::Integer(workspace))),
+        ));
         bindings.push(key_binding(
             &format!("mark-jump-{index}"),
             BindingContext::Canvas,
             index.to_string(),
-            &[Modifier::Logo],
+            &[Modifier::Alt, Modifier::Logo],
             "canvas.mark.jump",
             Some(("index", ActionValue::Integer(index))),
         ));
@@ -1848,7 +1873,7 @@ pub fn default_compositor_bindings(
             &format!("mark-set-{index}"),
             BindingContext::Canvas,
             index.to_string(),
-            &[Modifier::Logo, Modifier::Shift],
+            &[Modifier::Alt, Modifier::Logo, Modifier::Shift],
             "canvas.mark.set",
             Some(("index", ActionValue::Integer(index))),
         ));
@@ -2037,6 +2062,29 @@ mod tests {
                 if key == "left"
                     && modifiers.ordered().collect::<Vec<_>>()
                         == vec![Modifier::Shift, Modifier::Logo]
+        ));
+        let workspace = snapshot
+            .bindings()
+            .iter()
+            .find(|binding| binding.id == "workspace-switch-10")
+            .unwrap();
+        assert!(matches!(
+            &workspace.trigger,
+            CompiledTrigger::Key { key, modifiers, .. }
+                if key == "0"
+                    && modifiers.ordered().collect::<Vec<_>>() == vec![Modifier::Logo]
+        ));
+        assert_eq!(workspace.invocation.integer("workspace"), Some(10));
+        let mark = snapshot
+            .bindings()
+            .iter()
+            .find(|binding| binding.id == "mark-jump-1")
+            .unwrap();
+        assert!(matches!(
+            &mark.trigger,
+            CompiledTrigger::Key { modifiers, .. }
+                if modifiers.ordered().collect::<Vec<_>>()
+                    == vec![Modifier::Alt, Modifier::Logo]
         ));
     }
 

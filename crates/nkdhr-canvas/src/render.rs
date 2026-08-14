@@ -18,8 +18,9 @@ use smithay::wayland::compositor::{
 };
 use smithay::wayland::fractional_scale::with_fractional_scale;
 
+use crate::canvas::output_group::{ResolvedOutput, ResolvedOutputGroup};
 use crate::canvas::world::{Canvas, ManagedWindow, Viewport};
-use crate::state::App;
+use crate::state::{App, WorkspaceFade};
 use crate::ui_render::{
     GlesTargetRenderer, PinnedGlesRenderer, PlacementSignature, UiRenderElement,
 };
@@ -45,15 +46,21 @@ pub fn advance_animations(app: &mut App) {
     }
     let now = Instant::now();
     for view in app.group_views.values_mut() {
-        let Some(animation) = &view.animation else {
-            continue;
-        };
-        match animation.advance(now) {
-            Some(viewport) => view.viewport = viewport,
-            None => {
-                view.viewport = animation.target();
-                view.animation = None;
+        if let Some(animation) = &view.animation {
+            match animation.advance(now) {
+                Some(viewport) => view.viewport = viewport,
+                None => {
+                    view.viewport = animation.target();
+                    view.animation = None;
+                }
             }
+        }
+        if view
+            .workspace_fade
+            .as_mut()
+            .is_some_and(|fade| !fade.advance(now))
+        {
+            view.workspace_fade = None;
         }
     }
     for canvas in app.canvases.values_mut() {
@@ -107,6 +114,7 @@ pub fn window_render_elements<R>(
     canvas_anchor: Point<f64, Logical>,
     output_group_location: smithay::utils::Point<i32, Logical>,
     output_scale: f64,
+    alpha: f32,
 ) -> Vec<CanvasRenderElement<R>>
 where
     R: Renderer + ImportAll + ImportMem,
@@ -120,7 +128,7 @@ where
         renderer,
         offset,
         scale.into(),
-        1.0,
+        alpha,
     );
 
     if let Some((rect, mut buffer)) = window.decoration() {
@@ -137,7 +145,7 @@ where
                 &buffer,
                 offset,
                 scale,
-                1.0,
+                alpha,
                 smithay::backend::renderer::element::Kind::Unspecified,
             )
             .into(),
@@ -375,4 +383,49 @@ pub fn update_window_output(
     window.window.with_surfaces(|_, states| {
         with_fractional_scale(states, |state| state.set_preferred_scale(preferred_scale));
     });
+}
+
+/// Publish wl_output membership for the two workspace stacks participating in
+/// a transition and explicitly leave every inactive canvas. Without the leave
+/// pass, a hidden workspace would keep stale output membership forever because
+/// it no longer participates in the normal render traversal.
+pub fn update_workspace_output_membership(
+    app: &App,
+    output: &Output,
+    group: &ResolvedOutputGroup,
+    resolved_output: &ResolvedOutput,
+    canvas_name: &str,
+    viewport: Viewport,
+    workspace_fade: Option<&WorkspaceFade>,
+) {
+    let output_rect = Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
+    for (candidate_name, canvas) in &app.canvases {
+        let candidate_viewport = if candidate_name == canvas_name {
+            Some(viewport)
+        } else {
+            workspace_fade
+                .filter(|fade| fade.canvas == *candidate_name)
+                .map(|fade| fade.viewport)
+        };
+        for window in canvas.windows() {
+            let Some(candidate_viewport) = candidate_viewport else {
+                update_window_output(window, output, None, resolved_output.scale);
+                continue;
+            };
+            let window_rect = window_group_rect(window, candidate_viewport, group.canvas_anchor);
+            let overlap = window_rect.intersection(output_rect).map(|intersection| {
+                Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
+            });
+            let preferred_scale = group
+                .outputs
+                .iter()
+                .filter(|candidate| {
+                    Rectangle::new(candidate.group_location, candidate.logical_size)
+                        .overlaps(window_rect)
+                })
+                .map(|candidate| candidate.scale)
+                .fold(resolved_output.scale, f64::max);
+            update_window_output(window, output, overlap, preferred_scale);
+        }
+    }
 }

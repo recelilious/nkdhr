@@ -301,7 +301,7 @@ fn run() -> BackendResult {
             .app
             .group_views
             .values()
-            .any(|view| view.animation.is_some())
+            .any(|view| view.animation.is_some() || view.workspace_fade.is_some())
             || state
                 .app
                 .canvases
@@ -970,29 +970,16 @@ impl TtyState {
         };
         let canvas_name = view.canvas.clone();
         let viewport = view.viewport;
-        {
-            let Some(canvas) = self.app.canvases.get(&canvas_name) else {
-                return;
-            };
-            for window in canvas.windows() {
-                let window_rect = render::window_group_rect(window, viewport, group.canvas_anchor);
-                let output_rect =
-                    Rectangle::new(resolved_output.group_location, resolved_output.logical_size);
-                let overlap = window_rect.intersection(output_rect).map(|intersection| {
-                    Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
-                });
-                let preferred_scale = group
-                    .outputs
-                    .iter()
-                    .filter(|candidate| {
-                        Rectangle::new(candidate.group_location, candidate.logical_size)
-                            .overlaps(window_rect)
-                    })
-                    .map(|candidate| candidate.scale)
-                    .fold(resolved_output.scale, f64::max);
-                render::update_window_output(window, &surface.output, overlap, preferred_scale);
-            }
-        }
+        let workspace_fade = view.workspace_fade.clone();
+        render::update_workspace_output_membership(
+            &self.app,
+            &surface.output,
+            group,
+            resolved_output,
+            &canvas_name,
+            viewport,
+            workspace_fade.as_ref(),
+        );
         let locked = self.app.session_locked();
         let lock_surface = self.app.lock_surface_for_output(&output_name);
         let mut elements = if include_cursor {
@@ -1056,6 +1043,9 @@ impl TtyState {
                             group.canvas_anchor,
                             resolved_output.group_location,
                             resolved_output.scale,
+                            workspace_fade
+                                .as_ref()
+                                .map_or(1.0, crate::state::WorkspaceFade::progress),
                         )
                     }),
             );
@@ -1075,6 +1065,24 @@ impl TtyState {
                     target: resolved_output.physical_size,
                 },
             ));
+            if let Some(fade) = workspace_fade {
+                let alpha = 1.0 - fade.progress();
+                if alpha > 0.0
+                    && let Some(canvas) = self.app.canvases.get(&fade.canvas)
+                {
+                    elements.extend(canvas.windows().iter().rev().flat_map(|window| {
+                        render::window_render_elements(
+                            &mut renderer,
+                            window,
+                            fade.viewport,
+                            group.canvas_anchor,
+                            resolved_output.group_location,
+                            resolved_output.scale,
+                            alpha,
+                        )
+                    }));
+                }
+            }
         }
 
         let frame_flags = if screencopies.is_empty() {

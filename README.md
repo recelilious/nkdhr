@@ -127,6 +127,12 @@ navigation is the first policy-runtime visual adopter: one conserved selection
 mass stretches through intervening nodes, refracts their painted content and
 retargets continuously from the visible mass and tangent. Reduced/Off settle
 directly without spatial topology.
+The compositor now also has the first Phase-4 shell foundation: global
+numbered workspaces remain independently active per output group, preserve
+each local canvas/viewport/focus, swap safely when a visible number is
+requested elsewhere, and cross-fade window stacks on both nested and TTY
+backends. The shared typed bindings reserve Super+1…9/0 for this model and
+move persistent canvas marks to Super+Alt+digits.
 
 ## Documentation
 

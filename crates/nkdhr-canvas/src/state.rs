@@ -43,6 +43,9 @@ use smithay::{
 
 use crate::canvas::marks::CanvasMarks;
 use crate::canvas::output_group::OutputLayout;
+use crate::canvas::workspace::{
+    WorkspaceAssignments, WorkspaceError, WorkspaceId, WorkspaceSwitch,
+};
 use crate::canvas::world::{Animation, Canvas, Drag, Viewport};
 use crate::cursor::CursorState;
 use crate::protocols::ProtocolState;
@@ -53,6 +56,7 @@ const DEFAULT_CANVAS: &str = "default";
 
 /// Camera and transient interaction state shared by every physical output
 /// in one rigid output group.
+#[derive(Clone)]
 pub struct GroupView {
     pub canvas: String,
     pub viewport: Viewport,
@@ -62,6 +66,44 @@ pub struct GroupView {
     /// Last keyboard-focused surface in this group, restored when pointer
     /// activity makes the group active again.
     pub keyboard_focus: Option<KeyboardFocusTarget>,
+    /// Previous workspace content retained only for the default cross-fade.
+    /// Input and protocol focus always target the new workspace immediately.
+    pub workspace_fade: Option<WorkspaceFade>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceFade {
+    pub canvas: String,
+    pub viewport: Viewport,
+    started: Instant,
+    duration: std::time::Duration,
+    progress: f32,
+}
+
+impl WorkspaceFade {
+    const DEFAULT_DURATION: std::time::Duration = std::time::Duration::from_millis(300);
+
+    fn new(canvas: String, viewport: Viewport) -> Self {
+        Self {
+            canvas,
+            viewport,
+            started: Instant::now(),
+            duration: Self::DEFAULT_DURATION,
+            progress: 0.0,
+        }
+    }
+
+    pub fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    pub fn advance(&mut self, now: Instant) -> bool {
+        let linear = (now.saturating_duration_since(self.started).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        self.progress = linear * linear * (3.0 - 2.0 * linear);
+        linear < 1.0
+    }
 }
 
 /// A common keyboard target for native windows, X11 windows and the
@@ -178,6 +220,7 @@ impl GroupView {
             pre_overview_viewport: Viewport::WORK,
             animation: None,
             keyboard_focus: None,
+            workspace_fade: None,
         }
     }
 }
@@ -209,6 +252,13 @@ pub struct App {
     /// One camera per output group. Every physical output in a group reads
     /// the same entry; separate groups can move independently.
     pub group_views: BTreeMap<String, GroupView>,
+    /// Global numbered workspaces with one independently active workspace per
+    /// output group. Inactive views retain their viewport and last focus.
+    pub workspace_assignments: WorkspaceAssignments,
+    workspace_views: BTreeMap<WorkspaceId, GroupView>,
+    home_workspaces: BTreeMap<String, WorkspaceId>,
+    configured_canvases: BTreeMap<String, String>,
+    connected_groups: BTreeSet<String>,
     /// Canvases referenced by at least one currently connected output
     /// group. Disconnected canvases remain in `canvases`, but are not
     /// visible for protocol policy such as idle inhibition.
@@ -296,6 +346,11 @@ impl App {
             dnd_icon: None,
             canvases,
             group_views,
+            workspace_assignments: WorkspaceAssignments::default(),
+            workspace_views: BTreeMap::new(),
+            home_workspaces: BTreeMap::new(),
+            configured_canvases: BTreeMap::new(),
+            connected_groups: BTreeSet::new(),
             visible_canvases: BTreeSet::new(),
             active_group: DEFAULT_GROUP.to_owned(),
             drag: None,
@@ -338,10 +393,10 @@ impl App {
     /// Reconcile hotplug/config output identities without deleting stale
     /// worlds or views. Reconnecting a group resumes exactly where it was.
     pub fn reconcile_output_layout(&mut self, layout: &OutputLayout) {
-        self.visible_canvases = layout
+        self.connected_groups = layout
             .groups
             .iter()
-            .map(|group| group.canvas.clone())
+            .map(|group| group.name.clone())
             .collect();
         self.protocols.reconcile_outputs(
             layout
@@ -352,11 +407,21 @@ impl App {
         );
         for group in &layout.groups {
             self.canvases.entry(group.canvas.clone()).or_default();
+            let workspace = self.workspace_assignments.ensure_group(group.name.clone());
+            self.home_workspaces
+                .entry(group.name.clone())
+                .or_insert(workspace);
             self.group_views
                 .entry(group.name.clone())
-                .and_modify(|view| view.canvas.clone_from(&group.canvas))
                 .or_insert_with(|| GroupView::new(group.canvas.clone()));
+            let previous = self
+                .configured_canvases
+                .insert(group.name.clone(), group.canvas.clone());
+            if previous.as_deref() != Some(group.canvas.as_str()) {
+                self.set_workspace_canvas(self.home_workspaces[&group.name], group.canvas.clone());
+            }
         }
+        self.refresh_visible_canvases();
         if !layout
             .groups
             .iter()
@@ -389,6 +454,96 @@ impl App {
         self.group_views
             .get_mut(&self.active_group)
             .expect("the active output group must have view state")
+    }
+
+    pub fn active_workspace(&self) -> Option<WorkspaceId> {
+        self.workspace_assignments
+            .workspace_for_group(&self.active_group)
+    }
+
+    /// Switch only the locally active output group. An unused workspace is
+    /// attached there; requesting a workspace visible on another group swaps
+    /// the two independent views. Input follows the new view immediately while
+    /// rendering retains the outgoing view for the bounded default fade.
+    pub fn switch_workspace(&mut self, workspace: WorkspaceId) -> Result<bool, WorkspaceError> {
+        let group = self.active_group.clone();
+        let transition = self.workspace_assignments.switch(&group, workspace)?;
+        match transition {
+            WorkspaceSwitch::Noop { .. } => return Ok(false),
+            WorkspaceSwitch::Activate {
+                previous,
+                workspace,
+                ..
+            } => {
+                crate::actions::cancel(self, nkdhr_ui::TerminalReason::FocusChanged);
+                let mut outgoing = self
+                    .group_views
+                    .remove(&group)
+                    .expect("an assigned output group has a live view");
+                outgoing.workspace_fade = None;
+                let fade = WorkspaceFade::new(outgoing.canvas.clone(), outgoing.viewport);
+                self.workspace_views.insert(previous, outgoing);
+                let mut incoming = self
+                    .workspace_views
+                    .remove(&workspace)
+                    .unwrap_or_else(|| GroupView::new(workspace.canvas_name()));
+                incoming.workspace_fade = Some(fade);
+                self.canvases.entry(incoming.canvas.clone()).or_default();
+                self.group_views.insert(group.clone(), incoming);
+            }
+            WorkspaceSwitch::Swap { other_group, .. } => {
+                crate::actions::cancel(self, nkdhr_ui::TerminalReason::FocusChanged);
+                let mut outgoing = self
+                    .group_views
+                    .remove(&group)
+                    .expect("the active group has a live view");
+                let mut incoming = self
+                    .group_views
+                    .remove(&other_group)
+                    .expect("the workspace owner has a live view");
+                outgoing.workspace_fade = None;
+                incoming.workspace_fade = None;
+                let outgoing_fade = WorkspaceFade::new(outgoing.canvas.clone(), outgoing.viewport);
+                let incoming_fade = WorkspaceFade::new(incoming.canvas.clone(), incoming.viewport);
+                incoming.workspace_fade = Some(outgoing_fade);
+                outgoing.workspace_fade = Some(incoming_fade);
+                self.group_views.insert(group.clone(), incoming);
+                self.group_views.insert(other_group, outgoing);
+            }
+        }
+        self.refresh_visible_canvases();
+        let focus = self.group_views[&group]
+            .keyboard_focus
+            .clone()
+            .filter(IsAlive::alive);
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, focus, smithay::utils::SERIAL_COUNTER.next_serial());
+        }
+        Ok(true)
+    }
+
+    fn set_workspace_canvas(&mut self, workspace: WorkspaceId, canvas: String) {
+        self.canvases.entry(canvas.clone()).or_default();
+        if let Some(owner) = self.workspace_assignments.owner_of(workspace)
+            && let Some(view) = self.group_views.get_mut(owner)
+        {
+            view.canvas.clone_from(&canvas);
+            return;
+        }
+        self.workspace_views
+            .entry(workspace)
+            .or_insert_with(|| GroupView::new(canvas.clone()))
+            .canvas
+            .clone_from(&canvas);
+    }
+
+    fn refresh_visible_canvases(&mut self) {
+        self.visible_canvases = self
+            .connected_groups
+            .iter()
+            .filter_map(|group| self.group_views.get(group))
+            .map(|view| view.canvas.clone())
+            .collect();
     }
 
     pub fn active_canvas(&self) -> &Canvas {

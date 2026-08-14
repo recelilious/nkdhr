@@ -491,15 +491,22 @@ COMP-5 namespaces these maps by canvas and writes
 `v2;<hex-canvas>:<digit>:<x>,<y>;...`; hex only makes arbitrary UTF-8
 canvas names unambiguous. The old `<digit>:<x>,<y>;...` form still loads
 into the `default` canvas.
-`super+shift+<digit>` sets a mark at the current viewport center and
-saves immediately; `super+<digit>` jumps (animated) to one, also exiting
+`super+alt+shift+<digit>` sets a mark at the current viewport center and
+saves immediately; `super+alt+<digit>` jumps (animated) to one, also exiting
 overview if active. Digits are matched on the key's *raw*, unshifted
 level (`KeysymHandle::raw_syms()`, not `modified_sym()`) specifically so
-`super+shift+3` still means "mark 3", not whatever Shift turns the "3"
-key into on the active layout. This is intentionally the *only*
-long-distance navigation primitive — there's no minimap, no window
-switcher grid; overview mode plus marks is the complete navigation model
-per the settled design.
+`super+alt+shift+3` still means "mark 3", not whatever Shift turns the "3"
+key into on the active layout.
+
+**Numbered workspaces** live above first-class canvases. `WorkspaceAssignments`
+keeps one global owner for every positive number and one locally active number
+per stable output-group name. New groups receive the lowest unused number;
+requesting an unused number attaches it to the active group, while requesting a
+number visible on another group swaps their complete `GroupView`s. Inactive
+views retain canvas, viewport and focus. `WorkspaceFade` retains only the
+outgoing canvas/viewport for the 300 ms smoothstep transition; input targets
+the incoming view immediately, and both backends render the two window stacks
+front-to-back with complementary alpha. `super+1…9/0` maps to workspaces 1…10.
 
 Focused-window keyboard movement is deliberately not assigned a Phase 2
 binding. It is recorded as an interaction candidate to design with the wider

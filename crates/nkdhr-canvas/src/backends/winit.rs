@@ -208,18 +208,16 @@ fn run() -> BackendResult {
                 .expect("resolved output group must have view state");
             let canvas_name = view.canvas.clone();
             let viewport = view.viewport;
-            let canvas = app
-                .canvases
-                .get(&canvas_name)
-                .expect("resolved output group must have a canvas");
-            for window in canvas.windows() {
-                let window_rect = render::window_group_rect(window, viewport, group.canvas_anchor);
-                let output_rect = Rectangle::new(resolved.group_location, resolved.logical_size);
-                let overlap = window_rect.intersection(output_rect).map(|intersection| {
-                    Rectangle::new(intersection.loc - window_rect.loc, intersection.size)
-                });
-                render::update_window_output(window, &output, overlap, resolved.scale);
-            }
+            let workspace_fade = view.workspace_fade.clone();
+            render::update_workspace_output_membership(
+                &app,
+                &output,
+                group,
+                resolved,
+                &canvas_name,
+                viewport,
+                workspace_fade.as_ref(),
+            );
             let locked = app.session_locked();
             let lock_surface = app.lock_surface_for_output(NESTED_OUTPUT_NAME);
             let mut elements = if include_cursor {
@@ -278,6 +276,9 @@ fn run() -> BackendResult {
                             group.canvas_anchor,
                             resolved.group_location,
                             resolved.scale,
+                            workspace_fade
+                                .as_ref()
+                                .map_or(1.0, crate::state::WorkspaceFade::progress),
                         )
                     },
                 ));
@@ -296,6 +297,24 @@ fn run() -> BackendResult {
                         target: size,
                     },
                 ));
+                if let Some(fade) = workspace_fade {
+                    let alpha = 1.0 - fade.progress();
+                    if alpha > 0.0
+                        && let Some(canvas) = app.canvases.get(&fade.canvas)
+                    {
+                        elements.extend(canvas.windows().iter().rev().flat_map(|window| {
+                            render::window_render_elements(
+                                renderer,
+                                window,
+                                fade.viewport,
+                                group.canvas_anchor,
+                                resolved.group_location,
+                                resolved.scale,
+                                alpha,
+                            )
+                        }));
+                    }
+                }
             }
 
             let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;

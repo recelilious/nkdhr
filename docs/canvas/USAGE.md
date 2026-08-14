@@ -173,10 +173,15 @@ or pointer input and are never rendered or exposed through screencopy.
   space, press `super+o` again, or `Esc` to cancel and return to where you
   were. This — not a minimap, not a window-switcher list — is how you get
   to a window that's far away on the canvas.
-- **Marks**: `super+shift+<0-9>` records the current view position under
-  that digit; `super+<0-9>` jumps back to it, animated. Marks persist
-  across restarts. This is the fast way back to a spot you use often (a
-  "workspace" in spirit, without the fixed-slot rigidity of one).
+- **Workspaces**: `super+<1-9>` selects that globally numbered workspace and
+  `super+0` selects workspace 10. The switch changes only the output group
+  containing the active pointer/focus. A number first used from an otherwise
+  idle group attaches there; selecting a number currently visible on another
+  group swaps the two independent local views. Window content cross-fades for
+  300 ms while input and keyboard focus move to the destination immediately.
+- **Marks**: `super+alt+shift+<0-9>` records the current position inside the
+  current workspace and `super+alt+<0-9>` jumps back to it, animated. Marks
+  persist across restarts.
 - **Move / resize a window**: `super+drag` anywhere on a window moves
   it; `super+right-drag` resizes it. With the default grid enabled, a moved
   window follows the pointer continuously and eases to the nearest grid
@@ -206,9 +211,9 @@ one canvas:
   canvas, panning and zooming together as one wide viewport — the default
   for most multi-monitor setups.
 - **Multiple groups (one monitor each, typically)**: each screen is its
-  own fully independent canvas, panned and zoomed separately — closer to
-  what "separate workspaces per monitor" means in other desktops, without
-  actually being workspaces.
+  own independently active numbered workspace, with its own retained canvas,
+  viewport and last keyboard focus. Pointer activity selects which group a
+  subsequent `super+number` changes.
 
 A monitor not mentioned in any configured group is treated as its own
 one-output group automatically, so plugging in an unconfigured display
@@ -267,7 +272,8 @@ duplicate IDs and trigger conflicts reject the candidate while the exact last
 effective generation remains active; absent TTY/touchpad capabilities remain
 visible as unsupported diagnostics rather than silently dead shortcuts.
 
-Defaults are Super+Escape close, Alt+Tab focus cycle, Super+O overview,
+Defaults are Super+Escape close, Alt+Tab focus cycle, Super+1…9/0 workspace,
+Super+Alt+digits marks, Super+O overview,
 Super+arrows or standard Vim H/J/K/L canvas pan, Super+Shift+direction focused
 window move, Super+Ctrl+direction focused window resize, and the existing mark
 bindings. Pointer move/resize/empty-canvas pan and TTY three-finger swipe/pinch
