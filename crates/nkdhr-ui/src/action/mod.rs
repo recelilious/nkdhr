@@ -1734,6 +1734,21 @@ fn built_in_descriptors() -> Vec<ActionDescriptor> {
             workspace,
         ),
         descriptor_with(
+            "canvas.window.move-to-workspace",
+            "Move the focused window to a numbered workspace and place it",
+            ActionKind::Instant,
+            "workspace",
+            ActionArgument {
+                description: "Global workspace number".to_owned(),
+                schema: ActionValueSchema::Integer {
+                    minimum: 1,
+                    maximum: 10,
+                },
+                required: true,
+                default: None,
+            },
+        ),
+        descriptor_with(
             "canvas.mark.jump",
             "Jump to a canvas mark",
             ActionKind::Instant,
@@ -1859,6 +1874,14 @@ pub fn default_compositor_bindings(
             index.to_string(),
             &[Modifier::Logo],
             "canvas.workspace.switch",
+            Some(("workspace", ActionValue::Integer(workspace))),
+        ));
+        bindings.push(key_binding(
+            &format!("workspace-move-window-{workspace}"),
+            BindingContext::Window,
+            index.to_string(),
+            &[Modifier::Logo, Modifier::Shift],
+            "canvas.window.move-to-workspace",
             Some(("workspace", ActionValue::Integer(workspace))),
         ));
         bindings.push(key_binding(
@@ -2075,6 +2098,22 @@ mod tests {
                     && modifiers.ordered().collect::<Vec<_>>() == vec![Modifier::Logo]
         ));
         assert_eq!(workspace.invocation.integer("workspace"), Some(10));
+        let move_window = snapshot
+            .bindings()
+            .iter()
+            .find(|binding| binding.id == "workspace-move-window-10")
+            .unwrap();
+        assert!(matches!(
+            &move_window.trigger,
+            CompiledTrigger::Key { key, modifiers, .. }
+                if key == "0"
+                    && modifiers.ordered().collect::<Vec<_>>()
+                        == vec![Modifier::Shift, Modifier::Logo]
+        ));
+        assert_eq!(
+            move_window.invocation.action.as_str(),
+            "canvas.window.move-to-workspace"
+        );
         let mark = snapshot
             .bindings()
             .iter()

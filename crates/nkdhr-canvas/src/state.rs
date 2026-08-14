@@ -43,10 +43,11 @@ use smithay::{
 
 use crate::canvas::marks::CanvasMarks;
 use crate::canvas::output_group::OutputLayout;
+use crate::canvas::placement::{PlacementDirection, PlacementGeometry, PlacementSession};
 use crate::canvas::workspace::{
     WorkspaceAssignments, WorkspaceError, WorkspaceId, WorkspaceSwitch,
 };
-use crate::canvas::world::{Animation, Canvas, Drag, Viewport};
+use crate::canvas::world::{Animation, Canvas, Drag, ManagedWindow, Viewport};
 use crate::cursor::CursorState;
 use crate::protocols::ProtocolState;
 use crate::settings::InteractionSettings;
@@ -272,6 +273,10 @@ pub struct App {
     pub pinch_state: Option<crate::actions::PinchState>,
     pub pointer_action: Option<nkdhr_ui::InteractionId>,
     pub gesture_action: Option<nkdhr_ui::InteractionId>,
+    /// Modal open/move preview. While present, keyboard and pointer placement
+    /// input is compositor-owned and never leaks into the moving client.
+    pub placement: Option<PlacementSession>,
+    pub suppress_placement_terminal_release: bool,
     pub suppress_pointer_release: bool,
     pub suppress_gesture_remainder: bool,
     pub action_dispatcher: Option<crate::actions::CanvasActionDispatcher>,
@@ -357,6 +362,8 @@ impl App {
             pinch_state: None,
             pointer_action: None,
             gesture_action: None,
+            placement: None,
+            suppress_placement_terminal_release: false,
             suppress_pointer_release: false,
             suppress_gesture_remainder: false,
             action_dispatcher: Some(crate::actions::dispatcher()),
@@ -393,6 +400,9 @@ impl App {
     /// Reconcile hotplug/config output identities without deleting stale
     /// worlds or views. Reconnecting a group resumes exactly where it was.
     pub fn reconcile_output_layout(&mut self, layout: &OutputLayout) {
+        if self.placement.is_some() {
+            self.cancel_placement();
+        }
         self.connected_groups = layout
             .groups
             .iter()
@@ -522,6 +532,208 @@ impl App {
         Ok(true)
     }
 
+    pub fn begin_focused_workspace_placement(
+        &mut self,
+        workspace: WorkspaceId,
+        canvas_anchor: Point<f64, Logical>,
+        display_rect: smithay::utils::Rectangle<i32, Logical>,
+    ) -> Result<bool, String> {
+        if self.placement.is_some() {
+            return Err("a placement session is already active".to_owned());
+        }
+        let source_workspace = self
+            .active_workspace()
+            .ok_or_else(|| "the active output group has no workspace".to_owned())?;
+        if source_workspace == workspace {
+            return Ok(false);
+        }
+        let surface = crate::input::focused_surface(self)
+            .ok_or_else(|| "no focused window can be moved".to_owned())?;
+        let source_canvas = self.active_view().canvas.clone();
+        let Some(window) = self.active_canvas_mut().take_window(&surface) else {
+            return Err("the focused surface is not a managed window".to_owned());
+        };
+        let source_position = window.position;
+        let window_size = window.size();
+        let Some(moving_focus) = managed_keyboard_target(&window) else {
+            self.canvases
+                .get_mut(&source_canvas)
+                .expect("the source canvas remains registered")
+                .insert_window(window, source_position);
+            return Err("the focused window has no keyboard target".to_owned());
+        };
+
+        if let Err(error) = self.switch_workspace(workspace) {
+            self.canvases
+                .get_mut(&source_canvas)
+                .expect("the source canvas remains registered")
+                .insert_window(window, source_position);
+            return Err(error.to_string());
+        }
+
+        let target_canvas = self.active_view().canvas.clone();
+        let reference = self
+            .active_view()
+            .keyboard_focus
+            .as_ref()
+            .and_then(WaylandFocus::wl_surface)
+            .and_then(|reference| {
+                self.active_canvas()
+                    .windows()
+                    .iter()
+                    .find(|candidate| candidate.matches_surface(reference.as_ref()))
+                    .map(|candidate| candidate.rect())
+            });
+        let gap = self.interaction_settings.lock().unwrap().grid.size;
+        let geometry = PlacementGeometry {
+            viewport: self.active_view().viewport,
+            canvas_anchor,
+            display_rect,
+            reference,
+            gap,
+        };
+        let position = geometry.position_for(
+            crate::canvas::placement::PlacementVector { x: 0, y: 0 },
+            window_size,
+        );
+        self.active_canvas_mut().insert_window(window, position);
+        self.placement = Some(PlacementSession::new(
+            surface.clone(),
+            source_workspace,
+            source_canvas,
+            source_position,
+            workspace,
+            target_canvas,
+            geometry,
+        ));
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(
+                self,
+                Some(moving_focus),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
+        }
+        Ok(true)
+    }
+
+    pub fn placement_direction(
+        &mut self,
+        direction: PlacementDirection,
+        pressed: bool,
+        now: Instant,
+    ) -> bool {
+        let Some(session) = self.placement.as_mut() else {
+            return false;
+        };
+        session.direction(direction, pressed, now);
+        let vector = session.vector();
+        let canvas = session.target_canvas.clone();
+        let surface = session.surface.clone();
+        let geometry = session.geometry.clone();
+        let Some(window) = self.canvases[&canvas]
+            .windows()
+            .iter()
+            .find(|window| window.matches_surface(&surface))
+        else {
+            self.placement = None;
+            return true;
+        };
+        let position = geometry.position_for(vector, window.size());
+        self.canvases
+            .get_mut(&canvas)
+            .expect("placement canvas remains registered")
+            .set_position(&surface, position);
+        true
+    }
+
+    pub fn placement_pointer(&mut self, group_point: Point<f64, Logical>) -> bool {
+        let Some(session) = self.placement.as_mut() else {
+            return false;
+        };
+        session.cancel_settle();
+        let canvas = session.target_canvas.clone();
+        let surface = session.surface.clone();
+        let geometry = session.geometry.clone();
+        let Some(window) = self.canvases[&canvas]
+            .windows()
+            .iter()
+            .find(|window| window.matches_surface(&surface))
+        else {
+            self.placement = None;
+            return true;
+        };
+        let position = geometry.edge_vector(group_point).map_or_else(
+            || geometry.position_at_pointer(group_point, window.size()),
+            |direction| geometry.position_for(direction, window.size()),
+        );
+        self.canvases
+            .get_mut(&canvas)
+            .expect("placement canvas remains registered")
+            .set_position(&surface, position);
+        true
+    }
+
+    pub fn commit_placement(&mut self) -> bool {
+        self.placement.take().is_some()
+    }
+
+    pub fn placement_settle_pending(&self) -> bool {
+        self.placement
+            .as_ref()
+            .is_some_and(PlacementSession::settle_pending)
+    }
+
+    pub fn cancel_placement(&mut self) -> bool {
+        let Some(session) = self.placement.take() else {
+            return false;
+        };
+        let Some(window) = self
+            .canvases
+            .get_mut(&session.target_canvas)
+            .and_then(|canvas| canvas.take_window(&session.surface))
+        else {
+            return true;
+        };
+        if let Err(error) = self.switch_workspace(session.source_workspace) {
+            eprintln!("nkdhr-canvas: could not restore placement workspace: {error}");
+        }
+        self.canvases
+            .entry(session.source_canvas)
+            .or_default()
+            .insert_window(window, session.source_position);
+        let focus = self
+            .active_canvas()
+            .windows()
+            .iter()
+            .find(|window| window.matches_surface(&session.surface))
+            .and_then(managed_keyboard_target);
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, focus, smithay::utils::SERIAL_COUNTER.next_serial());
+        }
+        true
+    }
+
+    pub fn advance_placement(&mut self, now: Instant) {
+        if self
+            .placement
+            .as_ref()
+            .is_some_and(|placement| placement.should_settle(now))
+        {
+            self.commit_placement();
+        }
+    }
+
+    pub fn placement_rect(
+        &self,
+    ) -> Option<smithay::utils::Rectangle<f64, crate::canvas::world::World>> {
+        let placement = self.placement.as_ref()?;
+        self.canvases[&placement.target_canvas]
+            .windows()
+            .iter()
+            .find(|window| window.matches_surface(&placement.surface))
+            .map(|window| window.rect())
+    }
+
     fn set_workspace_canvas(&mut self, workspace: WorkspaceId, canvas: String) {
         self.canvases.entry(canvas.clone()).or_default();
         if let Some(owner) = self.workspace_assignments.owner_of(workspace)
@@ -625,9 +837,25 @@ impl App {
         {
             self.dnd_icon = None;
         }
+        if self
+            .placement
+            .as_ref()
+            .is_some_and(|placement| !placement.surface.is_alive())
+        {
+            self.placement = None;
+        }
 
         removed
     }
+}
+
+fn managed_keyboard_target(window: &ManagedWindow) -> Option<KeyboardFocusTarget> {
+    window
+        .window
+        .x11_surface()
+        .cloned()
+        .map(KeyboardFocusTarget::X11)
+        .or_else(|| window.wl_surface().map(KeyboardFocusTarget::Wayland))
 }
 
 /// Per-client state `wayland_server` asks every client to carry. Only the

@@ -179,6 +179,15 @@ or pointer input and are never rendered or exposed through screencopy.
   idle group attaches there; selecting a number currently visible on another
   group swaps the two independent local views. Window content cross-fades for
   300 ms while input and keyboard focus move to the destination immediately.
+  `super+shift+<number>` moves the focused window instead. The destination
+  opens a modal placement silhouette relative to its last focused window:
+  arrows or standard Vim H/J/K/L combine into eight directions, opposite keys
+  cancel in real time, and releasing every direction for 110 ms confirms.
+  Enter confirms centered on the current physical display; Escape restores the
+  original workspace and exact position. Pointer motion previews an exact
+  center position, except in eight bounded edge/corner zones where it previews
+  the matching relative direction; left click confirms and right click cancels.
+  Centering is never clamped, so large windows may extend beyond display edges.
 - **Marks**: `super+alt+shift+<0-9>` records the current position inside the
   current workspace and `super+alt+<0-9>` jumps back to it, animated. Marks
   persist across restarts.
@@ -273,6 +282,7 @@ effective generation remains active; absent TTY/touchpad capabilities remain
 visible as unsupported diagnostics rather than silently dead shortcuts.
 
 Defaults are Super+Escape close, Alt+Tab focus cycle, Super+1…9/0 workspace,
+Super+Shift+1…9/0 move focused window to workspace,
 Super+Alt+digits marks, Super+O overview,
 Super+arrows or standard Vim H/J/K/L canvas pan, Super+Shift+direction focused
 window move, Super+Ctrl+direction focused window resize, and the existing mark

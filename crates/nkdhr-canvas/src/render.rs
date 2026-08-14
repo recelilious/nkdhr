@@ -3,11 +3,11 @@ use std::time::Instant;
 use smithay::backend::renderer::element::AsRenderElements;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
-use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
-use smithay::backend::renderer::{ImportAll, ImportMem, Renderer};
+use smithay::backend::renderer::{Color32F, ImportAll, ImportMem, Renderer};
 use smithay::desktop::utils::output_update;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
@@ -63,9 +63,79 @@ pub fn advance_animations(app: &mut App) {
             view.workspace_fade = None;
         }
     }
+    app.advance_placement(now);
     for canvas in app.canvases.values_mut() {
         canvas.advance_animations(now);
     }
+}
+
+/// A lightweight compositor-owned placement silhouette. The actual client
+/// remains live underneath; this translucent volume makes the modal target
+/// unambiguous without imposing a clipping boundary on the infinite canvas.
+pub fn placement_preview_render_elements<R>(
+    app: &App,
+    viewport: Viewport,
+    canvas_anchor: Point<f64, Logical>,
+    output_group_location: Point<i32, Logical>,
+    output_scale: f64,
+) -> Vec<CanvasRenderElement<R>>
+where
+    R: ImportAll + ImportMem + GlesTargetRenderer,
+{
+    let Some(rect) = app.placement_rect() else {
+        return Vec::new();
+    };
+    let group_location = viewport.to_group_logical(rect.loc, canvas_anchor);
+    let local = group_location - output_group_location.to_f64();
+    let logical_size = (
+        (rect.size.w * viewport.zoom).round().max(1.0) as i32,
+        (rect.size.h * viewport.zoom).round().max(1.0) as i32,
+    );
+    let border = 3_i32.min(logical_size.0).min(logical_size.1);
+    let bars = [
+        (0, 0, logical_size.0, border),
+        (0, logical_size.1 - border, logical_size.0, border),
+        (0, 0, border, logical_size.1),
+        (logical_size.0 - border, 0, border, logical_size.1),
+    ];
+    let mut elements = bars
+        .into_iter()
+        .map(|(x, y, width, height)| {
+            placement_solid(
+                (local.x + f64::from(x), local.y + f64::from(y)).into(),
+                (width, height).into(),
+                output_scale,
+                Color32F::new(0.48, 0.83, 1.0, 0.92),
+            )
+        })
+        .collect::<Vec<_>>();
+    elements.push(placement_solid(
+        local,
+        logical_size.into(),
+        output_scale,
+        Color32F::new(0.25, 0.60, 0.94, 0.12),
+    ));
+    elements
+}
+
+fn placement_solid<R>(
+    location: Point<f64, Logical>,
+    size: smithay::utils::Size<i32, Logical>,
+    output_scale: f64,
+    color: Color32F,
+) -> CanvasRenderElement<R>
+where
+    R: ImportAll + ImportMem + GlesTargetRenderer,
+{
+    let buffer = SolidColorBuffer::new(size, color);
+    SolidColorRenderElement::from_buffer(
+        &buffer,
+        location.to_physical(output_scale).to_i32_round(),
+        output_scale,
+        1.0,
+        Kind::Unspecified,
+    )
+    .into()
 }
 
 /// Fire every pending `wl_surface.frame` callback in a surface tree after

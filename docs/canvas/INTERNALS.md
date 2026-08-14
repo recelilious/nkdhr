@@ -508,6 +508,20 @@ outgoing canvas/viewport for the 300 ms smoothstep transition; input targets
 the incoming view immediately, and both backends render the two window stacks
 front-to-back with complementary alpha. `super+1…9/0` maps to workspaces 1…10.
 
+`canvas::placement` is the shared modal contract for moving existing windows
+and, later, launcher-created windows. `PlacementGeometry` converts the active
+physical display center, pointer points and eight edge zones through the target
+viewport into world coordinates. Relative targets align centers on untouched
+axes, keep a configurable grid-sized gap on directional axes and deliberately
+never clamp. `HeldDirections` is a set rather than a last-key value, so
+left+right cancels and releasing either immediately reveals the other.
+`PlacementSession` waits 110 ms after the complete set becomes empty before
+committing; a new press cancels that deadline. Input is compositor-modal,
+terminal key/button releases are suppressed, and cancel swaps back to the
+source workspace before reinserting the same `ManagedWindow` at its exact
+source point. Both render backends draw a translucent outline from the live
+target rect above normal workspace content.
+
 Focused-window keyboard movement is deliberately not assigned a Phase 2
 binding. It is recorded as an interaction candidate to design with the wider
 shortcut, discoverability, settings and visual-feedback model once Phase 3's

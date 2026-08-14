@@ -302,6 +302,7 @@ fn run() -> BackendResult {
             .group_views
             .values()
             .any(|view| view.animation.is_some() || view.workspace_fade.is_some())
+            || state.app.placement_settle_pending()
             || state
                 .app
                 .canvases
@@ -997,6 +998,13 @@ impl TtyState {
                 &mut renderer,
                 &self.app,
                 resolved_output.global_location,
+                resolved_output.scale,
+            ));
+            elements.extend(render::placement_preview_render_elements(
+                &self.app,
+                viewport,
+                group.canvas_anchor,
+                resolved_output.group_location,
                 resolved_output.scale,
             ));
         }

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
@@ -19,12 +19,13 @@ use smithay::input::touch::{
     DownEvent as TouchDownEvent, MotionEvent as TouchMotionEvent, UpEvent as TouchUpEvent,
 };
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint};
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::canvas::marks;
 use crate::canvas::output_group::OutputLayout;
+use crate::canvas::placement::PlacementDirection;
 use crate::canvas::world::{Animation, Drag, ManagedWindow, ResizeEdge, Viewport, World};
 use crate::settings::GridSettings;
 use crate::state::{App, KeyboardFocusTarget};
@@ -42,6 +43,7 @@ struct InputGroup {
     origin: Point<i32, Logical>,
     size: Size<i32, Logical>,
     canvas_anchor: Point<f64, Logical>,
+    display_rect: Rectangle<i32, Logical>,
 }
 
 /// Backend-independent compositor input dispatch. Backend code supplies the
@@ -72,6 +74,7 @@ pub fn handle<B: InputBackend>(app: &mut App, layout: &OutputLayout, event: Inpu
     match event {
         InputEvent::DeviceRemoved { .. } => {
             crate::actions::cancel(app, nkdhr_ui::TerminalReason::DeviceRemoved);
+            app.cancel_placement();
         }
         InputEvent::Keyboard { event } => {
             if let Some(group) = active_group(app, layout) {
@@ -567,15 +570,37 @@ fn active_group(app: &App, layout: &OutputLayout) -> Option<InputGroup> {
         .iter()
         .find(|group| group.name == app.active_group)
         .or_else(|| layout.groups.first())
-        .map(|group| InputGroup {
-            origin: group.global_location,
-            size: group.logical_size,
-            canvas_anchor: group.canvas_anchor,
+        .map(|group| {
+            let pointer = app.seat.get_pointer().map_or(
+                group.canvas_anchor + group.global_location.to_f64(),
+                |pointer| pointer.current_location(),
+            );
+            let display = group
+                .outputs
+                .iter()
+                .find(|output| {
+                    let origin = output.global_location.to_f64();
+                    pointer.x >= origin.x
+                        && pointer.y >= origin.y
+                        && pointer.x < origin.x + f64::from(output.logical_size.w)
+                        && pointer.y < origin.y + f64::from(output.logical_size.h)
+                })
+                .or_else(|| group.outputs.first());
+            let display_rect = display.map_or_else(
+                || Rectangle::new((0, 0).into(), group.logical_size),
+                |output| Rectangle::new(output.group_location, output.logical_size),
+            );
+            InputGroup {
+                origin: group.global_location,
+                size: group.logical_size,
+                canvas_anchor: group.canvas_anchor,
+                display_rect,
+            }
         })
 }
 
 fn activate_group_at(app: &mut App, layout: &OutputLayout, point: Point<f64, Logical>) {
-    if app.drag.is_some() {
+    if app.drag.is_some() || app.placement.is_some() {
         return;
     }
     if let Some(group) = layout.group_at(point) {
@@ -661,6 +686,20 @@ fn handle_pointer_motion(
     time: u32,
     relative: Option<RelativeMotion>,
 ) {
+    if app.placement.is_some() {
+        app.placement_pointer(local_point(group, pointer_pos));
+        pointer.motion(
+            app,
+            None,
+            &MotionEvent {
+                location: pointer_pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(app);
+        return;
+    }
     if app.pointer_action.is_some() {
         crate::actions::update_pointer(
             app,
@@ -904,6 +943,47 @@ fn handle_keyboard<B: InputBackend>(
             let raw_syms = keysym.raw_syms();
             let pressed = key_state == KeyState::Pressed;
 
+            if !pressed && app.suppress_placement_terminal_release {
+                let terminal_release =
+                    raw_syms
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(sym))
+                        .any(|key| {
+                            matches!(
+                                placement_key(key),
+                                Some(PlacementKey::Commit | PlacementKey::Cancel)
+                            )
+                        });
+                if terminal_release {
+                    app.suppress_placement_terminal_release = false;
+                    return FilterResult::Intercept(());
+                }
+            }
+
+            if app.placement.is_some() {
+                let placement_key = raw_syms
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(sym))
+                    .find_map(placement_key);
+                match placement_key {
+                    Some(PlacementKey::Direction(direction)) => {
+                        app.placement_direction(direction, pressed, Instant::now());
+                    }
+                    Some(PlacementKey::Commit) if pressed => {
+                        app.commit_placement();
+                        app.suppress_placement_terminal_release = true;
+                    }
+                    Some(PlacementKey::Cancel) if pressed => {
+                        app.cancel_placement();
+                        app.suppress_placement_terminal_release = true;
+                    }
+                    _ => {}
+                }
+                return FilterResult::Intercept(());
+            }
+
             let ui_modifiers = ui_modifiers(*modifiers);
             let ui_key = ui_key(sym);
             let key_event = if pressed {
@@ -965,6 +1045,7 @@ fn handle_keyboard<B: InputBackend>(
                     crate::actions::CanvasActionPayload::Group {
                         size: group.size,
                         canvas_anchor: group.canvas_anchor,
+                        display_rect: group.display_rect,
                     },
                 );
                 return FilterResult::Intercept(());
@@ -988,6 +1069,31 @@ fn handle_keyboard<B: InputBackend>(
             FilterResult::Forward
         },
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PlacementKey {
+    Direction(PlacementDirection),
+    Commit,
+    Cancel,
+}
+
+fn placement_key(key: Keysym) -> Option<PlacementKey> {
+    match key {
+        Keysym::Left | Keysym::h | Keysym::H => {
+            Some(PlacementKey::Direction(PlacementDirection::Left))
+        }
+        Keysym::Right | Keysym::l | Keysym::L => {
+            Some(PlacementKey::Direction(PlacementDirection::Right))
+        }
+        Keysym::Up | Keysym::k | Keysym::K => Some(PlacementKey::Direction(PlacementDirection::Up)),
+        Keysym::Down | Keysym::j | Keysym::J => {
+            Some(PlacementKey::Direction(PlacementDirection::Down))
+        }
+        Keysym::Return | Keysym::KP_Enter => Some(PlacementKey::Commit),
+        Keysym::Escape => Some(PlacementKey::Cancel),
+        _ => None,
+    }
 }
 
 fn handle_vt_switch(
@@ -1140,6 +1246,18 @@ fn handle_pointer_button<B: InputBackend>(
 ) {
     let button_state = event.state();
     let button_code = event.button_code();
+
+    if app.placement.is_some() {
+        if button_state == ButtonState::Pressed && button_code == BTN_LEFT {
+            app.placement_pointer(local_point(group, pointer.current_location()));
+            app.commit_placement();
+            app.suppress_pointer_release = true;
+        } else if button_state == ButtonState::Pressed && button_code == BTN_RIGHT {
+            app.cancel_placement();
+            app.suppress_pointer_release = true;
+        }
+        return;
+    }
 
     if button_state == ButtonState::Released && std::mem::take(&mut app.suppress_pointer_release) {
         return;

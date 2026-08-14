@@ -237,6 +237,13 @@ fn run() -> BackendResult {
                     resolved.global_location,
                     resolved.scale,
                 ));
+                elements.extend(render::placement_preview_render_elements(
+                    &app,
+                    viewport,
+                    group.canvas_anchor,
+                    resolved.group_location,
+                    resolved.scale,
+                ));
             }
             if locked {
                 elements.extend(lock_surface.iter().flat_map(

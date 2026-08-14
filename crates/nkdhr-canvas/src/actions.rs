@@ -35,6 +35,7 @@ pub enum CanvasActionPayload {
     Group {
         size: Size<i32, Logical>,
         canvas_anchor: Point<f64, Logical>,
+        display_rect: smithay::utils::Rectangle<i32, Logical>,
     },
     PointerStart {
         pointer: Point<f64, Logical>,
@@ -233,6 +234,7 @@ fn dispatch_to_canvas(
             ActionPhase::Invoke(CanvasActionPayload::Group {
                 size,
                 canvas_anchor,
+                ..
             }),
         ) => crate::input::toggle_overview(app, size, canvas_anchor),
         ("canvas.overview.exit", ActionPhase::Invoke(_)) => {
@@ -252,6 +254,18 @@ fn dispatch_to_canvas(
                 .map_err(|error| error.to_string())?;
             app.switch_workspace(workspace)
                 .map_err(|error| error.to_string())?;
+        }
+        (
+            "canvas.window.move-to-workspace",
+            ActionPhase::Invoke(CanvasActionPayload::Group {
+                canvas_anchor,
+                display_rect,
+                ..
+            }),
+        ) => {
+            let workspace = WorkspaceId::new(required_workspace(invocation)?)
+                .map_err(|error| error.to_string())?;
+            app.begin_focused_workspace_placement(workspace, canvas_anchor, display_rect)?;
         }
         ("canvas.mark.jump", ActionPhase::Invoke(_)) => {
             crate::input::jump_to_mark(app, required_index(invocation)?);

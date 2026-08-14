@@ -169,6 +169,20 @@ impl Canvas {
             .retain(|window| !window.matches_surface(surface));
     }
 
+    pub fn take_window(&mut self, surface: &WlSurface) -> Option<ManagedWindow> {
+        let index = self
+            .windows
+            .iter()
+            .position(|window| window.matches_surface(surface))?;
+        Some(self.windows.remove(index))
+    }
+
+    pub fn insert_window(&mut self, mut window: ManagedWindow, position: Point<f64, World>) {
+        window.position = position;
+        window.position_animation = None;
+        self.windows.push(window);
+    }
+
     pub fn unmap_x11(&mut self, surface: &X11Surface) {
         self.windows.retain(|window| !window.matches_x11(surface));
     }
