@@ -248,8 +248,11 @@ Balanced revision 1 是已验收旧默认值的精确快照。Lively、Calm、Di
 `MotionPresetLibraryData` 最多保存 256 个不可变 `(id, revision)` 快照；重复导入相同
 内容是 no-op，同一身份的不同内容则冲突而非覆盖。Settings 的
 `MotionPresetLibraryEditor` 会在返回单个 `theme.motion_library` CTRL-5 写请求前完整解析
-并编译导入；只有宿主确认整次写入后，durable local library 才变化。UI-7B 没有组合任何
-编辑器界面；语义 fluid 参数属于 UI-7C，style-neutral 图形编辑状态属于 UI-7D。
+并编译导入；只有宿主确认整次写入后，durable local library 才变化。Appearance Settings
+现在可以把专业编辑器的实时文档冻结为下一个不可变 revision，导入/导出单个预设或完整
+资料库，并通过与 `theme.profile` 相同的非阻塞宿主 worker 排队写入这个标量。宿主启动时
+会恢复有效资料库；两个键中任意一个缺失或损坏都只会各自回退。这些仍是非视觉接口，
+经所有者确认的预设控件和文件选择交互属于后续 UI-7E 切片。
 
 ## 策略动效运行时（`nkdhr-ui`，UI-7C）
 
@@ -299,7 +302,8 @@ Shift 使用粗调步长，剪贴板读写以显式请求返回。UI-7E 生产�
 的 Settings 组合。持续时间输入接受 1 到 60000 的整数及可选 `ms` 后缀，非法提交保持
 最后有效文档；可见 Fluid 百分比会映射到稀疏语义覆盖并在 reconcile 后保留。“保存”通过
 共享宿主的非阻塞 CTRL-5 worker 把当前 transition 写入 `theme.profile`，检查器和状态栏
-都会显示等待、成功或失败；预设资料库导入/导出仍是后续切片。
+都会显示等待、成功或失败。预设快照、导入/导出和启动恢复已有完整模型与宿主接口，
+其可见控件仍留给后续逐项确认。
 
 ## 验证工具
 

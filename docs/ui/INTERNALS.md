@@ -722,7 +722,13 @@ empty default to older theme files. The Settings-side
 `MotionPresetLibraryEditor` adds the stronger runtime validation pass: every
 import is completely compiled in isolation before it can produce an opaque
 persistence request; its durable model changes only after matching host or
-CTRL-5 confirmation.
+CTRL-5 confirmation. Snapshot creation overlays the complete active profile and
+current local professional-editor values, then allocates the next revision from
+the durable plus newest pending candidate. Consecutive saves therefore remain
+latest-write-wins without dropping an unconfirmed revision. `AppearanceSurface`
+serializes both theme-profile and preset-library requests through one background
+worker, dispatches typed completions back to their owning transaction, and
+restores both CTRL-5 leaves independently at construction.
 
 ## UI-7C: policy-governed interruption and semantic fluid
 
@@ -894,8 +900,10 @@ dirty until the matching host confirmation and remains recoverable on failure.
 At host construction, a valid active profile is read before the editor session
 is seeded, so a persisted `PanelEnter/settings.drawer/open` transition becomes
 the clean baseline instead of being replaced by the review fixture.
-Selected-keyframe numeric bindings, preset-library import/export and the future
-conserved-liquid navigation selection remain subsequent UI-7E work.
+Selected-keyframe numeric bindings are now live. Preset snapshot/import/export
+and recovery are complete below the presentation layer; their visible controls,
+plus the future conserved-liquid navigation selection, remain subsequent
+owner-guided UI-7E work.
 
 Clay/glass depth follows an explicit edge/content separation invariant. Outer
 directional shadow keeps describing the surface's elevation, while theme-aware

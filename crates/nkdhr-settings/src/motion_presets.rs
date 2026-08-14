@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use nkdhr_theme::{
     MOTION_STYLE_SCHEMA_VERSION, MotionPresetLibraryData, MotionPresetLibraryError,
-    MotionStyleBaseData, MotionStylePresetData, MotionStyleProfileData,
+    MotionStyleBaseData, MotionStyleError, MotionStylePresetData, MotionStyleProfileData,
 };
 use nkdhr_ui::{CompiledMotionStyle, MotionStyleCompileError};
 
@@ -36,6 +36,31 @@ impl MotionPresetPersistenceRequest {
 
     pub fn value(&self) -> &str {
         &self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionPresetSnapshotRequest {
+    preset_id: String,
+    revision: u32,
+    persistence: MotionPresetPersistenceRequest,
+}
+
+impl MotionPresetSnapshotRequest {
+    pub fn preset_id(&self) -> &str {
+        &self.preset_id
+    }
+
+    pub const fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    pub fn persistence(&self) -> &MotionPresetPersistenceRequest {
+        &self.persistence
+    }
+
+    pub fn into_persistence(self) -> MotionPresetPersistenceRequest {
+        self.persistence
     }
 }
 
@@ -109,9 +134,42 @@ impl MotionPresetLibraryEditor {
     ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
         validate_compiled_preset(&preset)?;
         let mut state = self.state.borrow_mut();
-        let mut candidate = state.library.clone();
+        let mut candidate = candidate_library(&state);
         candidate.insert(preset)?;
         begin_write(&mut state, candidate, "正在保存动画预设快照")
+    }
+
+    /// Freeze the complete resolved profile plus its sparse overrides into a
+    /// new immutable revision. Pending local revisions are retained so rapid
+    /// consecutive saves remain latest-write-wins without losing snapshots.
+    pub fn begin_snapshot(
+        &self,
+        profile: &MotionStyleProfileData,
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<MotionPresetSnapshotRequest, MotionPresetEditorError> {
+        let id = id.into();
+        let name = name.into();
+        let resolved = profile.resolve().map_err(MotionStyleCompileError::Data)?;
+        let mut state = self.state.borrow_mut();
+        let mut candidate = candidate_library(&state);
+        let revision = candidate.latest(&id).map_or(Ok(1), |preset| {
+            preset
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| MotionPresetEditorError::RevisionOverflow(id.clone()))
+        })?;
+        let preset = resolved
+            .snapshot_as_preset(id.clone(), name, revision)
+            .map_err(MotionStyleCompileError::Data)?;
+        validate_compiled_preset(&preset)?;
+        candidate.insert(preset)?;
+        let persistence = begin_write(&mut state, candidate, "正在保存动画预设快照")?;
+        Ok(MotionPresetSnapshotRequest {
+            preset_id: id,
+            revision,
+            persistence,
+        })
     }
 
     pub fn begin_import_preset(
@@ -246,6 +304,14 @@ impl MotionPresetLibraryEditor {
     }
 }
 
+fn candidate_library(state: &MotionPresetLibraryState) -> MotionPresetLibraryData {
+    state
+        .pending
+        .as_ref()
+        .map(|pending| pending.candidate.clone())
+        .unwrap_or_else(|| state.library.clone())
+}
+
 fn begin_write(
     state: &mut MotionPresetLibraryState,
     candidate: MotionPresetLibraryData,
@@ -295,6 +361,7 @@ fn validate_compiled_preset(preset: &MotionStylePresetData) -> Result<(), Motion
 pub enum MotionPresetEditorError {
     Library(MotionPresetLibraryError),
     Compile(MotionStyleCompileError),
+    RevisionOverflow(String),
 }
 
 impl fmt::Display for MotionPresetEditorError {
@@ -302,6 +369,12 @@ impl fmt::Display for MotionPresetEditorError {
         match self {
             Self::Library(error) => error.fmt(formatter),
             Self::Compile(error) => error.fmt(formatter),
+            Self::RevisionOverflow(id) => {
+                write!(
+                    formatter,
+                    "motion preset `{id}` has exhausted its revision range"
+                )
+            }
         }
     }
 }
@@ -317,6 +390,12 @@ impl From<MotionPresetLibraryError> for MotionPresetEditorError {
 impl From<MotionStyleCompileError> for MotionPresetEditorError {
     fn from(value: MotionStyleCompileError) -> Self {
         Self::Compile(value)
+    }
+}
+
+impl From<MotionStyleError> for MotionPresetEditorError {
+    fn from(value: MotionStyleError) -> Self {
+        Self::Compile(MotionStyleCompileError::Data(value))
     }
 }
 
@@ -390,5 +469,28 @@ mod tests {
         );
         assert!(!editor.snapshot().pending);
         assert_eq!(editor.snapshot().library.presets.len(), 1);
+    }
+
+    #[test]
+    fn profile_snapshots_allocate_immutable_revisions_without_losing_pending_work() {
+        let editor = MotionPresetLibraryEditor::default();
+        let profile = MotionStyleProfileData::default();
+
+        let first = editor
+            .begin_snapshot(&profile, "my-motion", "My Motion")
+            .unwrap();
+        let second = editor
+            .begin_snapshot(&profile, "my-motion", "My Motion")
+            .unwrap();
+
+        assert_eq!(first.revision(), 1);
+        assert_eq!(second.revision(), 2);
+        assert!(editor.snapshot().library.presets.is_empty());
+        let pending = MotionPresetLibraryData::from_json(second.persistence().value()).unwrap();
+        assert!(pending.get("my-motion", 1).is_some());
+        assert!(pending.get("my-motion", 2).is_some());
+        assert!(!editor.complete_persistence(first.persistence().token(), Ok("stale".into())));
+        assert!(editor.complete_persistence(second.persistence().token(), Ok("saved".into())));
+        assert_eq!(editor.snapshot().library.presets.len(), 2);
     }
 }

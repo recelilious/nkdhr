@@ -8,18 +8,22 @@ use std::{
 
 use nkdhr_ipc::ConfigProxyBlocking;
 use nkdhr_render::{DisplayList, TextureStore};
-use nkdhr_theme::ThemeProfile;
+use nkdhr_theme::{MotionPresetLibraryData, ThemeProfile};
 use nkdhr_ui::text::{TextConfig, TextResources};
 use nkdhr_ui::{
     DispatchResult, MaterialCapabilities, Reactive, Size, ThemeRuntime, UiEvent, UiHost, UiResult,
     UiRoot, UiSurface, WidgetId,
 };
 
-use zbus::{blocking::Connection, zvariant::Value};
+use zbus::{
+    blocking::Connection,
+    zvariant::{OwnedValue, Value},
+};
 
 use crate::{
-    ACTIVE_THEME_PROFILE_KEY, AppearanceSettings, SettingsAssets, ThemePersistenceRequest,
-    ThemePersistenceToken, ThemeProfileEditor,
+    ACTIVE_THEME_PROFILE_KEY, AppearanceSettings, MOTION_PRESET_LIBRARY_KEY,
+    MotionPresetLibraryEditor, MotionPresetPersistenceRequest, MotionPresetPersistenceToken,
+    SettingsAssets, ThemePersistenceRequest, ThemePersistenceToken, ThemeProfileEditor,
 };
 
 /// The complete retained Settings application, without any window-system or
@@ -34,7 +38,7 @@ pub struct AppearanceSurface {
     seen_theme_generation: u64,
     viewport: Size,
     capabilities: MaterialCapabilities,
-    persistence: ThemePersistenceWorker,
+    persistence: SettingsPersistenceWorker,
     host: UiHost,
 }
 
@@ -55,9 +59,8 @@ impl AppearanceSurface {
         capabilities: MaterialCapabilities,
         mut text: TextResources,
     ) -> Result<Self, AppearanceHostError> {
-        let model = load_active_theme_editor()
-            .map(AppearanceSettings::with_theme_profiles)
-            .unwrap_or_default();
+        let (theme_profiles, motion_presets) = load_settings_editors();
+        let model = AppearanceSettings::with_editors(theme_profiles, motion_presets);
         let assets = SettingsAssets::load(text.textures_mut()).map_err(AppearanceHostError::new)?;
         let theme_runtime = model.theme_runtime();
         let snapshot = theme_runtime.snapshot();
@@ -76,7 +79,7 @@ impl AppearanceSurface {
             composition_revision,
             viewport,
             capabilities,
-            persistence: ThemePersistenceWorker::default(),
+            persistence: SettingsPersistenceWorker::default(),
             host,
         })
     }
@@ -108,14 +111,29 @@ impl AppearanceSurface {
     fn flush_persistence(&mut self) {
         if let Some(request) = self.model.take_motion_editor_persistence_request() {
             let token = request.token();
-            if let Err(error) = self.persistence.submit(request) {
+            if let Err(error) = self.persistence.submit_theme(request) {
                 self.model
                     .complete_theme_persistence(token, Err(format!("动画设置保存失败：{error}")));
             }
         }
+        if let Some(request) = self.model.take_motion_preset_persistence_request() {
+            let token = request.token();
+            if let Err(error) = self.persistence.submit_motion_preset(request) {
+                self.model.complete_motion_preset_persistence(
+                    token,
+                    Err(format!("动画预设资料库保存失败：{error}")),
+                );
+            }
+        }
         while let Some(completion) = self.persistence.try_completion() {
-            self.model
-                .complete_theme_persistence(completion.token, completion.result);
+            match completion {
+                SettingsPersistenceCompletion::Theme { token, result } => {
+                    self.model.complete_theme_persistence(token, result);
+                }
+                SettingsPersistenceCompletion::MotionPreset { token, result } => {
+                    self.model.complete_motion_preset_persistence(token, result);
+                }
+            }
         }
     }
 }
@@ -163,22 +181,44 @@ impl UiSurface for AppearanceSurface {
 }
 
 #[derive(Default)]
-struct ThemePersistenceWorker {
+struct SettingsPersistenceWorker {
     running: Option<RunningPersistenceWorker>,
 }
 
 struct RunningPersistenceWorker {
-    requests: Sender<ThemePersistenceRequest>,
-    completions: Receiver<ThemePersistenceCompletion>,
+    requests: Sender<SettingsPersistenceRequest>,
+    completions: Receiver<SettingsPersistenceCompletion>,
 }
 
-struct ThemePersistenceCompletion {
-    token: ThemePersistenceToken,
-    result: Result<String, String>,
+enum SettingsPersistenceRequest {
+    Theme(ThemePersistenceRequest),
+    MotionPreset(MotionPresetPersistenceRequest),
 }
 
-impl ThemePersistenceWorker {
-    fn submit(&mut self, request: ThemePersistenceRequest) -> Result<(), String> {
+enum SettingsPersistenceCompletion {
+    Theme {
+        token: ThemePersistenceToken,
+        result: Result<String, String>,
+    },
+    MotionPreset {
+        token: MotionPresetPersistenceToken,
+        result: Result<String, String>,
+    },
+}
+
+impl SettingsPersistenceWorker {
+    fn submit_theme(&mut self, request: ThemePersistenceRequest) -> Result<(), String> {
+        self.submit(SettingsPersistenceRequest::Theme(request))
+    }
+
+    fn submit_motion_preset(
+        &mut self,
+        request: MotionPresetPersistenceRequest,
+    ) -> Result<(), String> {
+        self.submit(SettingsPersistenceRequest::MotionPreset(request))
+    }
+
+    fn submit(&mut self, request: SettingsPersistenceRequest) -> Result<(), String> {
         if self.running.is_none() {
             self.running = Some(spawn_persistence_worker()?);
         }
@@ -189,7 +229,7 @@ impl ThemePersistenceWorker {
             .map_err(|_| "后台持久化工作线程已停止".to_owned())
     }
 
-    fn try_completion(&mut self) -> Option<ThemePersistenceCompletion> {
+    fn try_completion(&mut self) -> Option<SettingsPersistenceCompletion> {
         let running = self.running.as_ref()?;
         match running.completions.try_recv() {
             Ok(completion) => Some(completion),
@@ -203,18 +243,30 @@ impl ThemePersistenceWorker {
 }
 
 fn spawn_persistence_worker() -> Result<RunningPersistenceWorker, String> {
-    let (request_sender, request_receiver) = mpsc::channel::<ThemePersistenceRequest>();
-    let (completion_sender, completion_receiver) = mpsc::channel::<ThemePersistenceCompletion>();
+    let (request_sender, request_receiver) = mpsc::channel::<SettingsPersistenceRequest>();
+    let (completion_sender, completion_receiver) = mpsc::channel::<SettingsPersistenceCompletion>();
     thread::Builder::new()
         .name("nkdhr-settings-persistence".to_owned())
         .spawn(move || {
             while let Ok(request) = request_receiver.recv() {
-                let token = request.token();
-                let result = persist_theme_request(&request);
-                if completion_sender
-                    .send(ThemePersistenceCompletion { token, result })
-                    .is_err()
-                {
+                let completion = match request {
+                    SettingsPersistenceRequest::Theme(request) => {
+                        let token = request.token();
+                        let result =
+                            persist_config_value(request.key(), request.value(), "动画设置已保存");
+                        SettingsPersistenceCompletion::Theme { token, result }
+                    }
+                    SettingsPersistenceRequest::MotionPreset(request) => {
+                        let token = request.token();
+                        let result = persist_config_value(
+                            request.key(),
+                            request.value(),
+                            "动画预设资料库已保存",
+                        );
+                        SettingsPersistenceCompletion::MotionPreset { token, result }
+                    }
+                };
+                if completion_sender.send(completion).is_err() {
                     break;
                 }
             }
@@ -226,24 +278,44 @@ fn spawn_persistence_worker() -> Result<RunningPersistenceWorker, String> {
     })
 }
 
-fn persist_theme_request(request: &ThemePersistenceRequest) -> Result<String, String> {
+fn persist_config_value(key: &str, value: &str, status: &str) -> Result<String, String> {
     let connection = Connection::session().map_err(|error| error.to_string())?;
     let config = ConfigProxyBlocking::new(&connection).map_err(|error| error.to_string())?;
     config
-        .set(request.key(), Value::new(request.value()))
+        .set(key, Value::new(value))
         .map_err(|error| error.to_string())?;
-    Ok("动画设置已保存".to_owned())
+    Ok(status.to_owned())
 }
 
-fn load_active_theme_editor() -> Option<ThemeProfileEditor> {
-    let connection = Connection::session().ok()?;
-    let config = ConfigProxyBlocking::new(&connection).ok()?;
-    let stored = config.get(ACTIVE_THEME_PROFILE_KEY).ok()?;
+fn load_settings_editors() -> (ThemeProfileEditor, MotionPresetLibraryEditor) {
+    let Ok(connection) = Connection::session() else {
+        return Default::default();
+    };
+    let Ok(config) = ConfigProxyBlocking::new(&connection) else {
+        return Default::default();
+    };
+    let theme_profiles = config
+        .get(ACTIVE_THEME_PROFILE_KEY)
+        .ok()
+        .and_then(owned_string)
+        .and_then(|text| ThemeProfile::from_json(&text).ok())
+        .and_then(|profile| ThemeProfileEditor::new(profile, Default::default()).ok())
+        .unwrap_or_default();
+    let motion_presets = config
+        .get(MOTION_PRESET_LIBRARY_KEY)
+        .ok()
+        .and_then(owned_string)
+        .and_then(|text| MotionPresetLibraryData::from_json(&text).ok())
+        .and_then(|library| MotionPresetLibraryEditor::new(library).ok())
+        .unwrap_or_default();
+    (theme_profiles, motion_presets)
+}
+
+fn owned_string(stored: OwnedValue) -> Option<String> {
     let Value::Str(text) = Value::from(stored) else {
         return None;
     };
-    let profile = ThemeProfile::from_json(text.as_str()).ok()?;
-    ThemeProfileEditor::new(profile, Default::default()).ok()
+    Some(text.as_str().to_owned())
 }
 
 #[derive(Debug)]

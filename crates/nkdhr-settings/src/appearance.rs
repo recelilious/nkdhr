@@ -29,9 +29,11 @@ use nkdhr_ui::{
 };
 
 use crate::{
-    ThemeEditorError, ThemeEditorFeedback, ThemePersistenceRequest, ThemePersistenceTarget,
-    ThemePersistenceToken, ThemeProfileEditor, WallpaperRegenerationOutcome,
-    WallpaperRegenerationToken,
+    MotionPresetEditorError, MotionPresetLibraryEditor, MotionPresetLibrarySnapshot,
+    MotionPresetPersistenceRequest, MotionPresetPersistenceToken, MotionPresetSnapshotRequest,
+    ThemeEditorError, ThemeEditorFeedback, ThemeExternalOutcome, ThemePersistenceRequest,
+    ThemePersistenceTarget, ThemePersistenceToken, ThemeProfileEditor,
+    WallpaperRegenerationOutcome, WallpaperRegenerationToken,
 };
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1_160.0;
@@ -430,6 +432,7 @@ struct PendingMotionEditorSave {
 
 struct AppearanceState {
     theme_profiles: ThemeProfileEditor,
+    motion_presets: MotionPresetLibraryEditor,
     professional_mode: Reactive<bool>,
     search: Reactive<String>,
     scope: Reactive<SettingsScope>,
@@ -456,6 +459,7 @@ struct AppearanceState {
     motion_editor_saved: RefCell<Option<MotionValuesData>>,
     motion_editor_pending: RefCell<Option<PendingMotionEditorSave>>,
     motion_editor_persistence_outbox: RefCell<Option<ThemePersistenceRequest>>,
+    motion_preset_persistence_outbox: RefCell<Option<MotionPresetPersistenceRequest>>,
     next_apply_generation: Cell<u64>,
     pending_apply: RefCell<BTreeMap<AppearanceSetting, SettingsApplyToken>>,
     undo: RefCell<Option<UndoAction>>,
@@ -482,6 +486,13 @@ impl AppearanceSettings {
     }
 
     pub fn with_theme_profiles(theme_profiles: ThemeProfileEditor) -> Self {
+        Self::with_editors(theme_profiles, MotionPresetLibraryEditor::default())
+    }
+
+    pub fn with_editors(
+        theme_profiles: ThemeProfileEditor,
+        motion_presets: MotionPresetLibraryEditor,
+    ) -> Self {
         let scheme = scheme_for_profile(&theme_profiles.snapshot().committed_profile);
         let saved_motion_editor = persisted_motion_editor_values(&theme_profiles);
         let composition_revision = Reactive::new(1);
@@ -492,6 +503,7 @@ impl AppearanceSettings {
         Self {
             state: Rc::new(AppearanceState {
                 theme_profiles,
+                motion_presets,
                 professional_mode: Reactive::new(false),
                 search: Reactive::new(String::new()),
                 scope: Reactive::new(SettingsScope::Global),
@@ -518,6 +530,7 @@ impl AppearanceSettings {
                 motion_editor_saved: RefCell::new(saved_motion_editor),
                 motion_editor_pending: RefCell::new(None),
                 motion_editor_persistence_outbox: RefCell::new(None),
+                motion_preset_persistence_outbox: RefCell::new(None),
                 next_apply_generation: Cell::new(1),
                 pending_apply: RefCell::new(BTreeMap::new()),
                 undo: RefCell::new(None),
@@ -536,6 +549,120 @@ impl AppearanceSettings {
 
     pub fn theme_profiles(&self) -> ThemeProfileEditor {
         self.state.theme_profiles.clone()
+    }
+
+    pub fn motion_preset_library(&self) -> MotionPresetLibrarySnapshot {
+        self.state.motion_presets.snapshot()
+    }
+
+    pub fn motion_preset_editor(&self) -> MotionPresetLibraryEditor {
+        self.state.motion_presets.clone()
+    }
+
+    /// Freeze the currently previewed motion document, including unsaved
+    /// professional-editor values, into the next immutable preset revision.
+    pub fn begin_save_motion_preset(
+        &self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<MotionPresetSnapshotRequest, MotionPresetEditorError> {
+        let mut style = self
+            .state
+            .theme_profiles
+            .runtime()
+            .snapshot()
+            .resolved()
+            .data
+            .motion
+            .style
+            .clone()
+            .unwrap_or_default();
+        apply_motion_editor_values(&mut style, self.state.motion_editor.authored_values());
+        self.state.motion_presets.begin_snapshot(&style, id, name)
+    }
+
+    /// Queue a snapshot for the shared Settings host. This is deliberately a
+    /// nonvisual API; owner-reviewed controls can call it later without
+    /// changing the persistence contract.
+    pub fn queue_motion_preset_save(
+        &self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<MotionPresetSnapshotRequest, MotionPresetEditorError> {
+        let request = self.begin_save_motion_preset(id, name)?;
+        self.state
+            .motion_preset_persistence_outbox
+            .replace(Some(request.persistence().clone()));
+        Ok(request)
+    }
+
+    pub fn begin_import_motion_preset(
+        &self,
+        text: &str,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
+        self.state.motion_presets.begin_import_preset(text)
+    }
+
+    pub fn queue_motion_preset_import(
+        &self,
+        text: &str,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
+        let request = self.begin_import_motion_preset(text)?;
+        self.state
+            .motion_preset_persistence_outbox
+            .replace(Some(request.clone()));
+        Ok(request)
+    }
+
+    pub fn begin_import_motion_preset_library(
+        &self,
+        text: &str,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
+        self.state.motion_presets.begin_import_library(text)
+    }
+
+    pub fn queue_motion_preset_library_import(
+        &self,
+        text: &str,
+    ) -> Result<MotionPresetPersistenceRequest, MotionPresetEditorError> {
+        let request = self.begin_import_motion_preset_library(text)?;
+        self.state
+            .motion_preset_persistence_outbox
+            .replace(Some(request.clone()));
+        Ok(request)
+    }
+
+    pub fn export_motion_preset(
+        &self,
+        id: &str,
+        revision: u32,
+    ) -> Result<String, MotionPresetEditorError> {
+        self.state.motion_presets.export_preset(id, revision)
+    }
+
+    pub fn export_motion_preset_library(&self) -> Result<String, MotionPresetEditorError> {
+        self.state.motion_presets.export_library()
+    }
+
+    pub fn complete_motion_preset_persistence(
+        &self,
+        token: MotionPresetPersistenceToken,
+        result: Result<String, String>,
+    ) -> bool {
+        self.state
+            .motion_presets
+            .complete_persistence(token, result)
+    }
+
+    pub fn accept_external_motion_preset_library_json(
+        &self,
+        text: &str,
+    ) -> Result<ThemeExternalOutcome, MotionPresetEditorError> {
+        self.state.motion_presets.accept_external_json(text)
+    }
+
+    pub fn take_motion_preset_persistence_request(&self) -> Option<MotionPresetPersistenceRequest> {
+        self.state.motion_preset_persistence_outbox.take()
     }
 
     pub fn preview_theme_profile(&self, profile: ThemeProfile) -> Result<(), ThemeEditorError> {
@@ -3184,6 +3311,56 @@ mod tests {
         assert_eq!(
             restored.begin_motion_editor_save().unwrap(),
             MotionEditorSaveOutcome::AlreadySaved
+        );
+    }
+
+    #[test]
+    fn motion_preset_snapshot_freezes_the_live_editor_and_round_trips_portably() {
+        let model = AppearanceSettings::new();
+        let authored = model.motion_editor_snapshot().curve;
+        let queued = model
+            .queue_motion_preset_save("owner-review", "Owner Review")
+            .unwrap();
+        let persistence = model
+            .take_motion_preset_persistence_request()
+            .expect("the shared host receives the queued scalar write");
+
+        assert_eq!(queued.revision(), 1);
+        assert_eq!(persistence, *queued.persistence());
+        assert!(model.motion_preset_library().library.presets.is_empty());
+        assert!(model.motion_preset_library().pending);
+
+        let candidate = nkdhr_theme::MotionPresetLibraryData::from_json(persistence.value())
+            .expect("the CTRL-5 value is a portable complete library");
+        let preset = candidate.get("owner-review", 1).unwrap();
+        let values = &preset.style.families[&MotionSemanticFamilyData::PanelEnter].components
+            ["settings.drawer"]
+            .transitions["open"];
+        let frozen =
+            nkdhr_ui::CompiledMotionCurve::compile(values.curve.as_ref().unwrap()).unwrap();
+        let authored = nkdhr_ui::CompiledMotionCurve::compile(&authored).unwrap();
+        for time in [0.0, 0.2, 0.5, 0.8, 1.0] {
+            assert!((frozen.sample(time) - authored.sample(time)).abs() <= 1.0e-12);
+        }
+
+        assert!(model.complete_motion_preset_persistence(
+            persistence.token(),
+            Ok("动画预设资料库已保存".to_owned())
+        ));
+        assert_eq!(model.motion_preset_library().library.presets.len(), 1);
+
+        let exported = model.export_motion_preset("owner-review", 1).unwrap();
+        let imported = AppearanceSettings::new();
+        let request = imported.begin_import_motion_preset(&exported).unwrap();
+        assert!(
+            imported.complete_motion_preset_persistence(
+                request.token(),
+                Ok("动画预设已导入".to_owned())
+            )
+        );
+        assert_eq!(
+            imported.export_motion_preset("owner-review", 1).unwrap(),
+            exported
         );
     }
 

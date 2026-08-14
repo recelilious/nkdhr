@@ -493,9 +493,14 @@ snapshots. Reimporting identical data is a no-op; different content at an
 existing identity is a conflict rather than an overwrite. Settings'
 `MotionPresetLibraryEditor` fully parses and compiles an import before returning
 one opaque `theme.motion_library` CTRL-5 write. Its durable local library only
-changes after the host confirms that complete write. UI-7B adds no editor
-composition; semantic fluid parameters follow in UI-7C and style-neutral graph
-editing state follows in UI-7D.
+changes after the host confirms that complete write. Appearance Settings can
+now freeze the live professional-editor document as the next immutable
+revision, import/export either one preset or the complete library, and queue
+the scalar write on the same non-blocking host worker as `theme.profile`.
+Valid libraries restore at host startup; either key can fall back independently
+if its stored value is unavailable or invalid. These are nonvisual APIs: the
+owner-reviewed preset controls and file-picker composition remain a later
+UI-7E slice.
 
 ## Policy motion runtime (`nkdhr-ui`, UI-7C)
 
@@ -568,8 +573,9 @@ suffix; invalid submissions preserve the last-good document. Visible Fluid
 percentages map into sparse semantic overrides and survive reconciliation. The
 Save action writes the current transition into `theme.profile` through the
 shared host's non-blocking CTRL-5 worker. Pending, success and failure remain
-visible in both the inspector and status bar; preset-library import/export is a
-later slice.
+visible in both the inspector and status bar. Preset snapshot/import/export and
+startup recovery now have complete model and host APIs, while their visible
+controls remain owner-guided work.
 
 ## Verification tools
 

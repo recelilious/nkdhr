@@ -295,7 +295,11 @@ Arc。查找只走四个有界 map 层并 clone 被选曲线的 Arc，不解析 
 不同 payload 不能覆盖同一身份。`nkdhrd` 将其作为标量 `theme.motion_library` 叶校验，
 并给旧 theme 文件补空默认值。Settings 侧 `MotionPresetLibraryEditor` 再执行更强的 runtime
 校验：每次 import 必须先在隔离状态完整编译，之后才能产生 opaque persistence request；
-只有匹配的 host/CTRL-5 确认后 durable model 才会变化。
+只有匹配的 host/CTRL-5 确认后 durable model 才会变化。创建快照时会叠加完整活动 profile
+与专业编辑器当前本地值，并从 durable library 加最新 pending candidate 中分配下一 revision；
+连续保存因此保持 latest-write-wins，也不会丢掉尚未确认的上一 revision。`AppearanceSurface`
+通过同一个后台 worker 串行处理主题 profile 与预设资料库请求，把类型化 completion 交回
+各自事务，并在构造时独立恢复两个 CTRL-5 叶。
 
 ## UI-7C：策略管控的中断与语义流体
 
@@ -410,8 +414,8 @@ end/cancel 使用一个捕获的 UI-7D viewport transaction。这些操作只更
 一个不透明 CTRL-5 事务。共享 Settings 宿主在后台工作线程执行 D-Bus 写入；只有匹配的
 宿主确认才会清除未保存状态，失败时草稿仍可恢复。宿主创建时会先读取有效活动 profile，
 已持久化的 `PanelEnter/settings.drawer/open` transition 会成为干净基线，而不会被评审用
-初值覆盖。选中关键帧的数值绑定、预设资料库
-导入/导出，以及未来守恒液态导航选中块仍属于后续 UI-7E 工作。
+初值覆盖。选中关键帧数值绑定已经接通；预设快照、导入/导出与恢复已在表现层之下完成，
+其可见控件以及未来守恒液态导航选中块仍属于后续逐项确认的 UI-7E 工作。
 
 clay/glass 深度遵循明确的“边缘—内容分离”约束：外部斜向阴影继续表达部件悬浮高度；
 跟随主题的内高光与内暗部只占据一条窄边缘带，其模糊半径不能再复用外部悬浮阴影的
