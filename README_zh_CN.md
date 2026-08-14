@@ -93,6 +93,7 @@ Super+Alt+数字。
 
 ## 文档
 
+- [产品功能与验收证据矩阵](docs/product/FEATURE_MATRIX_zh_CN.md)
 - [控制面用户指南](docs/control-plane/USAGE_zh_CN.md) ·
   [English](docs/control-plane/USAGE.md)
 - [控制面内部实现](docs/control-plane/INTERNALS_zh_CN.md) ·

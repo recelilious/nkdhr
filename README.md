@@ -136,6 +136,7 @@ move persistent canvas marks to Super+Alt+digits.
 
 ## Documentation
 
+- [Product completion and acceptance matrix](docs/product/FEATURE_MATRIX_zh_CN.md)
 - [Control plane user guide](docs/control-plane/USAGE.md) ·
   [中文](docs/control-plane/USAGE_zh_CN.md)
 - [Control plane internals](docs/control-plane/INTERNALS.md) ·
