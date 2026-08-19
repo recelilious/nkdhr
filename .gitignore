@@ -6,3 +6,7 @@
 *~
 .idea/
 .vscode/
+
+# Local coding-agent configuration. Backed up in the private memory
+# repository rather than shipped with the project.
+.claude/
