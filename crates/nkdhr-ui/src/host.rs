@@ -120,11 +120,20 @@ impl UiHost {
         })
     }
 
+    /// Whether another frame is needed to make the surface correct on screen.
+    ///
+    /// Deliberately ignores `Invalidation::SEMANTICS`: the semantic tree is
+    /// pulled on demand by `UiRoot::semantic_tree`, which is also the only
+    /// thing that clears the bit. Treating it as a frame request made every
+    /// surface permanently non-idle, because a freshly mounted tree starts
+    /// semantics-dirty and no render pass ever clears it.
     pub fn frame_requested(&mut self) -> bool {
+        let invalidation = self.root.invalidation();
         self.layout_pending
             || self.paint_pending
             || self.root.frame_requested()
-            || !self.root.invalidation().is_empty()
+            || invalidation.contains(Invalidation::LAYOUT)
+            || invalidation.contains(Invalidation::PAINT)
     }
 }
 
@@ -240,5 +249,33 @@ mod tests {
         assert_eq!(resized.commit, 2);
         assert_eq!(resized.logical_size, Size::new(100.0, 50.0));
         assert_eq!(resized.output_scale, 2.0);
+    }
+
+    #[test]
+    fn a_rendered_static_surface_stops_requesting_frames() {
+        let root = UiRoot::new(Element::new(Probe)).unwrap();
+        let mut host = UiHost::new(root, Size::new(80.0, 40.0), 1.0).unwrap();
+        assert!(
+            host.frame_requested(),
+            "a freshly mounted tree needs a frame"
+        );
+
+        host.render().unwrap();
+        // A mounted tree starts semantics-dirty and only `semantic_tree`
+        // clears that bit, so counting it as a frame request left every
+        // surface permanently awake with nothing left to draw.
+        assert!(
+            host.root.invalidation().contains(Invalidation::SEMANTICS),
+            "this test is meaningless if semantics are no longer left dirty"
+        );
+        assert!(
+            !host.frame_requested(),
+            "a painted static surface must let its host go idle"
+        );
+
+        assert!(host.resize(Size::new(100.0, 50.0), 2.0).unwrap());
+        assert!(host.frame_requested());
+        host.render().unwrap();
+        assert!(!host.frame_requested());
     }
 }

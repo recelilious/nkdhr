@@ -85,6 +85,30 @@ struct SelectionVisualMass {
     velocity: f32,
 }
 
+/// The motion policy decisions the chain's procedural painting depends on,
+/// resolved once per composition from the live runtime.
+///
+/// These are the only two effects that run without a state change, so they are
+/// the only two that can keep requesting frames forever. Reduced and Off deny
+/// both, which must also stop the animation requests — otherwise a user who
+/// turned motion off still pays for a compositor that never goes idle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ChainMotion {
+    /// Continuous water inside an aggregate node.
+    idle_fluid: bool,
+    /// Pulsing of the selected preview node.
+    oscillation: bool,
+}
+
+impl ChainMotion {
+    fn resolve(runtime: &nkdhr_ui::MotionRuntimeProfile) -> Self {
+        Self {
+            idle_fluid: runtime.allows(MotionFeature::IdleFluid),
+            oscillation: runtime.allows(MotionFeature::Oscillation),
+        }
+    }
+}
+
 impl ShellSurface {
     pub fn new(
         viewport: Size,
@@ -119,6 +143,7 @@ impl ShellSurface {
             &clock_text,
             snapshot.theme().material_capabilities(host_backdrop_blur),
             &app_chain,
+            ChainMotion::resolve(&snapshot.motion_runtime()),
             Rc::clone(&app_chain_intents),
         );
         let mut root = UiRoot::with_text(element, text)?;
@@ -154,6 +179,7 @@ impl ShellSurface {
                 &self.clock_text,
                 capabilities,
                 &self.app_chain,
+                ChainMotion::resolve(&snapshot.motion_runtime()),
                 Rc::clone(&self.app_chain_intents),
             ))?;
             self.viewport = viewport;
@@ -239,6 +265,7 @@ impl ShellSurface {
             &self.clock_text,
             capabilities,
             &self.app_chain,
+            ChainMotion::resolve(&snapshot.motion_runtime()),
             Rc::clone(&self.app_chain_intents),
         ))?;
         Ok(())
@@ -310,6 +337,7 @@ fn shell_element(
     clock_text: &Reactive<String>,
     capabilities: MaterialCapabilities,
     app_chain: &AppChainVisual,
+    motion: ChainMotion,
     app_chain_intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
 ) -> Element {
     let token = theme.typography.token(TextRole::Mono);
@@ -340,7 +368,7 @@ fn shell_element(
     );
     let app_chain_rail = Element::new(InputShield)
         .keyed(10_u64)
-        .child(app_chain_element(theme, capabilities, app_chain));
+        .child(app_chain_element(theme, capabilities, app_chain, motion));
     let mut shell = Element::new(Stack)
         .keyed(1_u64)
         .child(
@@ -381,7 +409,7 @@ fn shell_element(
                     insets: Insets::new(14.0, 76.0, 0.0, 0.0),
                 })
                 .child(Element::new(InputShield).keyed(21_u64).child(
-                    app_preview_element(theme, capabilities, app_chain, app_chain_intents),
+                    app_preview_element(theme, capabilities, app_chain, motion, app_chain_intents),
                 )),
             ),
         );
@@ -393,6 +421,7 @@ fn app_preview_element(
     theme: &Arc<Theme>,
     capabilities: MaterialCapabilities,
     visual: &AppChainVisual,
+    motion: ChainMotion,
     intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
 ) -> Element {
     let token = theme.typography.token(TextRole::Mono);
@@ -407,6 +436,7 @@ fn app_preview_element(
     let mut element = Element::new(AppPreviewChrome {
         nodes: visual.preview.clone(),
         selection_mass: visual.selection_mass.clone(),
+        motion,
         intents,
         theme: Arc::clone(theme),
         capabilities,
@@ -433,6 +463,7 @@ fn app_chain_element(
     theme: &Arc<Theme>,
     capabilities: MaterialCapabilities,
     visual: &AppChainVisual,
+    motion: ChainMotion,
 ) -> Element {
     let token = theme.typography.token(TextRole::Mono);
     let style = TextStyle {
@@ -447,6 +478,7 @@ fn app_chain_element(
         nodes: visual.nodes.clone(),
         selected: visual.selected,
         selection_mass: visual.selection_mass.clone(),
+        motion,
         theme: Arc::clone(theme),
         capabilities,
     };
@@ -506,6 +538,7 @@ struct AppChainChrome {
     nodes: Vec<ChainNode>,
     selected: Option<u64>,
     selection_mass: Vec<SelectionVisualMass>,
+    motion: ChainMotion,
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
 }
@@ -554,6 +587,7 @@ impl Widget for AppChainChrome {
         if previous.nodes != self.nodes
             || previous.selected != self.selected
             || previous.selection_mass != self.selection_mass
+            || previous.motion != self.motion
             || !Arc::ptr_eq(&previous.theme, &self.theme)
             || previous.capabilities != self.capabilities
         {
@@ -672,7 +706,11 @@ impl Widget for AppChainChrome {
                 )?;
             }
             if fill > 0.0 {
-                let wave = (ctx.now().as_secs_f32() * 2.2 + index as f32 * 0.73).sin() * 1.2;
+                let wave = if self.motion.idle_fluid {
+                    (ctx.now().as_secs_f32() * 2.2 + index as f32 * 0.73).sin() * 1.2
+                } else {
+                    0.0
+                };
                 let water_top = rect.y + rect.height * (1.0 - fill) + wave;
                 ctx.builder().with_clip(
                     Rect::new(
@@ -689,7 +727,9 @@ impl Widget for AppChainChrome {
                         )
                     },
                 )?;
-                ctx.request_animation_frame();
+                if self.motion.idle_fluid {
+                    ctx.request_animation_frame();
+                }
             }
             if let Some(ChainNode::Application(group)) = node {
                 paint_page_encoding(ctx.builder(), rect, group.page_encoding, &self.theme)?;
@@ -743,6 +783,7 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 struct AppPreviewChrome {
     nodes: Vec<PreviewNode>,
     selection_mass: Vec<SelectionVisualMass>,
+    motion: ChainMotion,
     intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
     theme: Arc<Theme>,
     capabilities: MaterialCapabilities,
@@ -789,6 +830,7 @@ impl Widget for AppPreviewChrome {
             .expect("widget type is reconciled");
         if previous.nodes != self.nodes
             || previous.selection_mass != self.selection_mass
+            || previous.motion != self.motion
             || !Rc::ptr_eq(&previous.intents, &self.intents)
             || !Arc::ptr_eq(&previous.theme, &self.theme)
             || previous.capabilities != self.capabilities
@@ -898,7 +940,7 @@ impl Widget for AppPreviewChrome {
             let node = &self.nodes[*index];
             let (x, y) = self.center(panel, node);
             let mass = self.window_mass(node.window);
-            let pulse = if node.selected || mass > 0.001 {
+            let pulse = if self.motion.oscillation && (node.selected || mass > 0.001) {
                 (ctx.now().as_secs_f32() * 4.4).sin() * 1.4
             } else {
                 0.0
@@ -917,7 +959,7 @@ impl Widget for AppPreviewChrome {
                     ..SurfaceState::default()
                 },
             )?;
-            if node.selected || mass > 0.001 {
+            if self.motion.oscillation && (node.selected || mass > 0.001) {
                 ctx.request_animation_frame();
             }
         }
@@ -1143,6 +1185,52 @@ mod tests {
         let mut opaque_host = opaque_host.unwrap();
         opaque_host.render(size, 1.0).unwrap();
         assert!(!has_backdrop_blur(&opaque_host));
+    }
+
+    #[test]
+    fn reduced_motion_stops_idle_water_and_lets_the_shell_go_idle() {
+        let size = Size::new(900.0, 620.0);
+        let aggregate = vec![ChainNode::Application(AppGroup {
+            app_key: "org.mozilla.firefox".to_owned(),
+            windows: vec![1, 2, 3],
+            mother: 1,
+            page_encoding: AppPageEncoding::Dots(3),
+            water_fill: 0.4,
+        })];
+
+        let mut standard = ShellSurface::with_text_resources(
+            size,
+            1.0,
+            true,
+            ThemeRuntime::default(),
+            fixture_text_resources(),
+        )
+        .unwrap();
+        standard
+            .sync_app_chain(aggregate.clone(), Vec::new(), SwitcherPhase::Dormant, None)
+            .unwrap();
+        standard.render(size, 1.0).unwrap();
+        assert!(
+            standard.host.frame_requested(),
+            "water is approved continuous motion under the standard policy"
+        );
+
+        let reduced = ThemeRuntime::new(nkdhr_theme::ThemeProfile {
+            overrides: serde_json::json!({"motion": {"mode": "reduced"}}),
+            ..nkdhr_theme::ThemeProfile::default()
+        })
+        .unwrap();
+        let mut reduced =
+            ShellSurface::with_text_resources(size, 1.0, true, reduced, fixture_text_resources())
+                .unwrap();
+        reduced
+            .sync_app_chain(aggregate, Vec::new(), SwitcherPhase::Dormant, None)
+            .unwrap();
+        reduced.render(size, 1.0).unwrap();
+        assert!(
+            !reduced.host.frame_requested(),
+            "reduced motion must stop requesting frames, not merely look calmer"
+        );
     }
 
     fn has_backdrop_blur(surface: &ShellSurface) -> bool {

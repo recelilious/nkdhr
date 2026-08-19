@@ -444,7 +444,16 @@ pub fn paint_fluid_surface(
         base_tint,
         state.selected || state.accented || state.destructive,
     );
-    let base = with_alpha(tones.base, (material.fill.components()[3] + 0.16).min(0.82));
+    // The compact tier deliberately stays glassy, but reduced transparency is
+    // an accessibility floor rather than a style preference, so it outranks the
+    // glass cap instead of being clamped back down into translucency.
+    let resolved_alpha = material.fill.components()[3];
+    let base_alpha = if capabilities.reduced_transparency {
+        resolved_alpha.max(0.96)
+    } else {
+        (resolved_alpha + 0.16).min(0.82)
+    };
+    let base = with_alpha(tones.base, base_alpha);
     let outer_depth = (1.5 + hover * 1.5) * (1.0 - press * 0.72);
 
     builder.shadow(
@@ -550,6 +559,55 @@ mod tests {
     use super::*;
     use crate::{Element, UiRoot};
     use nkdhr_render::{DisplayListBuilder, Primitive, ShapeStyle};
+
+    #[test]
+    fn reduced_transparency_reaches_the_accessibility_opacity_floor() {
+        let theme = Theme::default();
+        let fill_alpha = |capabilities| {
+            let mut builder = DisplayListBuilder::new();
+            paint_fluid_surface(
+                &mut builder,
+                Rect::new(0.0, 0.0, 42.0, 42.0),
+                CornerRadii::all(21.0),
+                &theme,
+                capabilities,
+                SurfaceState::default(),
+            )
+            .unwrap();
+            builder
+                .finish()
+                .primitives()
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::Shape(shape) => match shape.style {
+                        ShapeStyle::Fill(color) => Some(color.components()[3]),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .expect("the compact body is a filled shape")
+        };
+
+        let glassy = fill_alpha(MaterialCapabilities {
+            backdrop_blur: true,
+            ..MaterialCapabilities::default()
+        });
+        assert!(
+            glassy < 0.82,
+            "the compact tier must stay glassy by default, got {glassy}"
+        );
+
+        // The glass cap must not clamp the accessibility floor back down.
+        let opaque = fill_alpha(MaterialCapabilities {
+            backdrop_blur: false,
+            reduced_transparency: true,
+            high_contrast: false,
+        });
+        assert!(
+            opaque >= 0.96,
+            "reduced transparency must reach the approved floor, got {opaque}"
+        );
+    }
 
     #[test]
     fn glass_surface_paints_blur_only_for_a_capable_host() {
