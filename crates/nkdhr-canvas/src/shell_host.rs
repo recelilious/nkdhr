@@ -4,14 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use nkdhr_render::{DisplayList, TextureStore};
-use nkdhr_ui::{
-    DispatchResult, MaterialCapabilities, Modifiers, PointerButton, Size, ThemeRuntime, UiEvent,
-    UiSurface,
-};
+use nkdhr_ui::{DispatchResult, Modifiers, PointerButton, Size, ThemeRuntime, UiEvent, UiSurface};
 use smithay::backend::input::ButtonState;
 use smithay::utils::{Logical, Point};
 
 use crate::canvas::output_group::OutputLayout;
+
+/// The shell composes a full-output element after windows and before the
+/// cursor, and `PreparedDisplayList::expand_damage` repaints the layers its
+/// filters sample, so this host really can blur its backdrop. Whether blur is
+/// actually used is the theme's decision: `ShellSurface` resolves this against
+/// the active accessibility preferences on every composition.
+const HOST_BACKDROP_BLUR: bool = true;
 
 pub struct ShellHost {
     started_at: Instant,
@@ -89,15 +93,10 @@ impl ShellHost {
                 node.output_scale = output_scale;
                 continue;
             }
-            let capabilities = MaterialCapabilities {
-                backdrop_blur: true,
-                reduced_transparency: false,
-                high_contrast: false,
-            };
             match nkdhr_shell::ShellSurface::new(
                 logical_size,
                 output_scale,
-                capabilities,
+                HOST_BACKDROP_BLUR,
                 self.theme_runtime.clone(),
             ) {
                 Ok(surface) => {

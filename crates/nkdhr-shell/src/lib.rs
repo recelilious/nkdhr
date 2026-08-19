@@ -56,7 +56,11 @@ pub struct ShellSurface {
     theme_runtime: ThemeRuntime,
     seen_theme_generation: u64,
     viewport: Size,
-    capabilities: MaterialCapabilities,
+    /// What this host can actually draw, not what the user wants. The user's
+    /// accessibility preferences live in the theme and are resolved against
+    /// this on every read, so a live profile change takes effect without
+    /// rebuilding the surface.
+    host_backdrop_blur: bool,
     app_chain: AppChainVisual,
     selection_motion: Option<SelectionMassMotion>,
     selection_target: Option<u64>,
@@ -85,18 +89,24 @@ impl ShellSurface {
     pub fn new(
         viewport: Size,
         output_scale: f32,
-        capabilities: MaterialCapabilities,
+        host_backdrop_blur: bool,
         theme_runtime: ThemeRuntime,
     ) -> UiResult<Self> {
         let text = TextResources::from_config(TextConfig::default(), output_scale)
             .map_err(|error| UiError::Text(error.to_string()))?;
-        Self::with_text_resources(viewport, output_scale, capabilities, theme_runtime, text)
+        Self::with_text_resources(
+            viewport,
+            output_scale,
+            host_backdrop_blur,
+            theme_runtime,
+            text,
+        )
     }
 
     fn with_text_resources(
         viewport: Size,
         output_scale: f32,
-        capabilities: MaterialCapabilities,
+        host_backdrop_blur: bool,
         theme_runtime: ThemeRuntime,
         text: TextResources,
     ) -> UiResult<Self> {
@@ -107,7 +117,7 @@ impl ShellSurface {
         let element = shell_element(
             &snapshot.theme(),
             &clock_text,
-            capabilities,
+            snapshot.theme().material_capabilities(host_backdrop_blur),
             &app_chain,
             Rc::clone(&app_chain_intents),
         );
@@ -119,7 +129,7 @@ impl ShellSurface {
             theme_runtime,
             seen_theme_generation: snapshot.generation(),
             viewport,
-            capabilities,
+            host_backdrop_blur,
             app_chain,
             selection_motion: None,
             selection_target: None,
@@ -136,10 +146,13 @@ impl ShellSurface {
         }
         let snapshot = self.theme_runtime.snapshot();
         if self.viewport != viewport || self.seen_theme_generation != snapshot.generation() {
+            let capabilities = snapshot
+                .theme()
+                .material_capabilities(self.host_backdrop_blur);
             self.host.reconcile(shell_element(
                 &snapshot.theme(),
                 &self.clock_text,
-                self.capabilities,
+                capabilities,
                 &self.app_chain,
                 Rc::clone(&self.app_chain_intents),
             ))?;
@@ -218,10 +231,13 @@ impl ShellSurface {
         }
         self.app_chain = next;
         let snapshot = self.theme_runtime.snapshot();
+        let capabilities = snapshot
+            .theme()
+            .material_capabilities(self.host_backdrop_blur);
         self.host.reconcile(shell_element(
             &snapshot.theme(),
             &self.clock_text,
-            self.capabilities,
+            capabilities,
             &self.app_chain,
             Rc::clone(&self.app_chain_intents),
         ))?;
@@ -1084,16 +1100,66 @@ mod tests {
     }
 
     #[test]
+    fn reduced_transparency_takes_effect_live_on_a_blur_capable_host() {
+        let size = Size::new(900.0, 620.0);
+        let runtime = ThemeRuntime::default();
+        let mut surface = ShellSurface::with_text_resources(
+            size,
+            1.0,
+            true,
+            runtime.clone(),
+            fixture_text_resources(),
+        )
+        .unwrap();
+        surface.render(size, 1.0).unwrap();
+        assert!(
+            has_backdrop_blur(&surface),
+            "a blur-capable host with default preferences must record real blur"
+        );
+
+        // The surface must follow the preference without being rebuilt: a
+        // cached capability here is exactly the bug this guards.
+        let publication = runtime
+            .publish(nkdhr_theme::ThemeProfile {
+                overrides: serde_json::json!({"accessibility": {"reduced_transparency": true}}),
+                ..nkdhr_theme::ThemeProfile::default()
+            })
+            .unwrap();
+        assert!(publication.was_published());
+        surface.render(size, 1.0).unwrap();
+        assert!(
+            !has_backdrop_blur(&surface),
+            "reduced transparency must remove blur from an existing surface"
+        );
+
+        // A host that cannot blur is unaffected by the preference either way.
+        let opaque_host = ShellSurface::with_text_resources(
+            size,
+            1.0,
+            false,
+            ThemeRuntime::default(),
+            fixture_text_resources(),
+        );
+        let mut opaque_host = opaque_host.unwrap();
+        opaque_host.render(size, 1.0).unwrap();
+        assert!(!has_backdrop_blur(&opaque_host));
+    }
+
+    fn has_backdrop_blur(surface: &ShellSurface) -> bool {
+        surface
+            .display_list()
+            .primitives()
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::BackdropBlur(_)))
+    }
+
+    #[test]
     fn expanded_switcher_paints_spatial_nodes_and_conserves_interrupted_selection() {
         let size = Size::new(900.0, 620.0);
         let mut surface = ShellSurface::with_text_resources(
             size,
             1.0,
-            MaterialCapabilities {
-                backdrop_blur: true,
-                reduced_transparency: false,
-                high_contrast: false,
-            },
+            true,
             ThemeRuntime::default(),
             fixture_text_resources(),
         )
@@ -1163,17 +1229,8 @@ mod tests {
     #[test]
     fn calm_clock_records_glyphs_and_material() {
         let size = Size::new(1280.0, 800.0);
-        let mut surface = ShellSurface::new(
-            size,
-            1.0,
-            MaterialCapabilities {
-                backdrop_blur: true,
-                reduced_transparency: false,
-                high_contrast: false,
-            },
-            ThemeRuntime::default(),
-        )
-        .expect("clock surface should initialize");
+        let mut surface = ShellSurface::new(size, 1.0, true, ThemeRuntime::default())
+            .expect("clock surface should initialize");
         surface.render(size, 1.0).expect("clock should render");
 
         let primitives = surface.display_list().primitives();
@@ -1198,11 +1255,7 @@ mod tests {
         let mut surface = ShellSurface::with_text_resources(
             size,
             1.0,
-            MaterialCapabilities {
-                backdrop_blur: true,
-                reduced_transparency: false,
-                high_contrast: false,
-            },
+            true,
             ThemeRuntime::default(),
             fixture_text_resources(),
         )

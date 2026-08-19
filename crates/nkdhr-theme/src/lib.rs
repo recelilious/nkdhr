@@ -326,6 +326,22 @@ impl Default for MaterialsData {
     }
 }
 
+/// User accessibility preferences for material.
+///
+/// These are preferences, not host capabilities. A host may be unable to
+/// blur, but no host may re-enable translucency or soft edges that the user
+/// has turned off, which is why resolution combines the two rather than
+/// letting either side alone decide.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessibilityData {
+    /// Replace translucent material with the compensated opaque fill and drop
+    /// backdrop blur and wallpaper tint entirely.
+    pub reduced_transparency: bool,
+    /// Use direct high-contrast edges instead of adaptive alpha edges.
+    pub high_contrast: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionDurationsData {
@@ -465,6 +481,11 @@ pub struct ThemeData {
     pub palette: PaletteData,
     pub motion: MotionData,
     pub materials: MaterialsData,
+    /// Absent in profiles written before accessibility preferences existed.
+    /// Resolution materializes the default first, so old sparse overrides
+    /// keep loading unchanged and no schema bump is required.
+    #[serde(default)]
+    pub accessibility: AccessibilityData,
 }
 
 impl ThemeData {
@@ -570,6 +591,7 @@ impl Default for ThemeData {
             palette: PaletteData::default(),
             motion: MotionData::default(),
             materials: MaterialsData::default(),
+            accessibility: AccessibilityData::default(),
         }
     }
 }
@@ -1221,6 +1243,48 @@ mod tests {
         );
         assert!(resolved.explicit_overrides.contains("palette.accent"));
         assert!(resolved.explicit_overrides.contains("spacing.medium"));
+    }
+
+    #[test]
+    fn accessibility_preferences_override_and_report_a_paint_change() {
+        let base = ThemeProfile::default().resolve().unwrap();
+        assert_eq!(base.data.accessibility, AccessibilityData::default());
+
+        let profile = ThemeProfile {
+            overrides: json!({"accessibility": {"reduced_transparency": true}}),
+            ..ThemeProfile::default()
+        };
+        let resolved = profile.resolve().unwrap();
+        assert!(resolved.data.accessibility.reduced_transparency);
+        assert!(!resolved.data.accessibility.high_contrast);
+        assert!(
+            resolved
+                .explicit_overrides
+                .contains("accessibility.reduced_transparency")
+        );
+
+        let change = diff_resolved(&base, &resolved)
+            .into_iter()
+            .find(|change| change.path == "accessibility.reduced_transparency")
+            .expect("an accessibility change must be reported to readers");
+        assert_eq!(change.impact, TokenImpact::Paint);
+    }
+
+    #[test]
+    fn theme_data_without_accessibility_still_deserializes() {
+        // Profiles store sparse overrides rather than a whole `ThemeData`, but
+        // resolution round-trips through this document. Adding the group must
+        // not turn an existing installation into an invalid profile.
+        let mut value = serde_json::to_value(ThemeData::default()).unwrap();
+        assert!(
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("accessibility")
+                .is_some()
+        );
+        let data: ThemeData = serde_json::from_value(value).unwrap();
+        assert_eq!(data.accessibility, AccessibilityData::default());
     }
 
     #[test]

@@ -1540,7 +1540,9 @@ dependencies = [
  "cosmic-text",
  "libc",
  "nkdhr-render",
+ "nkdhr-theme",
  "nkdhr-ui",
+ "serde_json",
 ]
 
 [[package]]

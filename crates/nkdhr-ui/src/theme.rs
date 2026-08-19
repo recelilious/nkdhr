@@ -338,6 +338,16 @@ pub struct Theme {
     pub expanded_panel: GlassMaterial,
     pub content_surface: GlassMaterial,
     pub terminal: GlassMaterial,
+    pub accessibility: Accessibility,
+}
+
+/// The user's material accessibility preferences, resolved from the active
+/// theme profile. Combine with a host's real drawing ability through
+/// [`Theme::material_capabilities`] rather than reading these directly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Accessibility {
+    pub reduced_transparency: bool,
+    pub high_contrast: bool,
 }
 
 impl Default for Theme {
@@ -356,6 +366,7 @@ impl Default for Theme {
             expanded_panel: GlassMaterial::new(0.80, 32.0, 0.06),
             content_surface: GlassMaterial::new(0.86, 36.0, 0.04),
             terminal: GlassMaterial::new(0.95, 12.0, 0.0),
+            accessibility: Accessibility::default(),
         }
     }
 }
@@ -415,9 +426,28 @@ impl Theme {
             expanded_panel: material_from_data(data.materials.expanded_panel),
             content_surface: material_from_data(data.materials.content_surface),
             terminal: material_from_data(data.materials.terminal),
+            accessibility: Accessibility {
+                reduced_transparency: data.accessibility.reduced_transparency,
+                high_contrast: data.accessibility.high_contrast,
+            },
         };
         theme.validate()?;
         Ok(theme)
+    }
+
+    /// Resolve the material capabilities a host should draw with.
+    ///
+    /// `host_backdrop_blur` is what the host can actually do — a compositor
+    /// pass that samples already-painted content can, a fixture or a renderer
+    /// without the dependency-damage closure cannot. The user's accessibility
+    /// preferences always win: reduced transparency additionally forces blur
+    /// off, because a blurred backdrop is exactly the effect it opts out of.
+    pub fn material_capabilities(&self, host_backdrop_blur: bool) -> MaterialCapabilities {
+        MaterialCapabilities {
+            backdrop_blur: host_backdrop_blur && !self.accessibility.reduced_transparency,
+            reduced_transparency: self.accessibility.reduced_transparency,
+            high_contrast: self.accessibility.high_contrast,
+        }
     }
 
     pub fn density_metrics(&self) -> DensityMetrics {
@@ -744,6 +774,59 @@ mod tests {
         assert_eq!(theme.content_surface.opacity, 0.86);
         assert_eq!(theme.content_surface.backdrop_blur, 36.0);
         assert_eq!(theme.typography.token(TextRole::Body).font_size, 14.0);
+    }
+
+    #[test]
+    fn material_capabilities_combine_host_ability_with_user_preference() {
+        let mut theme = Theme::default();
+        assert_eq!(
+            theme.material_capabilities(true),
+            MaterialCapabilities {
+                backdrop_blur: true,
+                reduced_transparency: false,
+                high_contrast: false,
+            }
+        );
+        // A host that cannot sample its backdrop never gains the ability.
+        assert!(!theme.material_capabilities(false).backdrop_blur);
+
+        // The preference outranks a fully capable host, and blur is exactly
+        // the effect reduced transparency opts out of.
+        theme.accessibility.reduced_transparency = true;
+        let capabilities = theme.material_capabilities(true);
+        assert!(!capabilities.backdrop_blur);
+        assert!(capabilities.reduced_transparency);
+        let material = theme.resolve_material(MaterialTier::ContentSurface, capabilities);
+        assert_eq!(material.backdrop_blur, 0.0);
+        assert_eq!(material.wallpaper_tint, 0.0);
+
+        // High contrast is independent of transparency.
+        theme.accessibility = Accessibility {
+            reduced_transparency: false,
+            high_contrast: true,
+        };
+        let capabilities = theme.material_capabilities(true);
+        assert!(capabilities.backdrop_blur);
+        assert!(capabilities.high_contrast);
+    }
+
+    #[test]
+    fn accessibility_preferences_survive_profile_conversion() {
+        let data = ThemeData {
+            accessibility: nkdhr_theme::AccessibilityData {
+                reduced_transparency: true,
+                high_contrast: true,
+            },
+            ..ThemeData::default()
+        };
+        let theme = Theme::from_data(&data).unwrap();
+        assert_eq!(
+            theme.accessibility,
+            Accessibility {
+                reduced_transparency: true,
+                high_contrast: true,
+            }
+        );
     }
 
     #[test]

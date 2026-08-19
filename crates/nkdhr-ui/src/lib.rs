@@ -78,9 +78,9 @@ pub use reactive::Reactive;
 pub(crate) use reactive::RootReactivity;
 pub use semantics::{SemanticNode, SemanticRole, Semantics};
 pub use theme::{
-    Density, DensityMetrics, FontStacks, GlassMaterial, MaterialCapabilities, MaterialTier,
-    Palette, Radii, ResolvedMaterial, ShadowToken, Spacing, TextRole, Theme, ThemeError, TypeToken,
-    Typography,
+    Accessibility, Density, DensityMetrics, FontStacks, GlassMaterial, MaterialCapabilities,
+    MaterialTier, Palette, Radii, ResolvedMaterial, ShadowToken, Spacing, TextRole, Theme,
+    ThemeError, TypeToken, Typography,
 };
 pub use theme_runtime::{
     ThemePublication, ThemeReadSet, ThemeRuntime, ThemeRuntimeError, ThemeSnapshot, ThemeToken,
