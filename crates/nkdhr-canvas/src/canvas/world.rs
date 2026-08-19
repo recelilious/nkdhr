@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::ButtonState;
@@ -8,7 +9,9 @@ use smithay::desktop::{Window, WindowSurfaceType};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Logical, Point, Rectangle, Size};
+use smithay::wayland::compositor;
 use smithay::wayland::seat::WaylandFocus;
+use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::xwayland::X11Surface;
 
 use crate::settings::GridSettings;
@@ -23,6 +26,7 @@ use crate::widget_host::{InputHandled, PinnedLayer, PinnedNode, PinnedPointerEve
 pub struct World;
 
 pub struct ManagedWindow {
+    id: u64,
     pub window: Window,
     pub position: Point<f64, World>,
     position_animation: Option<PositionAnimation>,
@@ -32,8 +36,13 @@ pub struct ManagedWindow {
 const DECORATION_BORDER: f64 = 2.0;
 const DECORATION_TITLEBAR: f64 = 28.0;
 const DECORATION_COLOR: Color32F = Color32F::new(0.20, 0.22, 0.29, 1.0);
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ManagedWindow {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     pub fn wl_surface(&self) -> Option<WlSurface> {
         self.window.wl_surface().map(|surface| surface.into_owned())
     }
@@ -65,6 +74,46 @@ impl ManagedWindow {
         } else if let Some(surface) = self.window.x11_surface() {
             let _ = surface.close();
         }
+    }
+
+    /// Current client-provided application grouping hint. It is sampled when
+    /// the output-local shell synchronizes, because xdg app_id and X11 class
+    /// may arrive after the first map.
+    pub fn app_identifier(&self) -> String {
+        if let Some(toplevel) = self.window.toplevel() {
+            return compositor::with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok()?.app_id.clone())
+                    .unwrap_or_default()
+            });
+        }
+        self.window
+            .x11_surface()
+            .map_or_else(String::new, |surface| {
+                let class = surface.class();
+                if class.trim().is_empty() {
+                    surface.instance()
+                } else {
+                    class
+                }
+            })
+    }
+
+    pub fn title(&self) -> String {
+        if let Some(toplevel) = self.window.toplevel() {
+            return compositor::with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok()?.title.clone())
+                    .unwrap_or_default()
+            });
+        }
+        self.window
+            .x11_surface()
+            .map_or_else(String::new, |surface| surface.title())
     }
 
     pub fn request_size(&self, size: Size<i32, Logical>) {
@@ -156,6 +205,7 @@ impl Canvas {
         let coordinate = grid.cascade_coordinate(self.windows.len());
         let position = (coordinate, coordinate).into();
         self.windows.push(ManagedWindow {
+            id: NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             window,
             position,
             position_animation: None,
@@ -189,6 +239,10 @@ impl Canvas {
 
     pub fn windows(&self) -> &[ManagedWindow] {
         &self.windows
+    }
+
+    pub fn window_by_id(&self, id: u64) -> Option<&ManagedWindow> {
+        self.windows.iter().find(|window| window.id == id)
     }
 
     /// Remove surfaces whose client disappeared without completing its

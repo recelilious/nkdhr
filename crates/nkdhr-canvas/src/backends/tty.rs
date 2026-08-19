@@ -984,6 +984,9 @@ impl TtyState {
         );
         let locked = self.app.session_locked();
         let lock_surface = self.app.lock_surface_for_output(&output_name);
+        if !locked {
+            self.app.sync_shell_workspace(&output_name, &group.name);
+        }
         let mut elements = if include_cursor {
             render::cursor_render_elements(
                 &mut renderer,

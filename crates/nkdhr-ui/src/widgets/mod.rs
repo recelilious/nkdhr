@@ -19,7 +19,8 @@ pub use scroll::{
 };
 pub use slider::{Slider, SliderError};
 pub use surface::{
-    FluidMaterialTones, GlassSurface, SurfaceState, paint_fluid_well, resolve_fluid_material_tones,
+    FluidMaterialTones, GlassSurface, SurfaceState, paint_fluid_surface, paint_fluid_well,
+    resolve_fluid_material_tones,
 };
 pub use text::Text;
 pub use text_input::{

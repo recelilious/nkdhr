@@ -1,15 +1,31 @@
 //! Output-local shell UI. Unlike canvas nodes, these surfaces remain fixed to
 //! one physical display while its workspace viewport moves underneath them.
 
-use std::any::Any;
-use std::mem::MaybeUninit;
+mod app_chain;
 
-use nkdhr_render::{DisplayList, TextureStore};
+pub use app_chain::{
+    AppChainModel, AppGroup, AppPageEncoding, AppSplitSnapshot, ChainNode, PreviewNode,
+    SpatialRect, SplitDirection, SwitcherPhase, SwitcherRelease, WindowSnapshot, canonical_app_key,
+};
+
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::mem::MaybeUninit;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
+
+use nkdhr_render::{Color, CornerRadii, DisplayList, Rect, TextureStore, Transform};
 use nkdhr_ui::text::{TextConfig, TextResources, TextStyle, TextWrap};
 use nkdhr_ui::{
-    Align, Alignment, Constraints, DispatchResult, Element, EventCtx, GlassSurface, Insets,
-    MaterialCapabilities, MaterialTier, MeasureCtx, Padding, Reactive, Size, Stack, Text, TextRole,
-    ThemeRuntime, UiError, UiEvent, UiHost, UiResult, UiRoot, UiSurface, Widget, WidgetId,
+    Align, Alignment, ArrangeCtx, Constraints, DispatchResult, Element, EventCtx, GlassSurface,
+    Insets, Invalidation, MaterialCapabilities, MaterialTier, MeasureCtx, MotionFeature,
+    MotionPropertyDomain, MotionScopeData, MotionSemanticFamilyData, Padding, PaintCtx,
+    PointerButton, Reactive, SelectionMassMotion, Size, Stack, SurfaceState, Text, TextRole, Theme,
+    ThemeRuntime, UiError, UiEvent, UiHost, UiResult, UiRoot, UiSurface, UpdateCtx, Widget,
+    WidgetId, paint_fluid_surface,
 };
 
 /// The eight shell attachment zones are stable semantic identities. A zone may
@@ -27,6 +43,11 @@ pub enum EdgeRegion {
     BottomRight,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppChainIntent {
+    SelectWindow(u64),
+}
+
 /// First production output-local surface. Only the already-defined calm clock
 /// state is composed here; the other seven regions attach to this same host as
 /// their product models become available.
@@ -36,7 +57,28 @@ pub struct ShellSurface {
     seen_theme_generation: u64,
     viewport: Size,
     capabilities: MaterialCapabilities,
+    app_chain: AppChainVisual,
+    selection_motion: Option<SelectionMassMotion>,
+    selection_target: Option<u64>,
+    motion_started_at: Instant,
+    app_chain_intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
     host: UiHost,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AppChainVisual {
+    nodes: Vec<ChainNode>,
+    preview: Vec<PreviewNode>,
+    phase: SwitcherPhase,
+    selected: Option<u64>,
+    selection_mass: Vec<SelectionVisualMass>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SelectionVisualMass {
+    window: u64,
+    mass: f32,
+    velocity: f32,
 }
 
 impl ShellSurface {
@@ -59,8 +101,16 @@ impl ShellSurface {
         text: TextResources,
     ) -> UiResult<Self> {
         let clock_text = Reactive::new(local_clock_text());
+        let app_chain_intents = Rc::new(RefCell::new(VecDeque::new()));
         let snapshot = theme_runtime.snapshot();
-        let element = shell_element(&snapshot.theme(), &clock_text, capabilities);
+        let app_chain = AppChainVisual::default();
+        let element = shell_element(
+            &snapshot.theme(),
+            &clock_text,
+            capabilities,
+            &app_chain,
+            Rc::clone(&app_chain_intents),
+        );
         let mut root = UiRoot::with_text(element, text)?;
         root.set_theme_runtime(theme_runtime.clone());
         let host = UiHost::new(root, viewport, output_scale)?;
@@ -70,6 +120,11 @@ impl ShellSurface {
             seen_theme_generation: snapshot.generation(),
             viewport,
             capabilities,
+            app_chain,
+            selection_motion: None,
+            selection_target: None,
+            motion_started_at: Instant::now(),
+            app_chain_intents,
             host,
         })
     }
@@ -85,11 +140,96 @@ impl ShellSurface {
                 &snapshot.theme(),
                 &self.clock_text,
                 self.capabilities,
+                &self.app_chain,
+                Rc::clone(&self.app_chain_intents),
             ))?;
             self.viewport = viewport;
             self.seen_theme_generation = snapshot.generation();
         }
         Ok(())
+    }
+
+    pub fn sync_app_chain(
+        &mut self,
+        nodes: Vec<ChainNode>,
+        preview: Vec<PreviewNode>,
+        phase: SwitcherPhase,
+        selected: Option<u64>,
+    ) -> UiResult<()> {
+        let now = self.motion_started_at.elapsed();
+        if self.selection_target != selected {
+            match selected {
+                Some(target) => {
+                    let identity = selection_identity(target);
+                    match self.selection_motion.as_mut() {
+                        Some(motion) => {
+                            let snapshot = self.theme_runtime.snapshot();
+                            let runtime = snapshot.motion_runtime();
+                            let scope = MotionScopeData::transition(
+                                MotionSemanticFamilyData::ListTransfer,
+                                "shell.app-chain",
+                                "selection",
+                            );
+                            let spec = runtime
+                                .resolve(&scope, MotionPropertyDomain::Spatial)
+                                .map_err(|error| UiError::Text(error.to_string()))?;
+                            if runtime.allows(MotionFeature::FluidTopology) && !spec.is_immediate()
+                            {
+                                let _ = motion.retarget(now, identity, spec);
+                            } else {
+                                motion.settle(identity);
+                            }
+                        }
+                        None => {
+                            self.selection_motion = Some(
+                                SelectionMassMotion::new(identity, 1.0)
+                                    .map_err(|error| UiError::Text(error.to_string()))?,
+                            );
+                        }
+                    }
+                }
+                None => self.selection_motion = None,
+            }
+            self.selection_target = selected;
+        }
+        let selection_mass = self
+            .selection_motion
+            .as_mut()
+            .map(|motion| motion.advance(now).sample)
+            .into_iter()
+            .flat_map(|sample| sample.entries)
+            .filter_map(|entry| {
+                parse_selection_identity(&entry.id).map(|window| SelectionVisualMass {
+                    window,
+                    mass: entry.mass as f32,
+                    velocity: entry.velocity as f32,
+                })
+            })
+            .collect();
+        let next = AppChainVisual {
+            nodes,
+            preview,
+            phase,
+            selected,
+            selection_mass,
+        };
+        if self.app_chain == next {
+            return Ok(());
+        }
+        self.app_chain = next;
+        let snapshot = self.theme_runtime.snapshot();
+        self.host.reconcile(shell_element(
+            &snapshot.theme(),
+            &self.clock_text,
+            self.capabilities,
+            &self.app_chain,
+            Rc::clone(&self.app_chain_intents),
+        ))?;
+        Ok(())
+    }
+
+    pub fn take_app_chain_intents(&mut self) -> Vec<AppChainIntent> {
+        self.app_chain_intents.borrow_mut().drain(..).collect()
     }
 }
 
@@ -129,15 +269,32 @@ impl UiSurface for ShellSurface {
         if self.clock_text.get() != clock {
             self.clock_text.set(clock);
         }
+        let selection_running = self.selection_motion.as_ref().is_some_and(|motion| {
+            motion
+                .sample(self.motion_started_at.elapsed())
+                .active_run
+                .is_some()
+        });
         self.theme_runtime.snapshot().generation() != self.seen_theme_generation
+            || selection_running
             || self.host.frame_requested()
     }
+}
+
+fn selection_identity(window: u64) -> Arc<str> {
+    Arc::from(format!("window:{window}"))
+}
+
+fn parse_selection_identity(identity: &str) -> Option<u64> {
+    identity.strip_prefix("window:")?.parse().ok()
 }
 
 fn shell_element(
     theme: &std::sync::Arc<nkdhr_ui::Theme>,
     clock_text: &Reactive<String>,
     capabilities: MaterialCapabilities,
+    app_chain: &AppChainVisual,
+    app_chain_intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
 ) -> Element {
     let token = theme.typography.token(TextRole::Mono);
     let style = TextStyle {
@@ -165,19 +322,647 @@ fn shell_element(
             .keyed(5_u64),
         ),
     );
-    Element::new(Stack).keyed(1_u64).child(
+    let app_chain_rail = Element::new(InputShield)
+        .keyed(10_u64)
+        .child(app_chain_element(theme, capabilities, app_chain));
+    let mut shell = Element::new(Stack)
+        .keyed(1_u64)
+        .child(
+            Element::new(Align {
+                horizontal: Alignment::Center,
+                vertical: Alignment::Start,
+            })
+            .keyed(2_u64)
+            .child(
+                Element::new(Padding {
+                    insets: Insets::new(0.0, 14.0, 0.0, 0.0),
+                })
+                .child(clock),
+            ),
+        )
+        .child(
+            Element::new(Align {
+                horizontal: Alignment::Start,
+                vertical: Alignment::Start,
+            })
+            .keyed(9_u64)
+            .child(
+                Element::new(Padding {
+                    insets: Insets::new(14.0, 14.0, 0.0, 0.0),
+                })
+                .child(app_chain_rail),
+            ),
+        );
+    if app_chain.phase == SwitcherPhase::Expanded {
+        shell = shell.child(
+            Element::new(Align {
+                horizontal: Alignment::Start,
+                vertical: Alignment::Start,
+            })
+            .keyed(20_u64)
+            .child(
+                Element::new(Padding {
+                    insets: Insets::new(14.0, 76.0, 0.0, 0.0),
+                })
+                .child(Element::new(InputShield).keyed(21_u64).child(
+                    app_preview_element(theme, capabilities, app_chain, app_chain_intents),
+                )),
+            ),
+        );
+    }
+    shell
+}
+
+fn app_preview_element(
+    theme: &Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    visual: &AppChainVisual,
+    intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
+) -> Element {
+    let token = theme.typography.token(TextRole::Mono);
+    let style = TextStyle {
+        families: theme.typography.families.mono.clone(),
+        weight: token.weight,
+        font_size: 15.0,
+        line_height: 19.0,
+        wrap: TextWrap::None,
+        ..TextStyle::default()
+    };
+    let mut element = Element::new(AppPreviewChrome {
+        nodes: visual.preview.clone(),
+        selection_mass: visual.selection_mass.clone(),
+        intents,
+        theme: Arc::clone(theme),
+        capabilities,
+    })
+    .keyed(22_u64);
+    for node in &visual.preview {
+        element = element.child(
+            Element::new(Align {
+                horizontal: Alignment::Center,
+                vertical: Alignment::Center,
+            })
+            .keyed(node.window.wrapping_add(30))
+            .child(Element::new(Text::new(
+                app_glyph(&node.app_key),
+                style.clone(),
+                theme.palette.text_primary,
+            ))),
+        );
+    }
+    element
+}
+
+fn app_chain_element(
+    theme: &Arc<Theme>,
+    capabilities: MaterialCapabilities,
+    visual: &AppChainVisual,
+) -> Element {
+    let token = theme.typography.token(TextRole::Mono);
+    let style = TextStyle {
+        families: theme.typography.families.mono.clone(),
+        weight: token.weight,
+        font_size: 14.0,
+        line_height: 18.0,
+        wrap: TextWrap::None,
+        ..TextStyle::default()
+    };
+    let chrome = AppChainChrome {
+        nodes: visual.nodes.clone(),
+        selected: visual.selected,
+        selection_mass: visual.selection_mass.clone(),
+        theme: Arc::clone(theme),
+        capabilities,
+    };
+    let mut element = Element::new(chrome).keyed(11_u64).child(
         Element::new(Align {
             horizontal: Alignment::Center,
-            vertical: Alignment::Start,
+            vertical: Alignment::Center,
         })
-        .keyed(2_u64)
-        .child(
-            Element::new(Padding {
-                insets: Insets::new(0.0, 14.0, 0.0, 0.0),
+        .keyed(12_u64)
+        .child(Element::new(Text::new(
+            "●",
+            style.clone(),
+            theme.palette.text_primary,
+        ))),
+    );
+    for (index, node) in visual.nodes.iter().enumerate() {
+        let label = match node {
+            ChainNode::Application(group) => app_glyph(&group.app_key),
+            ChainNode::Overflow { .. } => "…".to_owned(),
+        };
+        element = element.child(
+            Element::new(Align {
+                horizontal: Alignment::Center,
+                vertical: Alignment::Center,
             })
-            .child(clock),
-        ),
-    )
+            .keyed(stable_node_key(node, index))
+            .child(Element::new(Text::new(
+                label,
+                style.clone(),
+                theme.palette.text_primary,
+            ))),
+        );
+    }
+    element
+}
+
+fn app_glyph(app_key: &str) -> String {
+    app_key
+        .rsplit(['.', '-', '_'])
+        .find_map(|part| part.chars().find(char::is_ascii_alphanumeric))
+        .or_else(|| app_key.chars().find(char::is_ascii_alphanumeric))
+        .map(|character| character.to_ascii_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+fn stable_node_key(node: &ChainNode, index: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match node {
+        ChainNode::Application(group) => group.app_key.hash(&mut hasher),
+        ChainNode::Overflow { .. } => "nkdhr-overflow".hash(&mut hasher),
+    }
+    hasher.finish() ^ (u64::try_from(index).unwrap_or(u64::MAX) << 32)
+}
+
+#[derive(Clone)]
+struct AppChainChrome {
+    nodes: Vec<ChainNode>,
+    selected: Option<u64>,
+    selection_mass: Vec<SelectionVisualMass>,
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+}
+
+impl AppChainChrome {
+    const NODE: f32 = 42.0;
+    const GAP: f32 = 3.0;
+    const LOGO_GAP: f32 = 11.0;
+
+    fn node_x(index: usize) -> f32 {
+        if index == 0 {
+            0.0
+        } else {
+            Self::NODE + Self::LOGO_GAP + (index - 1) as f32 * (Self::NODE + Self::GAP)
+        }
+    }
+
+    fn application_mass(&self, index: usize) -> f32 {
+        let Some(ChainNode::Application(group)) = self.nodes.get(index) else {
+            return 0.0;
+        };
+        group
+            .windows
+            .iter()
+            .map(|window| {
+                self.selection_mass
+                    .iter()
+                    .filter(|entry| entry.window == *window)
+                    .map(|entry| entry.mass)
+                    .sum::<f32>()
+            })
+            .sum::<f32>()
+            .clamp(0.0, 1.0)
+    }
+}
+
+impl Widget for AppChainChrome {
+    fn create_state(&self) -> Box<dyn Any> {
+        Box::new(())
+    }
+
+    fn update(&self, previous: &dyn Any, ctx: &mut UpdateCtx<'_>) {
+        let previous = previous
+            .downcast_ref::<Self>()
+            .expect("widget type is reconciled");
+        if previous.nodes != self.nodes
+            || previous.selected != self.selected
+            || previous.selection_mass != self.selection_mass
+            || !Arc::ptr_eq(&previous.theme, &self.theme)
+            || previous.capabilities != self.capabilities
+        {
+            ctx.invalidate(Invalidation::LAYOUT | Invalidation::PAINT);
+        }
+    }
+
+    fn measure(&self, ctx: &mut MeasureCtx<'_>, constraints: Constraints) -> UiResult<Size> {
+        let count = self.nodes.len() + 1;
+        for index in 0..ctx.child_count() {
+            ctx.measure_child(
+                index,
+                Constraints::tight(Size::new(Self::NODE, Self::NODE))?,
+            )?;
+        }
+        let width = if count == 1 {
+            Self::NODE
+        } else {
+            Self::NODE * count as f32
+                + Self::LOGO_GAP
+                + Self::GAP * self.nodes.len().saturating_sub(1) as f32
+        };
+        Ok(constraints.constrain(Size::new(width, Self::NODE + 5.0)))
+    }
+
+    fn arrange(&self, ctx: &mut ArrangeCtx<'_>, rect: Rect) -> UiResult<()> {
+        for index in 0..ctx.child_count() {
+            ctx.arrange_child(
+                index,
+                Rect::new(rect.x + Self::node_x(index), rect.y, Self::NODE, Self::NODE),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx<'_>) -> UiResult<()> {
+        let root = ctx.rect();
+        let radius = CornerRadii::all(Self::NODE * 0.5);
+        if self.nodes.len() > 1 {
+            for index in 1..self.nodes.len() {
+                let left = root.x + Self::node_x(index);
+                let right = root.x + Self::node_x(index + 1) + 2.0;
+                let connector = Rect::new(
+                    left + Self::NODE - 2.0,
+                    root.y + 17.0,
+                    right - left - Self::NODE + 4.0,
+                    8.0,
+                );
+                let transfer = self
+                    .application_mass(index - 1)
+                    .min(self.application_mass(index));
+                ctx.builder().rounded_rect(
+                    connector,
+                    CornerRadii::all(4.0),
+                    with_alpha(self.theme.palette.accent_secondary, 0.30),
+                )?;
+                if transfer > 0.001 {
+                    let thickness = 8.0 + transfer * 5.0;
+                    ctx.builder().rounded_rect(
+                        Rect::new(
+                            connector.x,
+                            connector.y + connector.height * 0.5 - thickness * 0.5,
+                            connector.width,
+                            thickness,
+                        ),
+                        CornerRadii::all(thickness * 0.5),
+                        with_alpha(self.theme.palette.accent, 0.38 + transfer * 0.30),
+                    )?;
+                    ctx.request_animation_frame();
+                }
+            }
+        }
+        for (index, node) in std::iter::once(None)
+            .chain(self.nodes.iter().map(Some))
+            .enumerate()
+        {
+            let rect = Rect::new(root.x + Self::node_x(index), root.y, Self::NODE, Self::NODE);
+            let (aggregate, fill, selected, selection_mass) = match node {
+                None => (false, 0.0, false, 0.0),
+                Some(ChainNode::Application(group)) => (
+                    group.windows.len() > 1,
+                    group.water_fill,
+                    self.selected
+                        .is_some_and(|selected| group.windows.contains(&selected)),
+                    self.application_mass(index - 1),
+                ),
+                Some(ChainNode::Overflow { .. }) => (true, 0.0, false, 0.0),
+            };
+            if aggregate {
+                paint_fluid_surface(
+                    ctx.builder(),
+                    Rect::new(rect.x + 3.0, rect.y + 4.0, rect.width, rect.height),
+                    radius,
+                    &self.theme,
+                    self.capabilities,
+                    SurfaceState::default(),
+                )?;
+            }
+            paint_fluid_surface(
+                ctx.builder(),
+                rect,
+                radius,
+                &self.theme,
+                self.capabilities,
+                SurfaceState {
+                    selected: selected || selection_mass > 0.001,
+                    accented: selected || selection_mass > 0.001,
+                    ..SurfaceState::default()
+                },
+            )?;
+            if selection_mass > 0.001 {
+                ctx.builder().rounded_rect(
+                    rect.inset(3.0),
+                    CornerRadii::all((Self::NODE - 6.0) * 0.5),
+                    with_alpha(self.theme.palette.accent, 0.08 + selection_mass * 0.20),
+                )?;
+            }
+            if fill > 0.0 {
+                let wave = (ctx.now().as_secs_f32() * 2.2 + index as f32 * 0.73).sin() * 1.2;
+                let water_top = rect.y + rect.height * (1.0 - fill) + wave;
+                ctx.builder().with_clip(
+                    Rect::new(
+                        rect.x,
+                        water_top,
+                        rect.width,
+                        (rect.bottom() - water_top).max(0.0),
+                    ),
+                    |builder| {
+                        builder.rounded_rect(
+                            rect,
+                            radius,
+                            with_alpha(self.theme.palette.accent, 0.34),
+                        )
+                    },
+                )?;
+                ctx.request_animation_frame();
+            }
+            if let Some(ChainNode::Application(group)) = node {
+                paint_page_encoding(ctx.builder(), rect, group.page_encoding, &self.theme)?;
+            }
+        }
+        ctx.paint_children()
+    }
+}
+
+fn paint_page_encoding(
+    builder: &mut nkdhr_render::DisplayListBuilder,
+    rect: Rect,
+    encoding: AppPageEncoding,
+    theme: &Theme,
+) -> Result<(), nkdhr_render::BuildError> {
+    let points = match encoding {
+        AppPageEncoding::Single => return Ok(()),
+        AppPageEncoding::Dots(count) => (0..count)
+            .map(|index| (index as f32 - (count - 1) as f32 * 0.5, 0.0))
+            .collect::<Vec<_>>(),
+        AppPageEncoding::Star => vec![
+            (0.0, -2.0),
+            (-2.0, 0.0),
+            (2.0, 0.0),
+            (-1.3, 2.2),
+            (1.3, 2.2),
+        ],
+    };
+    for (x, y) in points {
+        builder.rounded_rect(
+            Rect::new(
+                rect.x + rect.width * 0.5 + x * 3.1 - 1.1,
+                rect.bottom() - 7.0 + y - 1.1,
+                2.2,
+                2.2,
+            ),
+            CornerRadii::all(1.1),
+            with_alpha(theme.palette.text_primary, 0.86),
+        )?;
+    }
+    Ok(())
+}
+
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    let [red, green, blue, _] = color.components();
+    Color::new(red, green, blue, alpha.clamp(0.0, 1.0))
+        .expect("theme colors and clamped alpha are finite")
+}
+
+#[derive(Clone)]
+struct AppPreviewChrome {
+    nodes: Vec<PreviewNode>,
+    selection_mass: Vec<SelectionVisualMass>,
+    intents: Rc<RefCell<VecDeque<AppChainIntent>>>,
+    theme: Arc<Theme>,
+    capabilities: MaterialCapabilities,
+}
+
+impl AppPreviewChrome {
+    const WIDTH: f32 = 430.0;
+    const HEIGHT: f32 = 292.0;
+    const NODE: f32 = 48.0;
+    const INSET_X: f32 = 38.0;
+    const INSET_Y: f32 = 34.0;
+
+    fn center(&self, panel: Rect, node: &PreviewNode) -> (f32, f32) {
+        (
+            panel.x + Self::INSET_X + node.center_x * (Self::WIDTH - Self::INSET_X * 2.0),
+            panel.y + Self::INSET_Y + node.center_y * (Self::HEIGHT - Self::INSET_Y * 2.0),
+        )
+    }
+
+    fn window_mass(&self, window: u64) -> f32 {
+        self.selection_mass
+            .iter()
+            .find(|entry| entry.window == window)
+            .map_or(0.0, |entry| entry.mass.clamp(0.0, 1.0))
+    }
+
+    fn transfer_running(&self) -> bool {
+        self.selection_mass.len() > 1
+            || self
+                .selection_mass
+                .iter()
+                .any(|entry| entry.velocity.abs() > 0.001)
+    }
+}
+
+impl Widget for AppPreviewChrome {
+    fn create_state(&self) -> Box<dyn Any> {
+        Box::new(())
+    }
+
+    fn update(&self, previous: &dyn Any, ctx: &mut UpdateCtx<'_>) {
+        let previous = previous
+            .downcast_ref::<Self>()
+            .expect("widget type is reconciled");
+        if previous.nodes != self.nodes
+            || previous.selection_mass != self.selection_mass
+            || !Rc::ptr_eq(&previous.intents, &self.intents)
+            || !Arc::ptr_eq(&previous.theme, &self.theme)
+            || previous.capabilities != self.capabilities
+        {
+            ctx.invalidate(Invalidation::LAYOUT | Invalidation::PAINT);
+        }
+    }
+
+    fn measure(&self, ctx: &mut MeasureCtx<'_>, constraints: Constraints) -> UiResult<Size> {
+        for index in 0..ctx.child_count() {
+            ctx.measure_child(
+                index,
+                Constraints::tight(Size::new(Self::NODE, Self::NODE))?,
+            )?;
+        }
+        Ok(constraints.constrain(Size::new(Self::WIDTH, Self::HEIGHT)))
+    }
+
+    fn arrange(&self, ctx: &mut ArrangeCtx<'_>, rect: Rect) -> UiResult<()> {
+        for (index, node) in self.nodes.iter().enumerate() {
+            let (x, y) = self.center(rect, node);
+            ctx.arrange_child(
+                index,
+                Rect::new(
+                    x - Self::NODE * 0.5,
+                    y - Self::NODE * 0.5,
+                    Self::NODE,
+                    Self::NODE,
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn paint(&self, ctx: &mut PaintCtx<'_>) -> UiResult<()> {
+        let panel = ctx.rect();
+        paint_fluid_surface(
+            ctx.builder(),
+            panel,
+            CornerRadii::all(28.0),
+            &self.theme,
+            self.capabilities,
+            SurfaceState::default(),
+        )?;
+
+        let mut chain_order = self.nodes.iter().collect::<Vec<_>>();
+        chain_order.sort_by_key(|node| node.chain_index);
+        for pair in chain_order.windows(2) {
+            let start = self.center(panel, pair[0]);
+            let end = self.center(panel, pair[1]);
+            let edge_mass = self
+                .window_mass(pair[0].window)
+                .min(self.window_mass(pair[1].window));
+            let selected_edge = edge_mass > 0.001 || pair[0].selected || pair[1].selected;
+            paint_connector(
+                ctx.builder(),
+                start,
+                end,
+                if selected_edge {
+                    6.0 + edge_mass * 7.0
+                } else {
+                    4.5
+                },
+                with_alpha(
+                    if selected_edge {
+                        self.theme.palette.accent
+                    } else {
+                        self.theme.palette.accent_secondary
+                    },
+                    if selected_edge { 0.58 } else { 0.30 },
+                ),
+            )?;
+        }
+
+        if self.transfer_running()
+            && let Some(target) = self.nodes.iter().find(|node| node.selected)
+        {
+            let target_center = self.center(panel, target);
+            let target_mass = self.window_mass(target.window);
+            for source in self.nodes.iter().filter(|node| {
+                node.window != target.window && self.window_mass(node.window) > 0.001
+            }) {
+                let source_center = self.center(panel, source);
+                let progress = target_mass.clamp(0.0, 1.0);
+                let center = (
+                    source_center.0 + (target_center.0 - source_center.0) * progress,
+                    source_center.1 + (target_center.1 - source_center.1) * progress,
+                );
+                let radius = 5.0 + (std::f32::consts::PI * progress).sin().abs() * 7.0;
+                ctx.builder().rounded_rect(
+                    Rect::new(
+                        center.0 - radius,
+                        center.1 - radius,
+                        radius * 2.0,
+                        radius * 2.0,
+                    ),
+                    CornerRadii::all(radius),
+                    with_alpha(self.theme.palette.accent, 0.62),
+                )?;
+            }
+            ctx.request_animation_frame();
+        }
+
+        let mut paint_order = (0..self.nodes.len()).collect::<Vec<_>>();
+        paint_order.sort_by_key(|index| self.nodes[*index].stacking_index);
+        for index in &paint_order {
+            let node = &self.nodes[*index];
+            let (x, y) = self.center(panel, node);
+            let mass = self.window_mass(node.window);
+            let pulse = if node.selected || mass > 0.001 {
+                (ctx.now().as_secs_f32() * 4.4).sin() * 1.4
+            } else {
+                0.0
+            };
+            let size = Self::NODE + pulse + mass * 4.0;
+            let rect = Rect::new(x - size * 0.5, y - size * 0.5, size, size);
+            paint_fluid_surface(
+                ctx.builder(),
+                rect,
+                CornerRadii::all(size * 0.5),
+                &self.theme,
+                self.capabilities,
+                SurfaceState {
+                    selected: node.selected || mass > 0.001,
+                    accented: node.selected || mass > 0.001,
+                    ..SurfaceState::default()
+                },
+            )?;
+            if node.selected || mass > 0.001 {
+                ctx.request_animation_frame();
+            }
+        }
+        for index in paint_order {
+            ctx.paint_child(index)?;
+        }
+        Ok(())
+    }
+
+    fn event(&self, ctx: &mut EventCtx<'_>, event: &UiEvent) -> UiResult<()> {
+        if let UiEvent::PointerDown {
+            position,
+            button: PointerButton::Primary,
+            ..
+        } = event
+            && let Some(node) = self.nodes.iter().rev().find(|node| {
+                let (x, y) = self.center(ctx.rect(), node);
+                Rect::new(
+                    x - Self::NODE * 0.5,
+                    y - Self::NODE * 0.5,
+                    Self::NODE,
+                    Self::NODE,
+                )
+                .contains(*position)
+            })
+        {
+            self.intents
+                .borrow_mut()
+                .push_back(AppChainIntent::SelectWindow(node.window));
+            ctx.set_handled();
+        }
+        Ok(())
+    }
+
+    fn accepts_pointer(&self) -> bool {
+        true
+    }
+}
+
+fn paint_connector(
+    builder: &mut nkdhr_render::DisplayListBuilder,
+    start: (f32, f32),
+    end: (f32, f32),
+    thickness: f32,
+    color: Color,
+) -> Result<(), nkdhr_render::BuildError> {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let length = dx.hypot(dy);
+    if length <= f32::EPSILON {
+        return Ok(());
+    }
+    let transform =
+        Transform::translation(start.0, start.1).concat(Transform::rotation(dy.atan2(dx)));
+    builder.with_transform(transform, |builder| {
+        builder.rounded_rect(
+            Rect::new(0.0, -thickness * 0.5, length, thickness),
+            CornerRadii::all(thickness * 0.5),
+            color,
+        )
+    })
 }
 
 /// A visible shell surface is one hit target even if its current child is
@@ -299,6 +1084,83 @@ mod tests {
     }
 
     #[test]
+    fn expanded_switcher_paints_spatial_nodes_and_conserves_interrupted_selection() {
+        let size = Size::new(900.0, 620.0);
+        let mut surface = ShellSurface::with_text_resources(
+            size,
+            1.0,
+            MaterialCapabilities {
+                backdrop_blur: true,
+                reduced_transparency: false,
+                high_contrast: false,
+            },
+            ThemeRuntime::default(),
+            fixture_text_resources(),
+        )
+        .unwrap();
+        let group = ChainNode::Application(AppGroup {
+            app_key: "org.mozilla.firefox".to_owned(),
+            windows: vec![1, 2, 3],
+            mother: 1,
+            page_encoding: AppPageEncoding::Dots(3),
+            water_fill: 0.4,
+        });
+        let preview = vec![
+            PreviewNode {
+                window: 1,
+                app_key: "org.mozilla.firefox".to_owned(),
+                title: "first".to_owned(),
+                center_x: 0.0,
+                center_y: 0.0,
+                chain_index: 0,
+                stacking_index: 0,
+                selected: false,
+            },
+            PreviewNode {
+                window: 2,
+                app_key: "org.mozilla.firefox".to_owned(),
+                title: "second".to_owned(),
+                center_x: 1.0,
+                center_y: 1.0,
+                chain_index: 1,
+                stacking_index: 1,
+                selected: true,
+            },
+        ];
+        surface
+            .sync_app_chain(
+                vec![group.clone()],
+                preview.clone(),
+                SwitcherPhase::Expanded,
+                Some(1),
+            )
+            .unwrap();
+        surface
+            .sync_app_chain(vec![group], preview, SwitcherPhase::Expanded, Some(2))
+            .unwrap();
+        let sample = surface
+            .selection_motion
+            .as_ref()
+            .unwrap()
+            .sample(surface.motion_started_at.elapsed());
+        assert!((sample.entries.iter().map(|entry| entry.mass).sum::<f64>() - 1.0).abs() < 1.0e-12);
+        assert!(sample.active_run.is_some());
+
+        surface.render(size, 1.0).unwrap();
+        assert!(surface.display_list().primitives().iter().any(|primitive| {
+            matches!(
+                primitive,
+                Primitive::Shape(shape)
+                    if shape.rect.width == AppPreviewChrome::WIDTH
+                        && shape.rect.height == AppPreviewChrome::HEIGHT
+            )
+        }));
+        assert!(surface.display_list().primitives().iter().any(|primitive| {
+            matches!(primitive, Primitive::Shape(shape) if !shape.transform.is_axis_aligned())
+        }));
+    }
+
+    #[test]
     fn calm_clock_records_glyphs_and_material() {
         let size = Size::new(1280.0, 800.0);
         let mut surface = ShellSurface::new(
@@ -356,7 +1218,9 @@ mod tests {
                 .display_list()
                 .primitives()
                 .iter()
-                .filter(|primitive| matches!(primitive, Primitive::Texture(_)))
+                .filter(|primitive| {
+                    matches!(primitive, Primitive::Texture(texture) if texture.rect.x > 120.0)
+                })
                 .count(),
             5,
             "all five clock glyphs must survive a reactive minute update"

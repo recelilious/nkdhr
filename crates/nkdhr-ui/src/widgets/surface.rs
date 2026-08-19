@@ -413,7 +413,7 @@ pub fn paint_fluid_well(
 /// Paint a compact clay-and-glass hybrid from one outer shadow and two true
 /// inset shadows. This mirrors the open clay.css model while retaining nkdhr's
 /// real backdrop blur and interaction-driven compression.
-pub(crate) fn paint_fluid_surface(
+pub fn paint_fluid_surface(
     builder: &mut nkdhr_render::DisplayListBuilder,
     rect: Rect,
     radii: CornerRadii,

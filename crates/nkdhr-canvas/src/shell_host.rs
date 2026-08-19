@@ -1,6 +1,7 @@
 //! Compositor ownership boundary for output-local retained shell surfaces.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use nkdhr_render::{DisplayList, TextureStore};
 use nkdhr_ui::{
@@ -13,6 +14,7 @@ use smithay::utils::{Logical, Point};
 use crate::canvas::output_group::OutputLayout;
 
 pub struct ShellHost {
+    started_at: Instant,
     theme_runtime: ThemeRuntime,
     outputs: BTreeMap<String, ShellNode>,
     pointer_output: Option<String>,
@@ -23,7 +25,10 @@ pub struct ShellHost {
 struct ShellNode {
     logical_size: Size,
     output_scale: f32,
-    surface: Box<dyn UiSurface>,
+    surface: nkdhr_shell::ShellSurface,
+    app_chain: nkdhr_shell::AppChainModel,
+    alt_held: bool,
+    pending_window_focus: Option<u64>,
 }
 
 pub struct ShellRenderData<'a> {
@@ -41,6 +46,7 @@ impl Default for ShellHost {
 impl ShellHost {
     pub fn new(theme_runtime: ThemeRuntime) -> Self {
         Self {
+            started_at: Instant::now(),
             theme_runtime,
             outputs: BTreeMap::new(),
             pointer_output: None,
@@ -100,7 +106,10 @@ impl ShellHost {
                         ShellNode {
                             logical_size,
                             output_scale,
-                            surface: Box::new(surface),
+                            surface,
+                            app_chain: nkdhr_shell::AppChainModel::default(),
+                            alt_held: false,
+                            pending_window_focus: None,
                         },
                     );
                 }
@@ -115,7 +124,17 @@ impl ShellHost {
     }
 
     pub fn render_data(&mut self, output: &str) -> Option<ShellRenderData<'_>> {
+        let now = self.started_at.elapsed();
         let node = self.outputs.get_mut(output)?;
+        let phase = node.app_chain.advance(now, node.alt_held);
+        if let Err(error) = node.surface.sync_app_chain(
+            node.app_chain.chain_nodes(),
+            node.app_chain.preview_nodes(),
+            phase,
+            node.app_chain.selected_window(),
+        ) {
+            eprintln!("nkdhr-canvas: app-chain visual sync failed: {error}");
+        }
         if let Err(error) = node.surface.render(node.logical_size, node.output_scale) {
             eprintln!("nkdhr-canvas: output-local shell frame failed: {error}");
             return None;
@@ -128,9 +147,37 @@ impl ShellHost {
     }
 
     pub fn frame_requested(&mut self) -> bool {
-        self.outputs
-            .values_mut()
-            .any(|node| node.surface.frame_requested())
+        self.outputs.values_mut().any(|node| {
+            node.surface.frame_requested()
+                || node.app_chain.switcher_phase() != nkdhr_shell::SwitcherPhase::Dormant
+        })
+    }
+
+    pub fn sync_workspace(
+        &mut self,
+        output: &str,
+        workspace: u16,
+        windows: Vec<nkdhr_shell::WindowSnapshot>,
+    ) {
+        if let Some(node) = self.outputs.get_mut(output) {
+            node.app_chain.sync_workspace(workspace, windows);
+        }
+    }
+
+    pub fn cycle_focus(&mut self, output: &str) -> Option<u64> {
+        let node = self.outputs.get_mut(output)?;
+        node.alt_held = true;
+        node.app_chain.cycle(self.started_at.elapsed())
+    }
+
+    pub fn release_alt(&mut self, output: &str) -> Option<nkdhr_shell::SwitcherRelease> {
+        let node = self.outputs.get_mut(output)?;
+        node.alt_held = false;
+        node.app_chain.release_alt()
+    }
+
+    pub fn take_requested_window_focus(&mut self, output: &str) -> Option<u64> {
+        self.outputs.get_mut(output)?.pending_window_focus.take()
     }
 
     pub fn pointer_motion(&mut self, output: &str, position: Point<f64, Logical>) -> bool {
@@ -220,7 +267,18 @@ impl ShellHost {
             return false;
         };
         match node.surface.dispatch(&event) {
-            Ok(DispatchResult { handled, .. }) => handled,
+            Ok(DispatchResult { handled, .. }) => {
+                for intent in node.surface.take_app_chain_intents() {
+                    match intent {
+                        nkdhr_shell::AppChainIntent::SelectWindow(window) => {
+                            if node.app_chain.select_window(window) {
+                                node.pending_window_focus = Some(window);
+                            }
+                        }
+                    }
+                }
+                handled
+            }
             Err(error) => {
                 eprintln!("nkdhr-canvas: output-local shell input failed: {error}");
                 true

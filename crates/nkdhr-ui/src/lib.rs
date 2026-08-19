@@ -97,6 +97,6 @@ pub use widgets::{
     ScrollOffset, ScrollReveal, ScrollbarPolicy, Slider, SliderError, SurfaceState, Text,
     TextInput, TextInputEdit, TextInputEnterBehavior, TextInputError, TextInputSelection,
     TextInputStatus, TextInputTabBehavior, TextInputValidationOutcome, TextInputValidationRequest,
-    TextInputValidationResult, TextInputValidationTrigger, Toggle, paint_fluid_well,
-    resolve_fluid_material_tones,
+    TextInputValidationResult, TextInputValidationTrigger, Toggle, paint_fluid_surface,
+    paint_fluid_well, resolve_fluid_material_tones,
 };

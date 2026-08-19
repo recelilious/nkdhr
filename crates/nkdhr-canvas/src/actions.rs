@@ -33,6 +33,7 @@ pub struct PointerTarget {
 pub enum CanvasActionPayload {
     None,
     Group {
+        output_name: String,
         size: Size<i32, Logical>,
         canvas_anchor: Point<f64, Logical>,
         display_rect: smithay::utils::Rectangle<i32, Logical>,
@@ -226,9 +227,10 @@ fn dispatch_to_canvas(
         ("canvas.window.close", ActionPhase::Invoke(_)) => {
             crate::input::close_focused_window(app);
         }
-        ("canvas.window.cycle-focus", ActionPhase::Invoke(_)) => {
-            crate::input::cycle_focus(app);
-        }
+        (
+            "canvas.window.cycle-focus",
+            ActionPhase::Invoke(CanvasActionPayload::Group { output_name, .. }),
+        ) => crate::input::cycle_focus(app, &output_name),
         (
             "canvas.overview.toggle",
             ActionPhase::Invoke(CanvasActionPayload::Group {

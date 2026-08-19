@@ -220,6 +220,9 @@ fn run() -> BackendResult {
             );
             let locked = app.session_locked();
             let lock_surface = app.lock_surface_for_output(NESTED_OUTPUT_NAME);
+            if !locked {
+                app.sync_shell_workspace(NESTED_OUTPUT_NAME, &group.name);
+            }
             let mut elements = if include_cursor {
                 render::cursor_render_elements(
                     renderer,

@@ -778,6 +778,54 @@ impl App {
             .expect("an output group must reference a live canvas")
     }
 
+    /// Samples one output group's currently active workspace for the
+    /// output-local shell. Client metadata is intentionally read at sample
+    /// time because xdg app IDs/titles and X11 classes can change after map.
+    pub fn shell_workspace_snapshot(
+        &self,
+        group: &str,
+    ) -> Option<(u16, Vec<nkdhr_shell::WindowSnapshot>)> {
+        let workspace = self.workspace_assignments.workspace_for_group(group)?;
+        let view = self.group_views.get(group)?;
+        let canvas = self.canvases.get(&view.canvas)?;
+        let windows = canvas
+            .windows()
+            .iter()
+            .enumerate()
+            .filter_map(|(stacking_index, window)| {
+                let rect = window.rect();
+                let rect = nkdhr_shell::SpatialRect::new(
+                    rect.loc.x,
+                    rect.loc.y,
+                    rect.size.w,
+                    rect.size.h,
+                )?;
+                let focused = view
+                    .keyboard_focus
+                    .as_ref()
+                    .is_some_and(|target| match target {
+                        KeyboardFocusTarget::Wayland(surface) => window.matches_surface(surface),
+                        KeyboardFocusTarget::X11(surface) => window.matches_x11(surface),
+                    });
+                Some(nkdhr_shell::WindowSnapshot::new(
+                    window.id(),
+                    window.app_identifier(),
+                    window.title(),
+                    rect,
+                    stacking_index,
+                    focused,
+                ))
+            })
+            .collect();
+        Some((workspace.number(), windows))
+    }
+
+    pub fn sync_shell_workspace(&mut self, output: &str, group: &str) {
+        if let Some((workspace, windows)) = self.shell_workspace_snapshot(group) {
+            self.shell.sync_workspace(output, workspace, windows);
+        }
+    }
+
     /// Whether a currently visible, mapped client has requested that the
     /// session remain awake. Dead or unmapped surfaces never keep it alive.
     #[allow(

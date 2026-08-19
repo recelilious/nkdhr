@@ -1003,6 +1003,17 @@ fn handle_keyboard<B: InputBackend>(
                 return FilterResult::Intercept(());
             }
 
+            if !pressed
+                && raw_syms
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(sym))
+                    .any(is_alt_key)
+                && app.shell.release_alt(&group.output_name).is_some()
+            {
+                return FilterResult::Intercept(());
+            }
+
             let ui_modifiers = ui_modifiers(*modifiers);
             let ui_key = ui_key(sym);
             let key_event = if pressed {
@@ -1065,6 +1076,7 @@ fn handle_keyboard<B: InputBackend>(
                     app,
                     &binding,
                     crate::actions::CanvasActionPayload::Group {
+                        output_name: group.output_name.clone(),
                         size: group.size,
                         canvas_anchor: group.canvas_anchor,
                         display_rect: group.display_rect,
@@ -1091,6 +1103,10 @@ fn handle_keyboard<B: InputBackend>(
             FilterResult::Forward
         },
     );
+}
+
+fn is_alt_key(key: Keysym) -> bool {
+    matches!(key, Keysym::Alt_L | Keysym::Alt_R)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1191,11 +1207,22 @@ pub(crate) fn close_focused_window(app: &mut App) {
     }
 }
 
-pub(crate) fn cycle_focus(app: &mut App) {
-    let current = focused_surface(app);
+pub(crate) fn cycle_focus(app: &mut App, output_name: &str) {
+    let group = app.active_group.clone();
+    let Some((workspace, windows)) = app.shell_workspace_snapshot(&group) else {
+        return;
+    };
+    app.shell.sync_workspace(output_name, workspace, windows);
+    let Some(next_id) = app.shell.cycle_focus(output_name) else {
+        return;
+    };
+    focus_window_id(app, next_id);
+}
+
+fn focus_window_id(app: &mut App, window_id: u64) {
     let Some((next_surface, next_focus)) = app
         .active_canvas()
-        .next_after(current.as_ref())
+        .window_by_id(window_id)
         .and_then(|window| Some((window.wl_surface()?, keyboard_target(window)?)))
     else {
         return;
@@ -1293,14 +1320,18 @@ fn handle_pointer_button<B: InputBackend>(
     }
 
     let shell_position = pointer.current_location() - group.output_global_location.to_f64();
-    if app.shell.pointer_button(
+    let shell_handled = app.shell.pointer_button(
         &group.output_name,
         shell_position,
         button_code,
         button_state,
         ui_modifiers(keyboard.modifier_state()),
         1,
-    ) {
+    );
+    if let Some(window) = app.shell.take_requested_window_focus(&group.output_name) {
+        focus_window_id(app, window);
+    }
+    if shell_handled {
         return;
     }
 
