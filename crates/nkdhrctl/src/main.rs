@@ -119,7 +119,7 @@ enum NetworkAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// Print one config value by its dotted key (e.g. `theme.accent-color`).
+    /// Print one config value by its dotted key (e.g. `outputs.eDP-1.scale`).
     Get {
         key: String,
         /// Print machine-readable JSON instead of a bare value.
@@ -128,7 +128,13 @@ enum ConfigAction {
     },
     /// Set one config value by its dotted key. `value` is parsed as an
     /// integer, a float, `true`/`false`, or else kept as a string.
-    Set { key: String, value: String },
+    Set {
+        key: String,
+        /// The new value. A negative number is read as a value, not as a
+        /// flag (e.g. `nkdhrctl config set outputs.DP-1.x -1920`).
+        #[arg(allow_negative_numbers = true)]
+        value: String,
+    },
     /// Stream one JSON line per config change under `prefix` (a namespace
     /// name, a deeper dotted path, or omitted for every change). Never
     /// polls: this blocks on nkdhrd's own change signal.

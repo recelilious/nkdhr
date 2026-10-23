@@ -1,9 +1,14 @@
 //! Concrete CTRL-5 namespace schemas. Each submodule is one namespace,
-//! owned here (not by the component it conceptually belongs to) because
-//! the `Namespace` trait it implements lives next to the config-store
-//! engine that enforces it (`backends::config_store`) — see that module's
-//! doc comment for why. `canvas` is the first real entry; expect siblings
-//! (`theme`, ...) as later phases land their own settings.
+//! owned here rather than by the component that reads it, because
+//! validation is the daemon's job: clients only ever speak the generic
+//! dotted-key `Config1` interface, and the `Namespace` trait a schema
+//! implements lives next to the engine that enforces it
+//! (`backends::config_store`). When a client also has to decode a
+//! namespace's values, their types live in `nkdhr-ipc` and the schema here
+//! wraps them, as `outputs` does with `nkdhr_ipc::OutputPlacements`.
+//!
+//! `outputs`, the compositor's multi-output arrangement, is the one
+//! namespace today; a component that needs persisted settings adds a
+//! sibling module and registers it in `main.rs`'s `NAMESPACES`.
 
-pub mod canvas;
-pub mod theme;
+pub mod outputs;

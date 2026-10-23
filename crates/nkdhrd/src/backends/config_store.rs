@@ -3,12 +3,13 @@
 //! dotted key, and change detection for both `nkdhrd`'s own writes and
 //! external edits to the files.
 //!
-//! CTRL-5 shipped with zero namespaces registered — see
-//! `docs-staging/control-plane/INTERNALS.md`'s "Config store" section for
-//! why. COMP-3's `canvas` (`nkdhrd/src/namespaces/canvas.rs`) is the first
-//! real one. Register a new namespace by implementing [`Namespace`] on a
-//! `serde`-derived struct in `nkdhrd/src/namespaces/` and adding a
-//! [`NamespaceSchema::of`] entry to the list in `nkdhrd/src/main.rs`.
+//! The engine knows nothing about any particular namespace; the schemas
+//! live in `nkdhrd/src/namespaces/` (today only `outputs`, the
+//! compositor's output arrangement), and `docs/control-plane/INTERNALS.md`'s
+//! "Config store" section explains why CTRL-5 shipped with none. Register a
+//! new namespace by implementing [`Namespace`] on a `serde`-derived type in
+//! `nkdhrd/src/namespaces/` and adding a [`NamespaceSchema::of`] entry to
+//! the `NAMESPACES` list in `nkdhrd/src/main.rs`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -26,9 +27,18 @@ use zbus::zvariant::Value;
 /// default)]` so an unrecognized key is rejected rather than silently
 /// ignored and an absent one falls back to its default, then register it
 /// via [`NamespaceSchema::of`].
+///
+/// A namespace whose entries are named at runtime rather than in the
+/// schema (one per connector, say) instead makes its root a map: a
+/// `#[serde(transparent)]` newtype over `BTreeMap<String, T>`, where `T`
+/// carries those same two attributes. The file is then one `[<entry>]`
+/// table per entry, every value is addressable as
+/// `<namespace>.<entry>.<field>`, and the strictness above holds within
+/// each entry. Its `validate` has to reject entry names containing `.`,
+/// which a dotted key could not address. `outputs` is the example.
 pub trait Namespace: Default + Serialize + DeserializeOwned {
-    /// The namespace name: the file's stem (`theme` for `theme.toml`) and
-    /// the first dotted-key segment (`theme.accent-color`).
+    /// The namespace name: the file's stem (`outputs` for `outputs.toml`)
+    /// and the first dotted-key segment (`outputs.eDP-1.scale`).
     const NAME: &'static str;
 
     /// Cross-field validation `#[serde(deny_unknown_fields)]` can't express
@@ -225,10 +235,13 @@ impl ConfigStore {
 
     /// Re-reads `namespace`'s file from disk, validates it, and — only if
     /// valid — replaces the in-memory value, returning the flattened set
-    /// of leaf keys whose value actually changed (for the caller to emit
-    /// `Changed` for; a key whose value reverted to its default because it
-    /// was removed from the file counts as changed too, since the
-    /// materialized form always has every field present). Returns `Err`
+    /// of leaf keys whose value actually changed or that newly appeared
+    /// (for the caller to emit `Changed` for). A field removed from the
+    /// file counts as changed when it reverts to a different default,
+    /// since the materialized form always has every field present. A whole
+    /// entry removed from a map-rooted namespace is different: its keys no
+    /// longer exist at all, so there is no new value to report and they
+    /// are not in the result. Returns `Err`
     /// with the in-memory value left untouched if the file is missing,
     /// unparsable, or fails validation — the caller logs this rather than
     /// propagating it, per USAGE.md's troubleshooting section.
@@ -421,8 +434,9 @@ mod tests {
 
     /// Test-only namespace: proves the generic engine (schema validation,
     /// defaults, unknown-key rejection, dotted-key get/set, external-edit
-    /// reload) without committing CTRL-5 to any real namespace's shape —
-    /// see this module's doc comment for why none is registered yet.
+    /// reload) independently of any real namespace's shape. Each real
+    /// namespace in `crate::namespaces` adds its own tests on top,
+    /// including `outputs`' coverage of a map-rooted namespace.
     #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields, default)]
     struct TestNamespace {
@@ -513,6 +527,37 @@ mod tests {
         let all = store.get_all("test").unwrap();
         assert_eq!(all.get("test.volume_step"), Some(&Json::from(0)));
         assert_eq!(all.get("test.label"), Some(&Json::from("hello")));
+
+        cleanup(dir);
+    }
+
+    #[test]
+    fn files_of_unregistered_namespaces_are_left_untouched() {
+        // E.g. a namespace file written by another nkdhr version.
+        let dir = tempdir();
+        fs::create_dir_all(&dir).unwrap();
+        let foreign = "grid_size = 32\n";
+        fs::write(dir.join("other.toml"), foreign).unwrap();
+
+        let store = ConfigStore::open(dir.clone(), schemas()).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("other.toml")).unwrap(), foreign);
+        assert!(
+            store
+                .get_all("")
+                .unwrap()
+                .keys()
+                .all(|key| key.starts_with("test."))
+        );
+        assert!(matches!(
+            store.get("other.grid_size"),
+            Err(ConfigError::UnknownNamespace(_))
+        ));
+        // The watcher hands every `*.toml` edit to `reload`, which must
+        // turn this one down rather than adopt the file.
+        assert!(matches!(
+            store.reload("other"),
+            Err(ConfigError::UnknownNamespace(_))
+        ));
 
         cleanup(dir);
     }

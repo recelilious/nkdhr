@@ -7,11 +7,13 @@ pub const CONFIG_OBJECT_PATH: &str = "/org/nkdhr/Config1";
 
 /// Client-side contract for `org.nkdhr.Config1`, the CTRL-5 config store.
 ///
-/// Keys are dotted paths (`<namespace>.<field>`, e.g. `theme.accent-color`).
-/// `nkdhr-ipc` only carries this wire-level contract — which namespaces
-/// exist and what fields each one has is defined by whichever component
-/// registers that namespace's schema with `nkdhrd`'s config store (see
-/// `nkdhrd`'s `backends::config_store`), not by this crate.
+/// Keys are dotted paths: the namespace, then one segment per nested table
+/// down to the value (e.g. `outputs.eDP-1.scale`). `nkdhr-ipc` carries this
+/// wire-level contract, not the schemas: which namespaces exist and what
+/// fields each one has is defined by the namespace schemas `nkdhrd`
+/// registers with its config store (see `nkdhrd`'s `backends::config_store`
+/// and `namespaces`). A namespace's value types live in this crate only
+/// when a client has to decode them too, as with [`crate::OutputPlacements`].
 #[zbus::proxy(
     interface = "org.nkdhr.Config1",
     default_service = "org.nkdhr.Daemon1",

@@ -4,10 +4,10 @@
 
 mod audio;
 mod brightness;
-mod canvas;
 mod config;
 mod daemon;
 mod network;
+mod outputs;
 mod power;
 mod session;
 
@@ -15,10 +15,10 @@ pub use audio::{AUDIO_OBJECT_PATH, AudioProxy, AudioProxyBlocking, AudioStatus};
 pub use brightness::{
     BRIGHTNESS_OBJECT_PATH, BrightnessProxy, BrightnessProxyBlocking, BrightnessStatus,
 };
-pub use canvas::{CanvasOutputGroup, CanvasOutputGroups, CanvasOutputPlacement};
 pub use config::{CONFIG_OBJECT_PATH, ConfigProxy, ConfigProxyBlocking};
 pub use daemon::{DAEMON_OBJECT_PATH, DaemonProxy, DaemonProxyBlocking, DaemonStatus};
 pub use network::{NETWORK_OBJECT_PATH, NetworkProxy, NetworkProxyBlocking, NetworkStatus};
+pub use outputs::{OutputPlacement, OutputPlacements};
 pub use power::{POWER_OBJECT_PATH, PowerProxy, PowerProxyBlocking, PowerStatus};
 pub use session::{SESSION_OBJECT_PATH, SessionProxy, SessionProxyBlocking, SessionStatus};
 

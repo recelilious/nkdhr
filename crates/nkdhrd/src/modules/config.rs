@@ -117,8 +117,9 @@ fn watch(store: &Arc<ConfigStore>, session: &Connection) -> std::io::Result<()> 
                             .map_err(std::io::Error::other)?;
                     }
                 }
-                // Not one of ours (e.g. a stray file dropped into the
-                // config directory by something else) — ignore silently.
+                // Not one of ours (a stray file dropped into the config
+                // directory by something else, or a namespace file another
+                // nkdhr version left behind) — ignore silently.
                 Err(ConfigError::UnknownNamespace(_)) => {}
                 Err(err) => {
                     eprintln!("nkdhrd: rejected external edit to {name}: {err}");
