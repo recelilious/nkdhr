@@ -25,7 +25,9 @@ tty = [
 ]
 
 [dependencies]
+libc = "0.2.189"
 nkdhr-ipc = { version = "0.1.0", path = "../nkdhr-ipc" }
+signal-hook = { version = "0.4.5", default-features = false }
 smithay = { version = "0.7.0", default-features = false, features = ["desktop", "wayland_frontend", "xwayland"] }
 smithay-drm-extras = { version = "0.1.0", default-features = false, optional = true }
 thiserror = { version = "2.0.17", optional = true }

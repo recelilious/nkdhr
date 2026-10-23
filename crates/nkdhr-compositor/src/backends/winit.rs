@@ -23,11 +23,12 @@ use smithay::utils::{Physical, Rectangle, Size, Transform};
 use smithay::wayland::dmabuf::DmabufState;
 use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
 
-use crate::backends::{Backend, BackendResult};
+use crate::backends::{Backend, BackendResult, SourceGuard};
 use crate::input;
 use crate::outputs::{ConnectedOutput, OutputLayout, OutputsConfig};
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
+use crate::shutdown::{self, ShutdownSignal};
 use crate::state::{App, ClientState};
 
 const NESTED_OUTPUT_NAME: &str = "nkdhr-compositor-nested-0";
@@ -35,8 +36,8 @@ const NESTED_OUTPUT_NAME: &str = "nkdhr-compositor-nested-0";
 pub struct WinitBackend;
 
 impl Backend for WinitBackend {
-    fn run(self) -> BackendResult {
-        run()
+    fn run(self, shutdown: &ShutdownSignal) -> BackendResult {
+        run(shutdown)
     }
 }
 
@@ -74,7 +75,14 @@ fn apply_layout(app: &mut App, output: &Output, layout: &OutputLayout, size: Siz
     );
 }
 
-fn run() -> BackendResult {
+/// What must be released when the compositor stops is owned by locals of
+/// this function, so that returning from it in any way releases it: the
+/// listening socket is a plain `ListeningSocket` outside any event loop,
+/// and the XWayland source, which owns the X11 lock, is held through a
+/// [`SourceGuard`], because the XWayland loop outlives this function once
+/// the X11 window manager has started. Both are declared late and are
+/// therefore dropped first.
+fn run(shutdown: &ShutdownSignal) -> BackendResult {
     let (mut backend, mut event_loop) = smithay_winit::init_from_attributes::<GlesRenderer>(
         WinitWindow::default_attributes()
             .with_title("nkdhr-compositor")
@@ -118,7 +126,7 @@ fn run() -> BackendResult {
 
     let mut xwayland_event_loop: CalloopEventLoop<App> = CalloopEventLoop::try_new()?;
     let xwayland_handle = xwayland_event_loop.handle();
-    match XWayland::spawn(
+    let _xwayland_source = match XWayland::spawn(
         &display_handle,
         None,
         crate::protocols::xwayland_environment(),
@@ -129,24 +137,27 @@ fn run() -> BackendResult {
     ) {
         Ok((xwayland, client)) => {
             let wm_handle = xwayland_handle.clone();
-            xwayland_handle.insert_source(xwayland, move |event, _, app| match event {
-                XWaylandEvent::Ready {
-                    x11_socket,
-                    display_number,
-                } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
-                    Ok(xwm) => app.install_xwm(xwm, display_number, wm_handle.clone()),
-                    Err(error) => eprintln!("nkdhr-compositor: failed to start XWM: {error}"),
-                },
-                XWaylandEvent::Error => {
-                    eprintln!("nkdhr-compositor: XWayland exited during startup")
-                }
-            })?;
+            let token =
+                xwayland_handle.insert_source(xwayland, move |event, _, app| match event {
+                    XWaylandEvent::Ready {
+                        x11_socket,
+                        display_number,
+                    } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                        Ok(xwm) => app.install_xwm(xwm, display_number, wm_handle.clone()),
+                        Err(error) => eprintln!("nkdhr-compositor: failed to start XWM: {error}"),
+                    },
+                    XWaylandEvent::Error => {
+                        eprintln!("nkdhr-compositor: XWayland exited during startup")
+                    }
+                })?;
+            Some(SourceGuard::new(xwayland_handle.clone(), token))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("nkdhr-compositor: Xwayland is not installed; X11 compatibility disabled");
+            None
         }
         Err(error) => return Err(error.into()),
-    }
+    };
 
     let listener = ListeningSocket::bind_auto("wayland", 0..32)?;
     let socket_name = listener
@@ -168,6 +179,10 @@ fn run() -> BackendResult {
             WinitEvent::Resized { .. } | WinitEvent::Focus(_) | WinitEvent::Redraw => {}
         });
         if should_exit || matches!(status, PumpStatus::Exit(_)) {
+            return Ok(());
+        }
+        if let Some(signal) = shutdown.received() {
+            shutdown::log_shutdown(signal);
             return Ok(());
         }
 
@@ -201,7 +216,11 @@ fn run() -> BackendResult {
             // convention is top-left.
             let mut frame = renderer.render(&mut framebuffer, size, Transform::Flipped180)?;
             frame.clear(render::clear_color(&app), &[damage])?;
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])?;
+            // Elements size themselves from this scale: a surface's
+            // destination is its logical (or viewport) size times the scale,
+            // while their locations are already physical. It must be the
+            // output's scale, as the TTY backend's DRM compositor uses.
+            draw_render_elements(&mut frame, resolved.scale, &elements, &[damage])?;
             let _ = frame.finish()?;
 
             for request in screencopies {

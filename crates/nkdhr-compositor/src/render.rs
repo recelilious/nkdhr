@@ -110,8 +110,9 @@ where
 }
 
 /// The client's cursor surface at the pointer minus its hotspot, or the
-/// built-in arrow for named cursors and the background, scaled to the
-/// output so it keeps its logical size.
+/// built-in arrow for named cursors and the background. Both are given
+/// their logical size: the renderer multiplies it by the output scale it
+/// draws with, so the cursor keeps its logical size on every output.
 fn cursor_elements<R>(
     renderer: &mut R,
     app: &App,
@@ -134,13 +135,7 @@ where
             app.cursor.fallback(),
             None,
             Some(Rectangle::from_size(app.cursor.fallback_size().to_f64())),
-            Some(
-                app.cursor
-                    .fallback_size()
-                    .to_f64()
-                    .upscale(output.scale)
-                    .to_i32_round(),
-            ),
+            Some(app.cursor.fallback_size()),
             Kind::Cursor,
         )
         .map(OutputRenderElement::from)

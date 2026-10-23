@@ -36,9 +36,7 @@ use smithay::backend::udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu as fi
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Scale};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::reexports::calloop::{
-    EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
-};
+use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::drm::control::{ModeTypeFlags, connector, crtc};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
@@ -53,11 +51,12 @@ use smithay::xwayland::xwm::{Reorder, ResizeEdge, X11Wm, XwmHandler, XwmId};
 use smithay::xwayland::{X11Surface, XWayland, XWaylandEvent};
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
-use crate::backends::{Backend, BackendResult};
+use crate::backends::{Backend, BackendResult, SourceGuard};
 use crate::input;
 use crate::outputs::{ConnectedOutput, OutputLayout, OutputsConfig};
 use crate::protocols::SCREENCOPY_FORMAT;
 use crate::render;
+use crate::shutdown::{self, ShutdownSignal};
 use crate::state::{App, ClientState};
 
 /// Scanout formats in order of preference: 8-bit first, 10-bit only as a
@@ -103,8 +102,8 @@ impl AsFd for RenderDeviceFd {
 pub struct TtyBackend;
 
 impl Backend for TtyBackend {
-    fn run(self) -> BackendResult {
-        run()
+    fn run(self, shutdown: &ShutdownSignal) -> BackendResult {
+        run(shutdown)
     }
 }
 
@@ -167,7 +166,11 @@ struct DeviceData {
     output_manager: OutputManager,
     scanner: DrmScanner,
     render_node: Option<DrmNode>,
-    registration: RegistrationToken,
+    /// The device's DRM notifier, which a dropped device takes with it.
+    /// Smithay's `DrmDeviceNotifier` shares the device's internal state, so
+    /// the device restores the KMS state it found at startup and releases
+    /// DRM master only once the notifier is gone too.
+    _notifier: SourceGuard<TtyState>,
     scanout_enabled: bool,
 }
 
@@ -176,6 +179,10 @@ struct TtyState {
     display_handle: DisplayHandle,
     loop_handle: LoopHandle<'static, Self>,
     session: LibSeatSession,
+    /// The libinput context, held here rather than by the session callback
+    /// so that the teardown can close the input devices while the seat they
+    /// were opened through is still open.
+    libinput: Libinput,
     primary_gpu: DrmNode,
     scanout_filter: Option<DrmNode>,
     gpus: GpuManager<GbmGlesBackend<GlesRenderer, RenderDeviceFd>>,
@@ -186,9 +193,45 @@ struct TtyState {
     output_layout: OutputLayout,
     drm_paused: bool,
     running: bool,
+    /// The event sources whose removal releases something outside the
+    /// process, other than the DRM notifiers in `devices`. They are removed
+    /// in a fixed order when the state is dropped (see its `Drop`).
+    xwayland_source: Option<SourceGuard<Self>>,
+    wayland_socket_source: Option<SourceGuard<Self>>,
+    libinput_source: Option<SourceGuard<Self>>,
+    session_source: Option<SourceGuard<Self>>,
 }
 
-fn run() -> BackendResult {
+/// Releases what the TTY session holds outside the process, however `run`
+/// ends: a stop signal, a failed recovery, an error, a startup failure or a
+/// panic. Dropping the event loop would release none of it, because the
+/// XWayland callbacks keep the loop alive (see [`SourceGuard`]).
+///
+/// The socket and lock files go first, so that a step that fails later
+/// cannot leave them behind. The Wayland socket source goes before the
+/// XWayland source: removing it takes no lock, while dropping Smithay's
+/// XWayland handle disconnects Xwayland through wayland-backend's state
+/// mutex, which a panic being unwound may have poisoned, so that step can
+/// abort the process. The XWayland source owns the X11 lock and that
+/// handle. Then every DRM device with its notifier: the device
+/// restores the KMS state it found at startup (the text console) if the
+/// session is active, and releases DRM master. Then the libinput source;
+/// this state holds a reference to the context of its own, so the context
+/// is also suspended, which closes the input devices through the seat. The
+/// session notifier goes last: it owns the libseat seat, and dropping it
+/// closes the seat, which hands the VT back to the seat manager.
+impl Drop for TtyState {
+    fn drop(&mut self) {
+        drop(self.wayland_socket_source.take());
+        drop(self.xwayland_source.take());
+        self.devices.clear();
+        drop(self.libinput_source.take());
+        self.libinput.suspend();
+        drop(self.session_source.take());
+    }
+}
+
+fn run(shutdown: &ShutdownSignal) -> BackendResult {
     let mut event_loop: EventLoop<TtyState> = EventLoop::try_new()?;
     let display: Display<App> = Display::new()?;
     let display_handle = display.handle();
@@ -217,11 +260,14 @@ fn run() -> BackendResult {
     let outputs_generation = outputs_config.generation();
     let mut app = App::new(&display_handle, DmabufState::new())?;
     app.enable_vt_switching();
+    let libinput =
+        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
     let mut state = TtyState {
         app,
         display_handle: display_handle.clone(),
         loop_handle: event_loop.handle(),
         session: session.clone(),
+        libinput,
         primary_gpu,
         scanout_filter,
         gpus,
@@ -232,11 +278,15 @@ fn run() -> BackendResult {
         output_layout: OutputLayout::default(),
         drm_paused: false,
         running: true,
+        xwayland_source: None,
+        wayland_socket_source: None,
+        libinput_source: None,
+        session_source: None,
     };
 
     state.start_xwayland()?;
 
-    register_wayland_sources(&event_loop, display)?;
+    state.wayland_socket_source = Some(register_wayland_sources(&event_loop, display)?);
 
     let udev_backend = UdevBackend::new(&seat_name)?;
     let initial_devices = udev_backend
@@ -277,13 +327,12 @@ fn run() -> BackendResult {
             }
         })?;
 
-    let mut libinput_context =
-        Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
-    libinput_context
+    state
+        .libinput
         .udev_assign_seat(&seat_name)
         .map_err(|()| std::io::Error::other(format!("libinput rejected seat {seat_name:?}")))?;
-    event_loop.handle().insert_source(
-        LibinputInputBackend::new(libinput_context.clone()),
+    let libinput_source = event_loop.handle().insert_source(
+        LibinputInputBackend::new(state.libinput.clone()),
         |event, _, state| {
             if !matches!(
                 event,
@@ -315,36 +364,47 @@ fn run() -> BackendResult {
             }
         },
     )?;
+    state.libinput_source = Some(SourceGuard::new(event_loop.handle(), libinput_source));
 
-    event_loop
-        .handle()
-        .insert_source(session_notifier, move |event, _, state| match event {
-            SessionEvent::PauseSession => {
-                libinput_context.suspend();
-                state.pause_drm_devices();
-                println!("nkdhr-compositor: TTY session paused");
-            }
-            SessionEvent::ActivateSession => {
-                if let Err(error) = libinput_context.resume() {
-                    eprintln!("nkdhr-compositor: failed to resume libinput: {error:?}");
-                    state.running = false;
-                    return;
+    let session_source =
+        event_loop
+            .handle()
+            .insert_source(session_notifier, |event, _, state| match event {
+                SessionEvent::PauseSession => {
+                    state.libinput.suspend();
+                    state.pause_drm_devices();
+                    println!("nkdhr-compositor: TTY session paused");
                 }
-                if !state.reactivate_and_rescan_drm_devices() {
-                    state.running = false;
-                    return;
+                SessionEvent::ActivateSession => {
+                    if let Err(error) = state.libinput.resume() {
+                        eprintln!("nkdhr-compositor: failed to resume libinput: {error:?}");
+                        state.running = false;
+                        return;
+                    }
+                    if !state.reactivate_and_rescan_drm_devices() {
+                        state.running = false;
+                        return;
+                    }
+                    println!("nkdhr-compositor: TTY session resumed");
                 }
-                println!("nkdhr-compositor: TTY session resumed");
-            }
-        })?;
+            })?;
+    state.session_source = Some(SourceGuard::new(event_loop.handle(), session_source));
 
     println!("nkdhr-compositor: acquired seat {seat_name:?}; starting TTY event loop");
     while state.running {
         // Client commits, input, vblank and hotplug all wake the loop
-        // immediately. The bound exists only so that an output
-        // configuration change published by the watcher thread is applied
-        // within a quarter second on an otherwise idle session.
+        // immediately. The bound exists so that an output configuration
+        // change published by the watcher thread, and a stop signal, take
+        // effect within a quarter second on an otherwise idle session: a
+        // signal does not end the wait, because calloop resumes an
+        // `epoll_wait` that a signal interrupts. The loop keeps dispatching
+        // while the session is paused, so a stop signal is honoured while
+        // another VT is in front too.
         event_loop.dispatch(Some(Duration::from_millis(250)), &mut state)?;
+        if let Some(signal) = shutdown.received() {
+            shutdown::log_shutdown(signal);
+            break;
+        }
         if state.outputs_generation != state.outputs_config.generation() {
             state.outputs_generation = state.outputs_config.generation();
             state.reconcile_output_layout();
@@ -444,16 +504,19 @@ fn register_render_node(
     ))
 }
 
+/// Registers the Wayland listening socket and the display. The returned
+/// guard owns the socket source, whose `ListeningSocket` removes the socket
+/// and its lock file when dropped.
 fn register_wayland_sources(
-    event_loop: &EventLoop<TtyState>,
+    event_loop: &EventLoop<'static, TtyState>,
     display: Display<App>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<SourceGuard<TtyState>, Box<dyn std::error::Error>> {
     let socket = ListeningSocketSource::new_auto()?;
     println!(
         "nkdhr-compositor: listening on WAYLAND_DISPLAY={}",
         socket.socket_name().to_string_lossy()
     );
-    event_loop
+    let socket_source = event_loop
         .handle()
         .insert_source(socket, |stream, _, state| {
             if let Err(error) = state
@@ -463,6 +526,7 @@ fn register_wayland_sources(
                 eprintln!("nkdhr-compositor: failed to accept Wayland client: {error}");
             }
         })?;
+    let socket_source = SourceGuard::new(event_loop.handle(), socket_source);
     event_loop.handle().insert_source(
         Generic::new(display, Interest::READ, Mode::Level),
         |_, display, state| {
@@ -478,7 +542,7 @@ fn register_wayland_sources(
             Ok(PostAction::Continue)
         },
     )?;
-    Ok(())
+    Ok(socket_source)
 }
 
 fn initialize_devices(
@@ -584,21 +648,23 @@ impl TtyState {
         };
 
         let wm_handle = self.loop_handle.clone();
-        self.loop_handle
-            .insert_source(xwayland, move |event, _, state| match event {
-                XWaylandEvent::Ready {
-                    x11_socket,
-                    display_number,
-                } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
-                    Ok(xwm) => state
-                        .app
-                        .install_xwm(xwm, display_number, wm_handle.clone()),
-                    Err(error) => eprintln!("nkdhr-compositor: failed to start XWM: {error}"),
-                },
-                XWaylandEvent::Error => {
-                    eprintln!("nkdhr-compositor: XWayland exited during startup")
-                }
-            })?;
+        let token =
+            self.loop_handle
+                .insert_source(xwayland, move |event, _, state| match event {
+                    XWaylandEvent::Ready {
+                        x11_socket,
+                        display_number,
+                    } => match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                        Ok(xwm) => state
+                            .app
+                            .install_xwm(xwm, display_number, wm_handle.clone()),
+                        Err(error) => eprintln!("nkdhr-compositor: failed to start XWM: {error}"),
+                    },
+                    XWaylandEvent::Error => {
+                        eprintln!("nkdhr-compositor: XWayland exited during startup")
+                    }
+                })?;
+        self.xwayland_source = Some(SourceGuard::new(self.loop_handle.clone(), token));
         Ok(())
     }
 
@@ -630,7 +696,9 @@ impl TtyState {
         let (drm, notifier) = DrmDevice::new(fd.clone(), true).map_err(DeviceAddError::Drm)?;
         let gbm = GbmDevice::new(fd).map_err(DeviceAddError::Gbm)?;
 
-        let registration = self
+        // Guarded from here on, so that a failure below removes the
+        // notifier again.
+        let token = self
             .loop_handle
             .insert_source(notifier, move |event, _, state| match event {
                 DrmEvent::VBlank(crtc) => state.frame_finish(node, crtc),
@@ -639,6 +707,7 @@ impl TtyState {
                 }
             })
             .expect("DRM notifier registration must succeed");
+        let notifier = SourceGuard::new(self.loop_handle.clone(), token);
 
         let render_node = node
             .node_with_type(NodeType::Render)
@@ -683,7 +752,7 @@ impl TtyState {
                 output_manager,
                 scanner: DrmScanner::new(),
                 render_node,
-                registration,
+                _notifier: notifier,
                 scanout_enabled: self.scanout_filter.is_none_or(|filter| filter == node),
             },
         );
@@ -901,7 +970,8 @@ impl TtyState {
             self.gpus.as_mut().remove_node(&render_node);
             self.render_allocators.remove(&render_node);
         }
-        self.loop_handle.remove(device.registration);
+        // Takes the notifier with it.
+        drop(device);
         self.reconcile_output_layout();
         println!("nkdhr-compositor: removed DRM device {node}");
     }

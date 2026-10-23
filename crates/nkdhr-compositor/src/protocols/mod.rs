@@ -55,11 +55,12 @@ use smithay::wayland::session_lock::{
 };
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::{
     delegate_fractional_scale, delegate_idle_inhibit, delegate_pointer_constraints,
     delegate_pointer_gestures, delegate_primary_selection, delegate_relative_pointer,
-    delegate_xdg_decoration,
+    delegate_viewporter, delegate_xdg_decoration,
 };
 use smithay::xwayland::xwm::X11Wm;
 
@@ -90,6 +91,14 @@ pub struct ProtocolState {
     pub primary_selection: PrimarySelectionState,
     _xdg_decoration: XdgDecorationState,
     _fractional_scale: FractionalScaleManagerState,
+    /// `wp_viewporter` needs no policy of its own: Smithay validates a
+    /// surface's viewport and applies its crop and destination size in
+    /// `on_commit_buffer_handler`, and everything that sizes, hit-tests or
+    /// draws a surface reads the resulting surface view rather than the
+    /// buffer. It is what makes fractional scaling usable: a client draws at
+    /// the preferred fractional scale and sets its logical size as the
+    /// viewport destination.
+    _viewporter: ViewporterState,
     _pointer_constraints: PointerConstraintsState,
     _relative_pointer: RelativePointerManagerState,
     _pointer_gestures: PointerGesturesState,
@@ -180,6 +189,7 @@ impl ProtocolState {
             primary_selection: PrimarySelectionState::new::<App>(display_handle),
             _xdg_decoration: XdgDecorationState::new::<App>(display_handle),
             _fractional_scale: FractionalScaleManagerState::new::<App>(display_handle),
+            _viewporter: ViewporterState::new::<App>(display_handle),
             _pointer_constraints: PointerConstraintsState::new::<App>(display_handle),
             _relative_pointer: RelativePointerManagerState::new::<App>(display_handle),
             _pointer_gestures: PointerGesturesState::new::<App>(display_handle),
@@ -594,6 +604,7 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for App {
 delegate_primary_selection!(App);
 delegate_xdg_decoration!(App);
 delegate_fractional_scale!(App);
+delegate_viewporter!(App);
 delegate_idle_inhibit!(App);
 delegate_pointer_constraints!(App);
 delegate_pointer_gestures!(App);
