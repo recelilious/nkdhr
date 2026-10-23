@@ -65,9 +65,13 @@ protocol layer:
   and X11 in both directions), drag-and-drop, client-side decoration
   negotiation, session locking (`ext-session-lock-v1`; the session stays
   protected if the locker crashes), screen capture
-  (`wlr-screencopy-unstable-v1`), fractional scaling, pointer constraints,
-  relative pointer motion, touchpad gestures, touch input and idle-inhibit
-  requests.
+  (`wlr-screencopy-unstable-v1`), fractional scaling (with
+  `wp_viewporter`, so applications draw sharp buffers at scales such as
+  1.5), pointer constraints, relative pointer motion, touchpad gestures,
+  touch input and idle-inhibit requests.
+- **Stopping**: `SIGTERM`, `SIGINT` and `SIGHUP` shut it down cleanly,
+  removing its Wayland and X11 sockets and lock files and, on a TTY,
+  handing the displays and the seat back.
 - **Displays**: several displays arranged in one shared logical space
   through `nkdhrd`'s `outputs` namespace (position and scale per
   connector, applied live); displays without an entry are placed side by

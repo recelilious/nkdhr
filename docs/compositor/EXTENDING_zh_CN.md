@@ -136,3 +136,12 @@ override-redirect 的 X11 窗口不由此函数放置；它们保持各自客户
 - **VT 切换始终可达。** VT 切换拦截在挂钩点之前运行，锁定路径和未锁定路径中都是
   如此，任何策略都不得消费 `Ctrl+Alt+F1`…`F12` 或 `XF86Switch_VT_1`…`12`。它是
   用户脱离卡死会话的出路。
+- **停止过程保持干净。** `SIGTERM`、`SIGINT` 和 `SIGHUP` 只经由 `main` 安装的
+  `ShutdownSignal` 到达合成器（见 [INTERNALS_zh_CN.md](INTERNALS_zh_CN.md#关闭)）。
+  任何扩展都不阻塞这些信号（calloop 基于 `signalfd` 的 `Signals` 事件源就会阻塞
+  它们，而 Xwayland 和其他所有子进程都会继承被阻塞的信号掩码），不为它们安装自己
+  的处理函数，也不用 `std::process::exit` 结束进程。扩展所拥有的、合成器停止时必
+  须释放的任何东西（套接字或锁文件、设备），都通过 `SourceGuard` 持有其事件源，
+  从而在离开后端 `run` 的每一条路径上都得到释放；`SourceGuard` 会显式移除该事件
+  源，绝不留给事件循环被丢弃时处理：只要 Smithay 的 X11 窗口管理器还持有该循环的
+  句柄，丢弃事件循环就什么也不会释放。

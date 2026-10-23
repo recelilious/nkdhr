@@ -103,12 +103,49 @@ or from an SSH login of the same user; the socket lives in the same
 
 ### Leaving the session
 
-- **Nested**: close the window, or stop the process (`Ctrl+C` in the
-  terminal that started it).
+- **Nested**: close the window, or press `Ctrl+C` in the terminal that
+  started the compositor. Closing that terminal stops it too.
 - **TTY**: there is no exit key. Switch to another VT (`Ctrl+Alt+F3`), log
-  in, and stop the process: `kill $(pidof nkdhr-compositor)`.
+  in, and stop the process: `kill $(pidof nkdhr-compositor)`. An SSH login
+  of the same user works as well, and so does ending the login session
+  with `loginctl terminate-session`. The compositor does not have to be on
+  the VT in front to stop.
 
-Clients lose their connection when the compositor exits.
+Either way the compositor shuts down cleanly. It stops on `SIGTERM` (what
+`kill` sends by default), `SIGINT` (`Ctrl+C`) and `SIGHUP` (the starting
+terminal closing), and logs which one it received:
+
+```
+nkdhr-compositor: received SIGTERM, shutting down
+```
+
+It then removes its Wayland socket (`wayland-N` and `wayland-N.lock` in
+`$XDG_RUNTIME_DIR`) and XWayland's X11 socket and lock file
+(`/tmp/.X11-unix/X<n>` and `/tmp/.X<n>-lock`), stops XWayland and, on a
+TTY, hands the displays back in the state it found them in and releases
+the seat, so the VT it ran on returns to its text console. Clients lose
+their connection when the compositor exits.
+
+Ending a login session sends `SIGTERM` and right behind it `SIGHUP`; the
+line then names `SIGTERM`. A signal that was already ignored when the
+compositor started stays ignored: started with `nohup`, it keeps running
+when its terminal closes, and when a script starts it in the background,
+`Ctrl+C` does not stop it.
+
+A nested compositor whose window the host desktop hides (minimized on
+GNOME or KDE, or on a workspace that is not shown on sway or Hyprland)
+may only stop once its window is shown again, because the host stops
+letting it draw while hidden.
+
+If shutting down ever hangs, a second `SIGTERM` or `SIGINT` (run `kill`
+again, or press `Ctrl+C` again) ends the process at once, without any of
+that cleanup. `SIGHUP` never counts towards that, neither as the first nor
+as the second signal, because session managers and terminals often send
+it right behind another signal. `kill -9` (`SIGKILL`) and a crash skip the
+cleanup as well and leave the socket and lock files behind. They are
+harmless: the next start takes a stale Wayland socket over, and reuses a
+stale X11 display number unless its lock file names a process that is
+still running.
 
 ## Window behaviour
 
@@ -275,11 +312,19 @@ again in `outputs.toml`.
 
 Native Wayland applications get the regular clipboard, middle-click
 primary selection, drag-and-drop, client-side decoration negotiation,
-popups and menus, fractional-scale hints (with an integer `wl_output` scale
-for clients that do not use them), pointer lock and confinement, relative
-pointer motion, touch and idle-inhibit requests. Touchpad two-finger
-scrolling arrives as ordinary scroll input, and touchpad swipe, pinch and
-hold gestures reach applications that use the pointer-gestures protocol.
+popups and menus, fractional scaling, surface cropping and scaling
+(`wp_viewporter`, which video players and browsers use as well), pointer
+lock and confinement, relative pointer motion, touch and idle-inhibit
+requests. Touchpad two-finger scrolling arrives as ordinary scroll input,
+and touchpad swipe, pinch and hold gestures reach applications that use
+the pointer-gestures protocol.
+
+On a display with a fractional scale such as `1.25`, applications that
+support fractional scaling draw at exactly that scale and stay sharp.
+Applications that support only whole scales draw at the next whole scale
+(`2` for `1.25`) and are scaled down to fit, which looks slightly softer;
+applications without any scaling support draw at scale 1 and are
+enlarged.
 
 Legacy X11 applications run through the compositor's integrated XWayland
 server and share the clipboard and primary selection with Wayland
@@ -417,7 +462,8 @@ treating one threshold as proof that nothing leaks.
   active, or crashed while locked. The compositor logs
   `protecting session while lock client prepares surfaces` when a lock
   begins and `session unlocked` when it ends. After a locker crash, switch
-  VT and restart the compositor.
+  VT, stop the compositor (see [Leaving the session](#leaving-the-session))
+  and start it again.
 - **An edit to `outputs.toml` has no effect**: `journalctl --user -u nkdhrd`
   shows the validation error, and `nkdhrctl config get outputs.<connector>.x`
   shows the value in force. A deleted table takes effect only with the next
@@ -426,6 +472,15 @@ treating one threshold as proof that nothing leaks.
   that connector has no entry yet; add its table to the file first.
 - **`pkill -x nkdhr-compositor` finds nothing**: process names are truncated
   to 15 characters. Use `pidof nkdhr-compositor`, or `pkill -f`.
+- **The compositor logged `shutting down` but does not exit**: run
+  `kill $(pidof nkdhr-compositor)` again (or press `Ctrl+C` again); the
+  second `SIGTERM` or `SIGINT` it receives ends the process at once. If it
+  logged `received SIGHUP`, that hang-up does not count, so `kill` it
+  twice.
+- **`wayland-N`, `wayland-N.lock`, `/tmp/.X11-unix/X<n>` or
+  `/tmp/.X<n>-lock` is left over**: the compositor was killed with
+  `SIGKILL`, ended by a second `SIGTERM` or `SIGINT`, or crashed. The
+  files are harmless; the next start reuses or skips them.
 - **Another desktop session blanks or suspends the machine during a soak**:
   stop that session's idle manager first. The runner blocks sleep, but it
   cannot safely change another compositor's display-power policy.

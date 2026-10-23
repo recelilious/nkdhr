@@ -47,8 +47,11 @@ watch，手动编辑的文件会被重新校验，有效时立即生效。`nkdhr
 - **客户端**：原生 Wayland 客户端，以及通过集成 XWayland 服务器运行的 X11 应用。
 - **协议**：剪贴板和主选区（在 Wayland 与 X11 之间双向共享）、拖放、客户端
   装饰协商、会话锁定（`ext-session-lock-v1`；锁屏程序崩溃时会话仍保持受保护）、
-  屏幕捕获（`wlr-screencopy-unstable-v1`）、分数缩放、指针约束、相对指针运动、
+  屏幕捕获（`wlr-screencopy-unstable-v1`）、分数缩放（配合 `wp_viewporter`，
+  应用在 1.5 等缩放比例下也能绘制清晰的缓冲区）、指针约束、相对指针运动、
   触控板手势、触摸输入和空闲抑制请求。
+- **停止**：`SIGTERM`、`SIGINT` 和 `SIGHUP` 会让它干净地关闭，删除自己的
+  Wayland 与 X11 套接字及锁文件，在 TTY 上还会交还显示器和 seat。
 - **显示器**：多个显示器通过 `nkdhrd` 的 `outputs` 命名空间排布在同一个共享
   逻辑空间中（按 connector 设置位置和缩放，实时生效）；没有条目的显示器会自动
   并排放置。

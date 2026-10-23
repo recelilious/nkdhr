@@ -34,7 +34,8 @@ verification record.
 crates/nkdhr-compositor/
   Cargo.toml        features: nested (default), tty
   src/
-    main.rs         backend selection
+    main.rs         signal handlers, backend selection
+    shutdown.rs     ShutdownSignal: SIGTERM, SIGINT and SIGHUP as a polled shutdown request
     state.rs        App: protocol state, seat, window store, focus policy, popup grabs,
                     Smithay handlers
     windows.rs      ManagedWindow, WindowStore, the initial-placement and keep-reachable rules
@@ -45,7 +46,7 @@ crates/nkdhr-compositor/
                     frame callbacks, refresh
     cursor.rs       cursor image state and the built-in fallback arrow
     backends/
-      mod.rs        the Backend trait
+      mod.rs        the Backend trait, SourceGuard
       winit.rs      nested backend
       tty.rs        DRM/KMS + GBM + libinput + libseat backend
     protocols/
@@ -63,6 +64,9 @@ Cargo features keep deployments lean. `nested` enables Smithay's
 `renderer_multi`, plus `smithay-drm-extras` and `thiserror`. The base
 Smithay features are `desktop`, `wayland_frontend` and `xwayland`. The only
 nkdhr dependency is `nkdhr-ipc`, used with `zbus` by the outputs watcher.
+`signal-hook` installs the signal handlers, and `libc` provides the
+`sigaction` call that reads the dispositions the compositor inherited (see
+[Shutdown](#shutdown)).
 
 Everything outside `backends/` is shared by both backends and never knows
 which one is running. A backend owns its event loop, renderer, Smithay
@@ -71,16 +75,19 @@ points: `input::handle` for every input event, `App::finish_client_dispatch`
 right after each client dispatch, `render::refresh` once per loop
 iteration, `render::output_elements` to compose each output, the
 frame-callback and output-membership helpers after each output's render
-pass, and `App::set_output_layout` whenever it re-resolves the layout.
+pass, and `App::set_output_layout` whenever it re-resolves the layout. It
+also checks the shutdown request once per loop iteration.
 
 ## Backend selection
 
-`main.rs` picks the backend from its single argument: `--nested` runs
-winit, `--tty` runs the TTY backend, and with no argument it chooses nested
-only when `WAYLAND_DISPLAY` or `DISPLAY` is set, otherwise TTY. Any other
-argument is an error, and so is selecting a backend whose feature is not
-compiled in. Both implement the one-method `Backend` trait;
-neither is scaffolding for the other.
+`main.rs` first installs the signal handlers (`ShutdownSignal::install`,
+see [Shutdown](#shutdown)), then picks the backend from its single
+argument: `--nested` runs winit, `--tty` runs the TTY backend, and with no
+argument it chooses nested only when `WAYLAND_DISPLAY` or `DISPLAY` is set,
+otherwise TTY. Any other argument is an error, and so is selecting a
+backend whose feature is not compiled in. Both implement the one-method
+`Backend` trait, whose `run(self, &ShutdownSignal)` returns when the
+compositor stops; neither is scaffolding for the other.
 
 ## `App`
 
@@ -663,20 +670,33 @@ model `nested`) whose mode is the window size at 60 Hz. A window resize or
 a new outputs generation re-resolves the layout. The dmabuf global is
 created with `DmabufState::create_global` (protocol version 3) from the
 renderer's format list. The listening socket comes from
-`ListeningSocket::bind_auto("wayland", 0..32)` and is accepted once per loop
-iteration. XWayland runs on its own calloop loop, dispatched with a zero
-timeout every iteration.
+`ListeningSocket::bind_auto("wayland", 0..32)`, is owned by `run` itself
+rather than by an event source, and is accepted once per loop iteration.
+XWayland runs on its own calloop loop, dispatched with a zero timeout every
+iteration.
 
 Each iteration dispatches winit events (input goes to `input::handle`),
-re-resolves the layout if needed, calls `render::refresh`, renders the
-whole window, services screencopy, submits, updates output membership,
-sends frame callbacks, accepts a pending client, dispatches XWayland and
-the Wayland clients, calls `App::finish_client_dispatch`, and flushes. The
-nested output's `wl_output` global lives as long as the process.
+leaves the loop when the window was asked to close or a shutdown signal
+was received, re-resolves the layout if needed, calls `render::refresh`,
+renders the whole window, services screencopy, submits, updates output
+membership, sends frame callbacks, accepts a pending client, dispatches
+XWayland and the Wayland clients, calls `App::finish_client_dispatch`, and
+flushes. Leaving the loop, for either reason or because of an error, runs
+the teardown described under [Shutdown](#shutdown). The nested output's
+`wl_output` global lives as long as the process.
 There is no damage tracking or frame pacing of its own: every iteration
 redraws the full window and swaps as fast as the host accepts, which shows
 as steady CPU use. That is acceptable for a development backend. Every five
 seconds it logs the frame rate and window count.
+
+It draws the elements with `draw_render_elements` at the nested output's
+scale, the same scale the TTY backend's DRM compositor takes from its
+`Output`. Elements carry physical locations but size themselves from the
+scale they are drawn with (a surface's logical or viewport destination
+size times that scale), so drawing at any other scale would place windows
+correctly yet draw them at the wrong size. The built-in fallback cursor is
+accordingly given its logical size, never one pre-multiplied by the
+scale.
 
 Details that are not obvious from Smithay's examples:
 
@@ -753,11 +773,18 @@ connector change re-resolves the layout.
 source dispatching clients, then calling `App::finish_client_dispatch`),
 udev, libinput, the session notifier, one DRM notifier per device for
 vblank, and XWayland. Each iteration dispatches
-with a 250 ms bound, re-resolves the layout if the outputs generation
-moved, calls `render::refresh`, renders every output and flushes clients.
-Client commits, input, vblank and hotplug wake the loop immediately; the
-bound exists only so a configuration change published by the watcher
-thread is applied within a quarter second on an otherwise idle session.
+with a 250 ms bound, leaves the loop if a shutdown signal was received,
+re-resolves the layout if the outputs generation moved, calls
+`render::refresh`, renders every output and flushes clients. Client
+commits, input, vblank and hotplug wake the loop immediately; the bound
+exists so that a configuration change published by the watcher thread,
+and a shutdown signal, take effect within a quarter second on an otherwise
+idle session. A signal does not wake the loop itself: calloop resumes an
+`epoll_wait` that a signal interrupts instead of returning. The loop keeps
+dispatching while the session is paused, so a shutdown request is honoured
+while another VT is in front too. Leaving the loop, because of a shutdown
+signal, a failed recovery (`running` cleared) or an error, runs the
+teardown described under [Shutdown](#shutdown).
 
 **Presentation and damage.** `DrmOutput::render_frame` supplies Smithay's
 per-output damage tracking, so an unchanged output produces an empty frame
@@ -798,6 +825,169 @@ rescans connectors, without touching clients, windows or focus. The buffer
 reset matters: fresh swapchain slots have buffer age zero and force a full
 repaint, whereas keeping pre-pause ages made the first physical VT-resume
 test repaint only a damaged block until the next input event.
+
+## Shutdown
+
+`SIGTERM`, `SIGINT` and `SIGHUP` ask the compositor to stop. The first one
+starts a graceful shutdown; a `SIGTERM` or `SIGINT` that arrives after an
+earlier `SIGTERM` or `SIGINT` ends the process at once. `SIGHUP` takes no
+part in that: it neither forces the exit nor arms it for a later signal,
+because hang-ups routinely arrive right behind another signal. logind
+stops a login session's scope with `SendSIGHUP=yes`, so ending the session
+(`loginctl terminate-session`, logging out, shutting the system down)
+delivers `SIGTERM` immediately followed by `SIGHUP`, and closing a
+terminal can deliver `SIGHUP` both from the shell and from the kernel. If
+a hang-up took part in the forced exit, exactly those ordinary ways of
+stopping could skip the cleanup.
+
+A stop signal that is ignored (`SIG_IGN`) when the compositor starts stays
+ignored. `signal-hook` would otherwise replace that disposition with its
+handler, but it is the starter's decision: `nohup` ignores `SIGHUP` so
+that the program outlives its terminal, and a shell without job control
+ignores `SIGINT` in the commands it starts in the background.
+
+**Handlers.** `ShutdownSignal::install` (`shutdown.rs`) is the first thing
+`main` does, before a backend creates a socket, a lock file, a thread or a
+child process, so there is no moment at which those exist and a signal
+would still kill the process with its default action. For each stop
+signal it first asks `sigaction` for the current disposition and skips a
+signal that is ignored. Otherwise it registers `signal-hook` flag actions,
+which run in registration order. For `SIGTERM` and `SIGINT`:
+`flag::register_usize(signal, forcing, signal)`, then
+`flag::register_conditional_shutdown(signal, 1, forcing_seen)`, then
+`flag::register(signal, forcing_seen)`. For `SIGHUP`, only
+`flag::register_usize(signal, other, signal)`. On the first `SIGTERM` or
+`SIGINT` the signal number is recorded, the conditional shutdown finds
+`forcing_seen` still false and does nothing, and then `forcing_seen` is
+set. On a later one, `forcing_seen` is already set and the conditional
+shutdown calls `_exit(1)` from the handler. The record comes first because
+a signal can arrive between two registrations: in every partly registered
+state the signal then either records a stop request or does nothing,
+whereas arming `forcing_seen` before the record existed could let a
+signal in that window go unrecorded and make the next ordinary stop
+request force the exit without cleanup. The actions only touch atomics
+and `_exit`, both async-signal-safe; nothing else of the compositor runs
+in signal context.
+
+That `SIGHUP` does not set `forcing_seen` matters because two signals are
+not necessarily handled in the order they were sent. The kernel delivers
+a signal sent to the process to any thread that does not block it. When
+logind's `SIGHUP` arrives while the main thread has not yet run its
+`SIGTERM` handler, the kernel prefers another, idle thread for it (zbus's
+or the `outputs` watcher's), and the two handlers then run concurrently in
+either order. Had the hang-up set the flag the `SIGTERM` handler checks,
+that `SIGTERM` could find it set and end the process without cleanup; a
+standalone reproduction with eight idle threads ended that way in about
+one run in ten.
+
+`ShutdownSignal::received` returns the name of the recorded `SIGTERM` or
+`SIGINT` if there is one, otherwise that of a recorded `SIGHUP`
+(`signal_hook::low_level::signal_name`), or `None` while none has arrived.
+The two kinds are recorded apart because, for the same reason, neither
+the first nor the last signal recorded is reliably logind's `SIGTERM`.
+
+calloop's `Signals` source is deliberately not used. It is built on
+`signalfd`, which needs the signals blocked, and it blocks them only in the
+thread that creates it. A signal mask is inherited by threads created
+afterwards and survives `fork` and `exec`, so Xwayland and every other
+child would start with `SIGTERM`, `SIGINT` and `SIGHUP` blocked and could
+not be stopped by them, while a thread created earlier (the `outputs`
+watcher's, zbus's) would not block them, and a signal the kernel delivers
+to that thread would still end the process without cleanup. Handlers
+installed with `sigaction` change no mask, and `exec` resets them to the
+default in children.
+
+**Polling.** Each backend checks `ShutdownSignal::received` once per loop
+iteration. When it returns a name, the backend logs
+`nkdhr-compositor: received <SIGNAL>, shutting down` and leaves its loop.
+The line is written by `shutdown::log_shutdown`, which ignores a write
+error instead of panicking as `println!` does: after a `SIGHUP` the
+terminal that stdout points to has often hung up already. The TTY loop
+notices within its 250 ms dispatch bound (see [TTY](#tty-backendsttyrs)).
+The nested loop notices on its next iteration, normally within a frame.
+Its buffer swap, however, waits for the host's frame callback (EGL's
+default swap interval of 1 applies; Smithay never changes it), and some
+hosts stop sending frame callbacks to a window they do not show: a
+minimized window on GNOME or KDE, a window on a hidden workspace on sway
+or Hyprland. While the nested window is hidden like that, a stop request
+takes effect only once it is shown again. Unthrottling the swap would turn
+the nested backend into a busy loop, which is not worth it for a
+development backend; a second `SIGTERM` or `SIGINT` still ends it at once,
+without cleanup.
+
+**Why dropping the event loop is not enough.** Most objects whose `Drop`
+releases something outside the process (the TTY's Wayland socket, the
+XWayland handle with its X11 lock, the TTY's DRM notifiers and libseat
+seat) are owned by calloop event sources, and calloop frees a loop's
+sources only when the last `LoopHandle` to the loop is gone. A callback
+that holds a handle to its own loop is a reference cycle that keeps the
+loop, and every source in it, alive after the `EventLoop` value is
+dropped. The loop that runs XWayland (the TTY's only loop, the nested
+backend's XWayland loop) has such a cycle as soon as XWayland is spawned:
+the compositor's own XWayland callback holds a handle to start the window
+manager, and `X11Wm::start_wm` registers Smithay's X11 event source with a
+callback that holds one too, which nkdhr cannot change. Dropping the
+`EventLoop` at the end of `run` therefore releases nothing. Each backend
+instead holds every such source through a `SourceGuard`
+(`backends/mod.rs`), which removes the source from its loop when the guard
+is dropped; `LoopHandle::remove` drops the source, and its callback, at
+once. The guards are owned so that every way out of `run` drops them: by
+locals of `run` in the nested backend, and on the TTY by `TtyState`, whose
+`Drop` removes them in the order given below, and by each DRM device's
+`DeviceData`. That covers a shutdown signal, the nested window closing, a
+failed TTY recovery, an error in the loop, a startup failure after the
+source was registered (a DRM device that fails to initialize included),
+and a panic, which unwinds through `run`, with one exception on the TTY:
+a panic raised while wayland-backend's state mutex was held poisons it,
+and dropping the XWayland handle then panics again inside the teardown,
+which aborts the process. The Wayland socket is released before that
+step, so only the X11 files and the later steps are lost in that case. A
+unit test in
+`backends/mod.rs` pins the calloop behaviour this rests on.
+
+**What is released.**
+
+- The Wayland socket. wayland-server's `ListeningSocket` removes
+  `$XDG_RUNTIME_DIR/wayland-N` and `wayland-N.lock` when dropped. On the
+  TTY it lives in the `ListeningSocketSource` that
+  `register_wayland_sources` registers, which is removed; the nested
+  backend owns a plain `ListeningSocket` in `run`, outside any loop, which
+  is dropped on return.
+- XWayland. Removing the source that holds Smithay's `XWayland` handle
+  (registered by `TtyState::start_xwayland` in the TTY loop, and by the
+  nested backend in its XWayland loop) drops the handle, which disconnects
+  the Xwayland client, so the server exits, and drops the `X11Lock` it
+  owns, which removes `/tmp/.X11-unix/X<n>` and `/tmp/.X<n>-lock` (see
+  [XWayland](#xwayland)).
+- On the TTY, the Wayland socket source is removed first and the
+  XWayland source second; the nested backend drops its socket before its
+  XWayland guard as well. Then each DRM device (`TtyState::devices`)
+  together with its notifier source (`DeviceData::_notifier`).
+  Smithay's `DrmDeviceNotifier` shares the device's internal state, so the
+  atomic DRM device restores the KMS state it found at startup (the text
+  console), when the session is active, and releases DRM master only once
+  the notifier is gone as well as the device. Then the libinput source.
+  The libinput context is also held by `TtyState`, through which the
+  session callback suspends and resumes it, so removing the source alone
+  would not close the input devices; the teardown suspends the context,
+  which closes them through the seat while that seat is still open. Last
+  the session notifier: `LibSeatSessionNotifier` owns the libseat seat
+  (`LibSeatSession` only holds a weak reference to it), and dropping it
+  closes the seat, which hands the VT back to the seat manager (logind or
+  seatd).
+
+The files go first, so a teardown step that fails later cannot leave them
+behind. A graceful shutdown returns from `main` with status 0.
+
+**What is not cleaned up.** A forced exit (`_exit(1)` from the handler),
+`SIGKILL` and crashes that do not unwind (a fatal signal such as
+`SIGSEGV`, an abort) skip all of this. What they leave is taken over or
+skipped by the next start: wayland-server takes a socket name over when it
+can lock its `.lock` file (the kernel released the dead process's `flock`)
+and removes the stale socket before binding; Smithay's `X11Lock` takes over
+a lock file whose recorded PID no longer exists and removes a stale X11
+socket before binding, and moves on to the next display number while the
+recorded PID belongs to a running process.
 
 ## Protocols
 
@@ -946,7 +1136,29 @@ scene and screencopy reads back the composition.
 - **Fractional scale** (`wp_fractional_scale_manager_v1`): the preferred
   scale is maintained by the output-membership pass described under
   [Rendering](#rendering), which also gives a new surface its initial
-  preference.
+  preference. A client acts on it by drawing a buffer at that scale and
+  setting the surface's logical size as its viewport destination, so the
+  protocol is usable only together with `wp_viewporter`. A client that
+  finds no viewporter draws at the integer scale instead (the fractional
+  scale rounded up, as `wl_output` advertises it), which the compositor
+  then scales down.
+- **Viewporter** (`wp_viewporter`): `ViewporterState` in `ProtocolState`,
+  dispatched through `delegate_viewporter!`. Smithay does the protocol work
+  in the commit path the compositor already uses, so nkdhr adds no handler
+  of its own. A pre-commit hook that Smithay installs with a surface's
+  first viewport rejects a non-integer source size without a destination
+  (`bad_size`); `on_commit_buffer_handler` then checks the source rectangle
+  against the buffer with `ensure_viewport_valid` (`out_of_buffer`) and
+  stores the crop and the destination size in the surface's
+  `RendererSurfaceState` view. Everything that sizes a surface reads that
+  view, never the buffer: rendering (cropped and scaled surface elements),
+  `Window::bbox` and `Window::geometry` (and through them placement, the
+  keep-reachable rule, output membership and frame callbacks), hit testing
+  through `Window::surface_under` and input regions, and Smithay's
+  lock-surface size check, which compares the viewport destination with
+  the configured size (`dimensions_mismatch`). Screencopy reads back the
+  composed frame and needs nothing. The only buffer query in nkdhr is
+  whether a buffer is attached, when a toplevel is placed.
 - **Cursor.** Client cursor surfaces are drawn with their hotspot; named
   cursors and the background use the built-in 24×24 arrow, scaled to the
   output so it keeps its logical size.
@@ -972,6 +1184,16 @@ Smithay supports first-class.
   reports `Ready`, `X11Wm::start_wm` runs and the compositor logs
   `XWayland ready on DISPLAY=:<n>`. A missing `Xwayland` executable is
   logged and otherwise ignored.
+- **Display lock.** The `/tmp/.X<n>-lock` file and the
+  `/tmp/.X11-unix/X<n>` socket belong to Smithay's `X11Lock`, owned by the
+  `XWayland` handle that is registered as an event source, not by the
+  Xwayland process. After `Ready` (or `Error`) the source disables itself
+  rather than being removed, so the handle and the lock stay alive for the
+  whole session, and the files go when the backend removes the source at
+  shutdown (see [Shutdown](#shutdown)). Xwayland runs in the compositor's
+  process group, so `Ctrl+C` in the terminal that started a nested
+  compositor reaches it too and it exits by itself; the files are removed
+  all the same.
 - **Coordinates.** The X11 root coordinate space is the compositor-global
   logical space, one to one. Managed windows are therefore configured with
   their store location whenever it changes (placement, move, resize), so
@@ -1147,7 +1369,10 @@ nkdhr implements the server side of `wlr-screencopy-unstable-v1`
   decides whether a popup grab may start, the rule that decides whether a
   touch dismisses the open popup-grab chain, the VT key
   tables, the VT chord rule and the VT path parser, the SDR-first scanout
-  format order and the fallback cursor image. The VT path parser and
+  format order, the fallback cursor image, the stop-signal handlers (only a
+  repeated `SIGTERM` or `SIGINT` forcing the exit, a hang-up never arming
+  it, the signal named, a signal ignored at startup left ignored) and the
+  calloop behaviour that `SourceGuard` exists for. The VT path parser and
   scanout format tests live in the TTY backend and run only in a build
   with the `tty` feature, which links against the system's libseat,
   libudev, libinput, GBM and libdrm.
@@ -1160,6 +1385,24 @@ nkdhr implements the server side of `wlr-screencopy-unstable-v1`
   `wl-copy`/`wl-paste`, X11 clients through XWayland) connect to the nested
   socket. Such a host has no real keyboard or pointer, so interactive input
   is verified on the TTY.
+- **Shutdown checks.** With a Wayland and an X11 client connected,
+  `SIGTERM`, `SIGINT` and `SIGHUP` each stop the compositor with the
+  `received <SIGNAL>, shutting down` line and exit status 0, after which
+  neither the `wayland-N` socket nor its `.lock` file remains in
+  `$XDG_RUNTIME_DIR`, and neither `/tmp/.X11-unix/X<n>` nor
+  `/tmp/.X<n>-lock` remains; closing the nested window leaves nothing
+  behind either. `SIGTERM` followed at once by `SIGHUP`, as logind sends
+  them, still shuts down cleanly and is logged as `SIGTERM`, while a second
+  `SIGTERM` handled before the teardown completes ends the process with
+  status 1. Two caveats for running these checks: start the compositor
+  from something that does not ignore `SIGINT` (an interactive shell, or
+  a script with `set -m`; a non-interactive shell starts background jobs
+  with `SIGINT` ignored, which the compositor then keeps ignoring, and
+  `SigIgn` in `/proc/<pid>/status` shows it), and send the second
+  `SIGTERM` only after the first was handled (after the `shutting down`
+  line, or a few milliseconds later), because the kernel merges two
+  identical signals that are both still pending. On the TTY, the VT returns to its text console, including when
+  the signal arrives while another VT is in front.
 - **VKMS lab** (`tools/vkms-lab.sh`). It builds one virtual DRM device
   through the kernel's VKMS configfs ABI with two complete pipelines (each
   connector with its own encoder, CRTC and primary plane), so both outputs

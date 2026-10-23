@@ -177,3 +177,15 @@ Every extension keeps these, whatever it does:
   hook point, in both the locked and the unlocked path, and no policy may
   consume `Ctrl+Alt+F1`…`F12` or `XF86Switch_VT_1`…`12`. It is the user's
   way out of a stuck session.
+- **Stopping stays clean.** `SIGTERM`, `SIGINT` and `SIGHUP` reach the
+  compositor only through the `ShutdownSignal` that `main` installs (see
+  [INTERNALS.md](INTERNALS.md#shutdown)). No extension blocks these
+  signals (calloop's `signalfd`-based `Signals` source does, and Xwayland
+  and every other child would inherit the blocked mask), installs its own
+  handler for them, or ends the process with `std::process::exit`. Anything
+  an extension owns that must be released when the compositor stops (a
+  socket or lock file, a device) is released on every way out of the
+  backend's `run` by holding its event source through a `SourceGuard`,
+  which removes the source explicitly, never left to the event loop being
+  dropped: that frees nothing while Smithay's X11 window manager holds a
+  handle to the loop.

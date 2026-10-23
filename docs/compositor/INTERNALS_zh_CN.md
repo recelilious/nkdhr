@@ -28,7 +28,9 @@ COMP-1、COMP-2、COMP-5、COMP-6 和 COMP-8 中后端与协议方面的工作�
 crates/nkdhr-compositor/
   Cargo.toml        特性：nested（默认）、tty
   src/
-    main.rs         后端选择
+    main.rs         信号处理函数、后端选择
+    shutdown.rs     ShutdownSignal：把 SIGTERM、SIGINT 和 SIGHUP
+                    作为一个被轮询的关闭请求
     state.rs        App：协议状态、seat、窗口存储、焦点策略、弹出窗口抓取、
                     Smithay handler
     windows.rs      ManagedWindow、WindowStore、初始放置规则与保持可达规则
@@ -39,7 +41,7 @@ crates/nkdhr-compositor/
                     帧回调、refresh
     cursor.rs       光标图像状态与内置的后备箭头
     backends/
-      mod.rs        Backend trait
+      mod.rs        Backend trait、SourceGuard
       winit.rs      嵌套后端
       tty.rs        DRM/KMS + GBM + libinput + libseat 后端
     protocols/
@@ -55,21 +57,26 @@ Cargo 特性让部署保持精简。`nested` 启用 Smithay 的 `backend_winit`�
 `backend_gbm`、`backend_libinput`、`backend_session_libseat`、`backend_udev`、
 `renderer_gl` 和 `renderer_multi`，外加 `smithay-drm-extras` 与 `thiserror`。
 Smithay 的基础特性是 `desktop`、`wayland_frontend` 和 `xwayland`。唯一的 nkdhr
-依赖是 `nkdhr-ipc`，由 outputs 监听器配合 `zbus` 使用。
+依赖是 `nkdhr-ipc`，由 outputs 监听器配合 `zbus` 使用。`signal-hook` 安装信号处
+理函数，`libc` 提供 `sigaction` 调用，用于读取合成器所继承的信号处置方式
+（见[关闭](#关闭)）。
 
 `backends/` 之外的一切都由两个后端共享，并且从不知道正在运行的是哪一个后端。后端
 拥有自己的事件循环、渲染器、Smithay `Output` 对象和呈现（presentation），并在固
 定的时机调用共享层：每个输入事件调用 `input::handle`，每次客户端调度之后立即调用
 `App::finish_client_dispatch`，每次循环迭代调用一次 `render::refresh`，合成每个
 输出时调用 `render::output_elements`，每个输出的渲染过程之后调用帧回调与输出归属
-辅助函数，每当重新解析布局时调用 `App::set_output_layout`。
+辅助函数，每当重新解析布局时调用 `App::set_output_layout`。它还会在每次循环迭代
+中检查一次关闭请求。
 
 ## 后端选择
 
-`main.rs` 根据其唯一的参数选择后端：`--nested` 运行 winit，`--tty` 运行 TTY 后
-端；不带参数时，仅当设置了 `WAYLAND_DISPLAY` 或 `DISPLAY` 时选择嵌套后端，否则选
-择 TTY。任何其他参数都是错误，选择一个其特性未被编译进来的后端同样是错误。两个后
-端都实现了只有一个方法的 `Backend` trait；两者都不是另一者的脚手架。
+`main.rs` 首先安装信号处理函数（`ShutdownSignal::install`，见[关闭](#关闭)），然
+后根据其唯一的参数选择后端：`--nested` 运行 winit，`--tty` 运行 TTY 后端；不带参
+数时，仅当设置了 `WAYLAND_DISPLAY` 或 `DISPLAY` 时选择嵌套后端，否则选择 TTY。任
+何其他参数都是错误，选择一个其特性未被编译进来的后端同样是错误。两个后端都实现了
+只有一个方法的 `Backend` trait，其 `run(self, &ShutdownSignal)` 在合成器停止时返
+回；两者都不是另一者的脚手架。
 
 ## `App`
 
@@ -513,17 +520,25 @@ OutputRenderElement<R>:
 它拥有一个名为 `nkdhr-compositor-nested-0`（制造商 `nkdhr`，型号 `nested`）的
 `Output`，其模式为窗口尺寸、60 Hz。窗口调整大小或新的 outputs 代次会重新解析布
 局。dmabuf 全局对象通过 `DmabufState::create_global`（协议版本 3）依据渲染器的格
-式列表创建。监听套接字来自 `ListeningSocket::bind_auto("wayland", 0..32)`，每次
-循环迭代接受一次连接。XWayland 在自己的 calloop 循环上运行，每次迭代以零超时调度
-一次。
+式列表创建。监听套接字来自 `ListeningSocket::bind_auto("wayland", 0..32)`，由
+`run` 自身而不是某个事件源持有，每次循环迭代接受一次连接。XWayland 在自己的
+calloop 循环上运行，每次迭代以零超时调度一次。
 
-每次迭代依次：调度 winit 事件（输入交给 `input::handle`）、按需重新解析布局、调
-用 `render::refresh`、渲染整个窗口、处理 screencopy、提交帧、更新输出归属、发送
-帧回调、接受一个待处理的客户端、调度 XWayland 和 Wayland 客户端、调用
-`App::finish_client_dispatch`，然后 flush。嵌套输出的 `wl_output` 全局对象的存活
-时间与进程相同。它没有自己的 damage 跟踪或帧节奏控制：每次迭代都重绘整个窗口，并
-以宿主所能接受的最快速度交换缓冲区，表现为持续的 CPU 占用。对于开发用后端来说这
-是可以接受的。它每五秒记录一次帧率和窗口数。
+每次迭代依次：调度 winit 事件（输入交给 `input::handle`）、在窗口被请求关闭或收
+到关闭信号时离开循环、按需重新解析布局、调用 `render::refresh`、渲染整个窗口、处
+理 screencopy、提交帧、更新输出归属、发送帧回调、接受一个待处理的客户端、调度
+XWayland 和 Wayland 客户端、调用 `App::finish_client_dispatch`，然后 flush。无论
+是出于这两种原因中的哪一种，还是因为出错而离开循环，都会执行[关闭](#关闭)中所述
+的拆除过程。嵌套输出的 `wl_output` 全局对象的存活时间与进程相同。它没有自己的
+damage 跟踪或帧节奏控制：每次迭代都重绘整个窗口，并以宿主所能接受的最快速度交换
+缓冲区，表现为持续的 CPU 占用。对于开发用后端来说这是可以接受的。它每五秒记录一
+次帧率和窗口数。
+
+它以嵌套输出的缩放比例，通过 `draw_render_elements` 绘制这些元素；TTY 后端的 DRM
+合成器从其 `Output` 取得的也是这一缩放比例。元素携带的是物理位置，但根据绘制时所
+用的缩放比例来确定自身尺寸（表面的逻辑尺寸或视口目标尺寸乘以该缩放比例），因此以
+任何其他缩放比例绘制，都会把窗口放在正确的位置，却以错误的尺寸绘制它们。相应地，
+内置的后备光标被赋予其逻辑尺寸，而从不是预先乘以缩放比例的尺寸。
 
 以下是从 Smithay 的示例中看不出来的细节：
 
@@ -584,9 +599,13 @@ calloop 定时器移除。立即移除会在客户端的绑定可能已经在路
 **事件循环。** 事件源包括 Wayland 套接字、display（一个 `Generic` 源，调度客户
 端，然后调用 `App::finish_client_dispatch`）、udev、libinput、会话通知器、每个设
 备一个用于 vblank 的 DRM 通知器，以及 XWayland。每次迭代以 250 ms 为上限进行调
-度，在 outputs 代次变化时重新解析布局，调用 `render::refresh`，渲染每个输出并
-flush 客户端。客户端提交、输入、vblank 和热插拔会立即唤醒循环；这个上限的存在只
-是为了让监听线程发布的配置变更在原本空闲的会话上也能在四分之一秒内生效。
+度，在收到关闭信号时离开循环，在 outputs 代次变化时重新解析布局，调用
+`render::refresh`，渲染每个输出并 flush 客户端。客户端提交、输入、vblank 和热插
+拔会立即唤醒循环；这个上限的存在，是为了让监听线程发布的配置变更以及关闭信号在原
+本空闲的会话上也能在四分之一秒内生效。信号本身不会唤醒循环：`epoll_wait` 被信号
+中断时，calloop 会重新调用它，而不是返回。会话暂停期间循环仍在继续调度，因此当另
+一个 VT 位于前台时，关闭请求同样会得到响应。无论是因为关闭信号、恢复失败
+（`running` 被清除）还是出错而离开循环，都会执行[关闭](#关闭)中所述的拆除过程。
 
 **呈现与 damage。** `DrmOutput::render_frame` 提供了 Smithay 的逐输出 damage 跟
 踪，因此未发生变化的输出会产生一个不被排队的空帧，空闲时的 GPU 占用保持在接近
@@ -617,6 +636,127 @@ libinput。激活时会恢复 libinput，以 connector 和平面已重置的状�
 触碰客户端、窗口或焦点。缓冲区重置很重要：新的 swapchain 槽位的缓冲区年龄
 （buffer age）为零，会强制完整重绘，而保留暂停前的年龄曾使第一次物理 VT 恢复测试
 只重绘了一块受损区域，直到下一个输入事件为止。
+
+## 关闭
+
+`SIGTERM`、`SIGINT` 和 `SIGHUP` 请求合成器停止。第一个这样的信号启动优雅关闭；在
+先前的 `SIGTERM` 或 `SIGINT` 之后到达的 `SIGTERM` 或 `SIGINT` 会立即结束进程。
+`SIGHUP` 不参与这一机制：它既不会强制退出，也不会使之后的信号能够强制退出，因为
+挂断信号通常紧跟在另一个信号之后到达。logind 以 `SendSIGHUP=yes` 停止登录会话的
+scope，因此结束会话（`loginctl terminate-session`、注销、关闭系统）会先投递
+`SIGTERM`，紧接着投递 `SIGHUP`；而关闭终端可能会让 shell 和内核各投递一次
+`SIGHUP`。如果挂断信号参与了强制退出，恰恰是这些普通的停止方式可能会跳过清理。
+
+合成器启动时已被忽略（`SIG_IGN`）的停止信号保持被忽略。否则 `signal-hook` 会用它
+的处理函数替换这一处置方式，但这是启动者的决定：`nohup` 忽略 `SIGHUP`，以便程序
+比其终端存活得更久；而没有作业控制的 shell 会在它于后台启动的命令中忽略
+`SIGINT`。
+
+**处理函数。** `ShutdownSignal::install`（`shutdown.rs`）是 `main` 所做的第一件
+事，早于后端创建任何套接字、锁文件、线程或子进程，因此不存在这样一个时刻：这些东
+西已经存在，而信号仍会以其默认动作杀死进程。对每个停止信号，它先通过 `sigaction`
+查询当前的处置方式，并跳过已被忽略的信号；否则它注册 `signal-hook` 的 flag 动
+作，这些动作按注册顺序运行。对于 `SIGTERM` 和 `SIGINT`：先是
+`flag::register_usize(signal, forcing, signal)`，然后是
+`flag::register_conditional_shutdown(signal, 1, forcing_seen)`，再然后是
+`flag::register(signal, forcing_seen)`。对于 `SIGHUP`，只有
+`flag::register_usize(signal, other, signal)`。第一次收到 `SIGTERM` 或 `SIGINT`
+时，信号编号被记录下来，条件关闭发现 `forcing_seen` 仍为 false 而什么也不做，随
+后 `forcing_seen` 被置位。之后再收到一次时，`forcing_seen` 已经置位，条件关闭便
+从处理函数中调用 `_exit(1)`。记录排在最前，是因为信号可能在两次注册之间到达：这
+样在每一种部分注册的状态下，该信号要么记录一个停止请求，要么什么也不做；而如果在
+记录存在之前就先置位 `forcing_seen`，落在这个窗口中的信号可能不会被记录，并使下
+一次普通的停止请求在没有清理的情况下强制退出。这些动作只触及原子变量和 `_exit`，
+两者都是异步信号安全的；合成器的其他任何部分都不在信号上下文中运行。
+
+`SIGHUP` 不置位 `forcing_seen` 之所以重要，是因为两个信号未必按发送顺序被处理。
+内核把发给进程的信号投递给任意一个未阻塞该信号的线程。当 logind 的 `SIGHUP` 到
+达、而主线程尚未运行其 `SIGTERM` 处理函数时，内核会优先把它交给另一个空闲线程
+（zbus 的线程或 `outputs` 监听器的线程），两个处理函数随后以任意顺序并发运行。假
+如挂断信号置位了 `SIGTERM` 处理函数所检查的标志，该 `SIGTERM` 就可能发现它已被置
+位，从而在没有清理的情况下结束进程；一个带八个空闲线程的独立复现程序大约每十次运
+行就有一次以这种方式结束。
+
+`ShutdownSignal::received` 在记录了 `SIGTERM` 或 `SIGINT` 时返回其名称，否则返回
+所记录的 `SIGHUP` 的名称（`signal_hook::low_level::signal_name`），在尚无信号到
+达时返回 `None`。两类信号分开记录，是因为出于同样的原因，无论是第一个还是最后一
+个被记录的信号，都不一定是 logind 的 `SIGTERM`。
+
+刻意不使用 calloop 的 `Signals` 事件源。它基于 `signalfd`，后者要求这些信号被阻
+塞，而它只在创建它的线程中阻塞这些信号。信号掩码会被此后创建的线程继承，并且在
+`fork` 和 `exec` 之后依然保留，因此 Xwayland 和其他每个子进程启动时都会阻塞
+`SIGTERM`、`SIGINT` 和 `SIGHUP`，无法被它们停止；而更早创建的线程（`outputs` 监
+听器的线程、zbus 的线程）不会阻塞它们，内核投递给这种线程的信号仍会在没有清理的
+情况下结束进程。通过 `sigaction` 安装的处理函数不改变任何掩码，并且 `exec` 会在
+子进程中把它们重置为默认动作。
+
+**轮询。** 每个后端在每次循环迭代中检查一次 `ShutdownSignal::received`。当它返回
+一个名称时，后端记录 `nkdhr-compositor: received <SIGNAL>, shutting down` 并离开
+其循环。这一行由 `shutdown::log_shutdown` 写出，它会忽略写入错误，而不是像
+`println!` 那样 panic：在 `SIGHUP` 之后，stdout 所指向的终端往往已经挂断。TTY 循
+环会在其 250 ms 的调度上限之内察觉（见 [TTY](#ttybackendsttyrs)）。嵌套循环在其
+下一次迭代时察觉，通常在一帧之内。不过，它的缓冲区交换要等待宿主的帧回调（适用
+EGL 默认的交换间隔 1；Smithay 从不改变它），而有些宿主会停止向它们不显示的窗口发
+送帧回调：GNOME 或 KDE 上被最小化的窗口，sway 或 Hyprland 上位于隐藏工作区的窗
+口。当嵌套窗口这样被隐藏时，停止请求只有在它再次显示之后才会生效。取消交换的节流
+会让嵌套后端变成忙循环，对于开发用后端来说并不值得；第二个 `SIGTERM` 或 `SIGINT`
+仍会立即结束它，不做清理。
+
+**为什么丢弃事件循环还不够。** 大多数在 `Drop` 时会释放进程之外某种资源的对象
+（TTY 的 Wayland 套接字、带有 X11 锁的 XWayland 句柄、TTY 的 DRM 通知器和
+libseat seat）都由 calloop 事件源持有，而 calloop 只有在指向某个循环的最后一个
+`LoopHandle` 消失时才会释放该循环的事件源。持有指向自身所在循环的句柄的回调构成
+一个引用环，它会让该循环及其中的每个事件源在 `EventLoop` 值被丢弃之后依然存活。
+运行 XWayland 的循环（TTY 唯一的循环、嵌套后端的 XWayland 循环）在 XWayland 一经
+生成就会出现这样的环：合成器自己的 XWayland 回调持有一个句柄以启动窗口管理器，而
+`X11Wm::start_wm` 注册 Smithay 的 X11 事件源时所用的回调也持有一个句柄，这一点
+nkdhr 无法改变。因此在 `run` 结束时丢弃 `EventLoop` 不会释放任何东西。每个后端转
+而通过一个 `SourceGuard`（`backends/mod.rs`）持有每一个这样的事件源，guard 被丢
+弃时会把该事件源从其循环中移除；`LoopHandle::remove` 会立即丢弃该事件源及其回
+调。这些 guard 的持有方式保证了离开 `run` 的每一条路径都会丢弃它们：在嵌套后端中
+由 `run` 的局部变量持有；在 TTY 上由 `TtyState` 持有，其 `Drop` 按下文给出的顺序
+移除它们，此外还由每个 DRM 设备的 `DeviceData` 持有。这涵盖了关闭信号、嵌套窗口
+关闭、TTY 恢复失败、循环中出错、事件源注册之后的启动失败（包括某个 DRM 设备初始
+化失败），以及经由 `run` 展开（unwind）的 panic，但在 TTY 上有一个例外：在持有
+wayland-backend 状态互斥锁期间引发的 panic 会使该锁中毒（poison），随后丢弃
+XWayland 句柄会在拆除过程中再次 panic，从而中止（abort）进程。Wayland 套接字在这
+一步之前就已释放，因此这种情况下损失的只是 X11 文件和之后的各个步骤。
+`backends/mod.rs` 中的一个单元测试固定了这一切所依赖的 calloop 行为。
+
+**释放的内容。**
+
+- Wayland 套接字。wayland-server 的 `ListeningSocket` 在被丢弃时删除
+  `$XDG_RUNTIME_DIR/wayland-N` 和 `wayland-N.lock`。在 TTY 上，它位于
+  `register_wayland_sources` 所注册的 `ListeningSocketSource` 中，该事件源会被移
+  除；嵌套后端则在 `run` 中、任何循环之外持有一个普通的 `ListeningSocket`，它在
+  返回时被丢弃。
+- XWayland。移除持有 Smithay `XWayland` 句柄的事件源（在 TTY 循环中由
+  `TtyState::start_xwayland` 注册，嵌套后端则把它注册在自己的 XWayland 循环中）
+  会丢弃该句柄：这会断开 Xwayland 客户端，从而使服务器退出，并丢弃句柄所拥有的
+  `X11Lock`，后者会删除 `/tmp/.X11-unix/X<n>` 和 `/tmp/.X<n>-lock`
+  （见 [XWayland](#xwayland)）。
+- 在 TTY 上，Wayland 套接字事件源最先被移除，XWayland 事件源其次；嵌套后端同样先
+  丢弃其套接字，再丢弃其 XWayland guard。然后是每个 DRM 设备
+  （`TtyState::devices`）连同其通知器事件源（`DeviceData::_notifier`）。Smithay
+  的 `DrmDeviceNotifier` 与设备共享其内部状态，因此只有当通知器和设备都已不在
+  时，原子 DRM 设备才会（在会话处于活动状态时）恢复它在启动时发现的 KMS 状态（文
+  本控制台），并释放 DRM master。然后是 libinput 事件源。libinput 上下文同样由
+  `TtyState` 持有，会话回调通过它挂起和恢复该上下文，因此仅移除事件源并不会关闭
+  输入设备；拆除过程会挂起该上下文，从而在 seat 仍处于打开状态时通过它关闭这些设
+  备。最后是会话通知器：`LibSeatSessionNotifier` 拥有 libseat seat
+  （`LibSeatSession` 只持有对它的弱引用），丢弃它会关闭 seat，从而把 VT 交还给
+  seat 管理器（logind 或 seatd）。
+
+文件最先被删除，因此之后失败的拆除步骤不会把它们遗留下来。优雅关闭以状态 0 从
+`main` 返回。
+
+**不会被清理的内容。** 强制退出（从处理函数中调用 `_exit(1)`）、`SIGKILL` 以及不
+展开的崩溃（诸如 `SIGSEGV` 的致命信号、abort）会跳过这一切。它们遗留下的东西会在
+下次启动时被接管或跳过：wayland-server 在能够锁住某个套接字名称的 `.lock` 文件时
+（内核已释放死亡进程的 `flock`）接管该名称，并在绑定之前删除过时的套接字；
+Smithay 的 `X11Lock` 会接管所记录的 PID 已不存在的锁文件，并在绑定之前删除过时的
+X11 套接字，而当所记录的 PID 属于一个正在运行的进程时，则改用下一个 display 编
+号。
 
 ## 协议
 
@@ -723,7 +863,23 @@ screencopy 则回读合成结果。
   它是会话的空闲与显示电源策略将要使用的唯一查询；该使用方目前尚不存在，因此该方
   法带有一个有文档说明的 `dead_code` 许可。
 - **分数缩放**（`wp_fractional_scale_manager_v1`）：首选缩放由[渲染](#渲染)中所
-  述的输出归属过程维护，该过程也为新表面提供初始首选值。
+  述的输出归属过程维护，该过程也为新表面提供初始首选值。客户端据此以该缩放比例绘
+  制缓冲区，并把表面的逻辑尺寸设为其视口目标尺寸，因此该协议只有与
+  `wp_viewporter` 一起才能使用。找不到 viewporter 的客户端改为以整数缩放比例绘制
+  （即向上取整后的分数缩放比例，与 `wl_output` 所公布的一致），合成器随后再将其
+  缩小。
+- **视口**（`wp_viewporter`）：`ProtocolState` 中的 `ViewporterState`，通过
+  `delegate_viewporter!` 调度。Smithay 在合成器已在使用的提交路径中完成协议工
+  作，因此 nkdhr 不添加任何自己的 handler。Smithay 随表面的第一个视口对象安装的
+  预提交钩子会拒绝没有目标尺寸的非整数源尺寸（`bad_size`）；随后
+  `on_commit_buffer_handler` 用 `ensure_viewport_valid` 对照缓冲区检查源矩形
+  （`out_of_buffer`），并把裁剪区域和目标尺寸存入表面的 `RendererSurfaceState`
+  视图。所有确定表面尺寸的地方都读取该视图，而从不读取缓冲区：渲染（经过裁剪和缩
+  放的表面元素）、`Window::bbox` 和 `Window::geometry`（并经由它们影响放置、保持
+  可达规则、输出归属和帧回调）、通过 `Window::surface_under` 和输入区域进行的命
+  中测试，以及 Smithay 的锁表面尺寸检查，它把视口目标尺寸与 configure 时给出的尺
+  寸进行比较（`dimensions_mismatch`）。Screencopy 回读的是合成后的帧，不需要任何
+  处理。nkdhr 中唯一的缓冲区查询，是在放置 toplevel 时查询是否已附加缓冲区。
 - **光标。** 客户端光标表面按其热点绘制；命名光标和背景使用内置的 24×24 箭头，并
   按输出缩放以保持其逻辑尺寸。
 - **XWayland shell**（`xwayland_shell_v1`）：把 X11 窗口与其 `wl_surface` 关联起
@@ -744,6 +900,12 @@ X11 支持是**进程内**的：Smithay 的 `XWayland` 生成 Xwayland 服务器
   （Nix profile、解包的诊断软件包）仍能正常工作。当服务器报告 `Ready` 时，运行
   `X11Wm::start_wm`，合成器记录 `XWayland ready on DISPLAY=:<n>`。缺少
   `Xwayland` 可执行文件时会记录日志，此外不予理会。
+- **Display 锁。** `/tmp/.X<n>-lock` 文件和 `/tmp/.X11-unix/X<n>` 套接字属于
+  Smithay 的 `X11Lock`，由注册为事件源的 `XWayland` 句柄拥有，而不是由 Xwayland
+  进程拥有。在 `Ready`（或 `Error`）之后，该事件源会禁用自身而不是被移除，因此句
+  柄和锁在整个会话期间都保持存活，这些文件在后端于关闭时移除该事件源时才被删除
+  （见[关闭](#关闭)）。Xwayland 运行在合成器的进程组中，因此在启动嵌套合成器的终
+  端中按 `Ctrl+C` 也会传到它那里，它会自行退出；这些文件照样会被删除。
 - **坐标。** X11 根坐标空间就是合成器全局逻辑空间，一一对应。因此受管窗口在其存
   储位置发生变化时（放置、移动、调整大小）都会被 configure 到该位置，从而 X 服务
   器所认为的每个窗口的位置始终与合成器一致；X11 客户端依据它来定位自己的
@@ -871,15 +1033,30 @@ screencopy 状态。
   状态、只有当前生效且已确认的锁才能解锁的规则、空闲抑制器计数、为弹出窗口抓取保
   留的用户操作 serial、决定弹出窗口抓取能否开始的规则、决定触摸是否解除打开的弹
   出窗口抓取链的规则、VT 按键表、VT 组合键规则和 VT 路径解析器、SDR 优先的
-  scanout 格式顺序以及后备光标图像。VT 路径解析器和 scanout 格式测试位于 TTY 后
-  端中，只在启用 `tty` 特性的构建中运行，该构建会链接系统的 libseat、libudev、
-  libinput、GBM 和 libdrm。需要真实客户端的协议行为（焦点、会话锁、抓取、输出归
-  属）由下面的冒烟运行来验证。
+  scanout 格式顺序、后备光标图像、停止信号处理函数（只有重复的 `SIGTERM` 或
+  `SIGINT` 才会强制退出、挂断信号从不使之后的信号能够强制退出、信号名称的报告、
+  启动时已被忽略的信号保持被忽略），以及 `SourceGuard` 为之而存在的 calloop 行
+  为。VT 路径解析器和 scanout 格式测试位于 TTY 后端中，只在启用 `tty` 特性的构建
+  中运行，该构建会链接系统的 libseat、libudev、libinput、GBM 和 libdrm。需要真实
+  客户端的协议行为（焦点、会话锁、抓取、输出归属）由下面的冒烟运行来验证。
 - **嵌套冒烟运行** 使用一个临时的 `weston --backend=headless --renderer=pixman`
   宿主，事后删除。真实客户端（`weston-simple-shm`、`weston-simple-egl`、
   `weston-simple-dmabuf-egl`、`foot`、GTK 4 应用程序、`grim`、
   `wl-copy`/`wl-paste`、经由 XWayland 的 X11 客户端）连接到嵌套套接字。这样的宿
   主没有真实的键盘或指针，因此交互式输入在 TTY 上验证。
+- **关闭检查。** 在连接了一个 Wayland 客户端和一个 X11 客户端的情况下，
+  `SIGTERM`、`SIGINT` 和 `SIGHUP` 各自都能停止合成器，输出
+  `received <SIGNAL>, shutting down` 一行并以退出状态 0 结束，之后
+  `$XDG_RUNTIME_DIR` 中既不残留 `wayland-N` 套接字，也不残留其 `.lock` 文件，
+  `/tmp/.X11-unix/X<n>` 和 `/tmp/.X<n>-lock` 也都不残留；关闭嵌套窗口同样不会留
+  下任何东西。像 logind 那样发送 `SIGTERM` 并紧接着发送 `SIGHUP`，仍能干净地关
+  闭，并记录为 `SIGTERM`；而在拆除完成之前被处理的第二个 `SIGTERM` 会以状态 1 结
+  束进程。运行这些检查时有两点注意事项：从一个不忽略 `SIGINT` 的环境启动合成器
+  （交互式 shell，或带 `set -m` 的脚本；非交互式 shell 启动后台作业时会忽略
+  `SIGINT`，合成器随后会继续忽略它，`/proc/<pid>/status` 中的 `SigIgn` 会显示这
+  一点）；并且只在第一个 `SIGTERM` 被处理之后（出现 `shutting down` 一行之后，或
+  者几毫秒之后）才发送第二个，因为内核会合并两个都仍处于待决状态的相同信号。在
+  TTY 上，VT 会回到其文本控制台，包括信号在另一个 VT 位于前台时到达的情况。
 - **VKMS 实验环境**（`tools/vkms-lab.sh`）。它通过内核的 VKMS configfs ABI 构建
   一个带有两条完整管线（每个 connector 各有自己的 encoder、CRTC 和主平面）的虚拟
   DRM 设备，因此两个输出同时 scanout，真实的 udev、connector 扫描器、原子 KMS、
