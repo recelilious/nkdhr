@@ -1,164 +1,176 @@
 # nkdhr
 
-*A self-contained Linux desktop environment built around a custom Wayland
-compositor where windows live on an infinite pannable, zoomable canvas.*
+*A self-contained Linux desktop environment built on its own Wayland
+compositor.*
 
 > [中文版本 / Chinese version](README_zh_CN.md)
 
-nkdhr is a self-contained desktop environment for Linux, built around a
-custom Wayland compositor whose window-management model is an infinite
-pannable, zoomable canvas: windows are placed freely in world coordinates,
-each output is a viewport into that world, and widgets can be pinned
-directly onto the canvas.
+nkdhr is a self-contained desktop environment for Linux. It runs on its own
+Wayland compositor, and a control plane brokers every system-level action
+(power, network, audio, brightness, session and nkdhr's own configuration)
+between the desktop and the underlying system services.
 
-All system-level UI — login screen, bar, launcher, notifications, settings,
-file manager, task manager, lock screen — is developed in this project on a
-single custom OpenGL ES UI stack, targeting a stock minimal Fedora Linux
-base.
+The project is in early development. What exists today is the control plane
+and the compositor's display protocol layer; the interaction design that
+sits on top of them is being redesigned (see [Status](#status)).
+Documentation lives in `docs/` in English and Simplified Chinese.
 
-The project is in early development. Accepted component documentation lives
-in `docs/` in English and Simplified Chinese.
+## Scope
+
+- **Lower boundary**: a stock minimal Fedora Linux installation (Fedora 44
+  "Everything", minimal) with nothing added except a working network
+  configuration and `git`. nkdhr is meant to take a machine from that state
+  to a complete desktop.
+- **Upper boundary**: applications at or above the level of a text editor
+  are not developed in this project. nkdhr only adapts them: the user
+  selects which one to use, and nkdhr generates its configuration once (or
+  again on explicit request), never forcing it over the user's own
+  customization.
+- **In between**, everything is developed in this project: the login
+  screen, bar, launcher, notifications, settings, file manager, task
+  manager and lock screen are nkdhr's own rather than third-party
+  components such as waybar or greetd.
 
 ## Status
 
-Phase 2 was accepted on 2026-08-08. Phase 3 — the shared rendering and UI
-toolkit — is now underway: UI-1 provides the renderer-independent primitive
-display list, batched Smithay GLES backend, deterministic golden-image oracle
-and live offscreen cross-check. Its 1,000-primitive native 2560×1600 benchmark
-reaches a 1.228 ms p95 GPU duration on the reference Iris Xe. UI-2 adds
-advanced Unicode shaping, CJK/emoji font fallback, color emoji, cached
-paragraph layout and bounded mask/color glyph atlases. Its 5,000-line,
-265,000-glyph scrolling benchmark records clipped text at 0.262 ms CPU p95.
-UI-3's style-neutral framework core is now implemented: retained generational
-identity, keyed reconciliation, finite constraint layout, queued reactive
-state, shared paint/hit order, focus scopes, pointer capture/hover, semantics
-and host-clocked animation. Its owner-reviewed product layer is now in
-production translation: typed density/spacing/radius/typography, glass-material
-and motion profiles plus the first public `GlassSurface`, `Button`, `Toggle`,
-`Slider`, `List`, `Scroll`, `Text` and `TextInput` implementations are present.
-The retained tree now owns a shared shaping/atlas resource boundary: public text,
-component labels and TextInput glyph hit testing render real Unicode/CJK/emoji
-through the same texture store. `Scroll` now adds overlay thumb dragging and
-track paging, Shift-wheel and Vim-key navigation, host-clocked interruptible
-inertia, bounded elastic feedback, opt-in snapping, exact nested-delta handoff,
-revisioned anchoring/minimal reveal and conditional tail following; reduced
-motion removes its spatial effects. `List` now adds stable-identity multi-
-selection with range/discontiguous input, real-focus keyboard/typeahead
-navigation, tree disclosure, explicit-handle pointer and keyboard reorder,
-virtual leading/trailing extent, loading rows, object double-click and context
-actions. `TextInput` now adds multiline/BiDi visual selection fragments, IME
-composition selection, multi-click/drag and visual/word/line navigation,
-targeted host clipboard requests, non-sensitive undo/redo, explicit formatter
-selection mapping and generation-ordered change/blur/submit validation. UI-3
-now also has a real painter-order backdrop-filter primitive: the scalar oracle
-and Smithay GLES path share rounded masks, transforms, clips and separable blur
-semantics, while prepared lists expose dependency-expanded compositor damage
-instead of recursively sampling prior glass pixels. `GlassSurface` emits that
-pass only for a capable host and retains the approved compensated fallback.
-The accepted Appearance & Interaction composition now lives in
-`nkdhr-settings` as a host-independent production view model rather than a
-test-only gallery. It implements the exact four responsive frames, independent
-navigation/content scrolling, grouped setting surfaces, professional inspector
-drawer, live reactive controls and undo/status feedback. Only the outer window
-requests backdrop blur; a deterministic full-CJK software golden and all four
-width oracles guard the result. The inspector now uses interruptible host-
-clocked panel/drawer entry and exit while preserving its input barrier through
-the complete narrow-screen transition; Reduced/Off removes spatial movement.
-Button, Toggle and Slider expose stable visible pending edges, and the latter
-two preserve requested versus effective values. Settings provides per-setting
-generation-ordered begin/complete feedback tokens, allowing independent
-concurrent pending states while stale same-setting replies cannot replace newer
-state; its global speed control scales every control, panel and fluid
-duration without changing the selected curves. The owner accepted the resting
-and transition frames, closing UI-3. The UI-4 framework is now complete without
-changing those visuals: `nkdhr-theme` defines versioned portable Tokyo
-Night/Nord and wallpaper-based profiles with sparse explicit overrides and a
-frozen fallback palette; `nkdhrd` validates and publishes the complete profile as one CTRL-5
-leaf; `nkdhr-ui` exposes immutable generation snapshots, typed semantic token
-reads and exact paint/layout diffs. Live roots synchronize at retained-tree
-boundaries, so valid color and metric changes apply without restart while an
-invalid candidate preserves the last-known-good generation. Appearance
-Settings now owns a host-independent profile-editing transaction: complete
-profiles preview through that runtime immediately, cancellation restores the
-saved baseline, and generation-ordered host requests commit through CTRL-5
-without blocking the UI thread. A separately atomic `theme.library` stores
-validated user profiles and supports save, copy and bounded JSON import/export;
-failed writes retain local work, while external changes are adopted or surfaced
-as conflicts instead of silently overwriting a preview. A deterministic,
-resource-bounded wallpaper adapter now turns host-decoded RGBA8 pixels into a
-complete readable semantic palette, with Auto/Dark/Light appearance plus
-colorfulness and contrast inputs. Live-linked generations are ordered so stale
-wallpaper jobs cannot win; only the frozen base/source changes, every explicit
-override survives, and clean results produce an atomic persistence request
-while an existing local edit remains visibly unsaved. A bounded, declarative
-extension-token registry completes the framework: reverse-DNS
-groups declare typed defaults and exact paint/layout impact, sparse profile
-values cannot replace built-ins or carry code, and invalid groups preserve the
-last-good snapshot. Registry-aware Settings/library transactions and retained
-widgets use the same immutable values. Multi-root tests prove that displays
-sharing one runtime still synchronize only at their own local activity
-boundaries, including direct jumps across skipped generations. UI-5 now runs
-the identical retained Settings surface through both a compositor-owned direct
-display list and a standalone Wayland/EGL window. UI-6 completes the typed
-interaction foundation: bounded hot-reloadable key/button/gesture documents,
-validated named actions, last-known-good snapshots, conflict diagnostics and
-one central instant/continuous dispatcher now own the existing canvas input
-vocabulary. Settings consumes the same effective snapshot rather than
-reconstructing it. Phase 3 is now in UI-7's owner-guided professional motion
-system. Its product and interaction specification is owner-approved;
-UI-7A adds the portable 2–64-anchor segmented curve data, deterministic f64
-compiler/evaluator, analytic overshoot/reverse validation, exact shape-
-preserving insertion and lossless migration from the existing cubics. UI-7B
-adds pinned preset revisions, atomic profile/family/component/transition
-inheritance with per-field provenance, compiled last-known-good theme snapshots
-and transactional preset-library persistence. Balanced revision 1 preserves
-the accepted output exactly; other approved style identities await owner-guided
-tuning. UI-7C adds the final Expressive/Standard/Reduced/Off policy runtime,
-state-and-velocity-preserving latest-target interruption, conserved multi-node
-selection mass, and deterministic endpoint-preserving semantic fluid/idle-water
-signals. UI-7D adds the style-neutral professional curve-editor document,
-consumer capability intersection, exact insertion, tangent/numeric editing,
-bounded transactional history, safe keyframe clipboard, normalized/real-time
-viewport, host-clock preview and unified targeted mouse/pen/touch/touchpad/
-keyboard input semantics. UI-7E now composes the owner-reviewed professional
-workspace, persistent transition editing, immutable preset browser and safe
-draft replacement flow in the real shared Settings surface. Its left
-navigation is the first policy-runtime visual adopter: one conserved selection
-mass stretches through intervening nodes, refracts their painted content and
-retargets continuously from the visible mass and tangent. Reduced/Off settle
-directly without spatial topology.
-The compositor now also has the first Phase-4 shell foundation: global
-numbered workspaces remain independently active per output group, preserve
-each local canvas/viewport/focus, swap safely when a visible number is
-requested elsewhere, and cross-fade window stacks on both nested and TTY
-backends. The shared typed bindings reserve Super+1…9/0 for this model and
-move persistent canvas marks to Super+Alt+digits. A separate retained shell
-surface now exists per physical output, follows hot theme generations, owns
-output-local input isolation and renders the confirmed calm top-center clock
-through the production clay/glass and real backdrop-blur path. Output hotplug
-removes the matching surface and capture/focus ownership atomically.
+### Control plane
+
+`nkdhr-ipc`, `nkdhrd` and `nkdhrctl` make up the control plane (Phase 1,
+complete). `nkdhrd` is an unprivileged `systemd --user` daemon on the
+session D-Bus (`org.nkdhr.*`). It reads battery, network, audio, brightness
+and session state from UPower, NetworkManager, PipeWire, the sysfs
+backlight and logind; performs mutating actions (brightness, volume and
+mute, Wi-Fi connection, power off, reboot, suspend) behind polkit; signals
+real changes without polling; and owns nkdhr's configuration: a
+schema-validated TOML store under `~/.config/nkdhr/` with get, set and
+watch over D-Bus, in which hand edits are re-validated and, when valid,
+applied immediately. `nkdhrctl` is its command-line front end. The one
+configuration namespace registered today is `outputs`, the compositor's
+display arrangement.
+
+### Compositor
+
+`nkdhr-compositor` is nkdhr's Wayland compositor, reduced to the display
+protocol layer:
+
+- **Backends**: a nested backend that runs as a window inside an existing
+  X11 or Wayland desktop for development, and a TTY backend that drives
+  every connected display through DRM/KMS from a local virtual terminal,
+  with libseat session handling, udev output hotplug, multi-GPU setups
+  (rendering on one GPU, scanout on another) and Ctrl+Alt+F1…F12
+  virtual-terminal switching.
+- **Clients**: native Wayland clients, and X11 applications through an
+  integrated XWayland server.
+- **Protocols**: clipboard and primary selection (shared between Wayland
+  and X11 in both directions), drag-and-drop, client-side decoration
+  negotiation, session locking (`ext-session-lock-v1`; the session stays
+  protected if the locker crashes), screen capture
+  (`wlr-screencopy-unstable-v1`), fractional scaling, pointer constraints,
+  relative pointer motion, touchpad gestures, touch input and idle-inhibit
+  requests.
+- **Displays**: several displays arranged in one shared logical space
+  through `nkdhrd`'s `outputs` namespace (position and scale per
+  connector, applied live); displays without an entry are placed side by
+  side automatically.
+- **Window behaviour**: a deliberately minimal, permanent default. New
+  windows open centred on the display under the pointer and take keyboard
+  focus; a click focuses and raises a window; applications move and resize
+  themselves through their own title bars, and the compositor carries out
+  those requests; decorations are always client-side. There is no
+  launcher, panel or workspace, and no compositor shortcut besides
+  virtual-terminal switching.
+
+The backend and protocol work was verified when the compositor milestones
+were accepted on 2026-08-08, including real-TTY operation, physical output
+hotplug and an eight-hour stability run; the
+[compositor internals](docs/compositor/INTERNALS.md#history) keep the
+record.
+
+### Interaction design
+
+The first interaction design was withdrawn on 2026-10-23 and is being
+redesigned. It comprised the infinite canvas window model (pannable,
+zoomable world coordinates, overview, output groups, pinned widgets,
+numbered workspaces and position marks), the shared rendering and UI
+toolkit, theming, the motion system, the integrated shell and the settings
+application. Its code, documentation and product acceptance matrix were
+removed from the main line and are preserved at the git tag
+`archive/interaction-v1`:
+
+```sh
+git checkout archive/interaction-v1      # the complete previous state
+git show archive/interaction-v1:<path>   # one file from it
+```
+
+Until a new design is settled, the compositor provides only the minimal
+window behaviour described above.
+
+### Crates
+
+| Crate | Role |
+|---|---|
+| `nkdhr-ipc` | D-Bus interface definitions and configuration types shared by every crate that talks to `nkdhrd` |
+| `nkdhrd` | Control-plane daemon |
+| `nkdhrctl` | Command-line front end to `nkdhrd` |
+| `nkdhr-compositor` | Wayland compositor: the display protocol layer, with nested and DRM/KMS backends |
+| `nkdhr-sessiond`, `nkdhr-greet`, `nkdhr-files`, `nkdhr-tasks` | Reserved for the login daemon, login screen, file manager and task manager; not implemented yet |
+
+## Building
+
+nkdhr is developed on Fedora Linux with a stable Rust toolchain (for
+example from [rustup](https://rustup.rs)). The workspace links against the
+following system libraries; install their development packages first:
+
+```sh
+sudo dnf install pipewire-devel clang-devel libinput-devel systemd-devel \
+    libseat-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel
+```
+
+Running X11 applications also needs Xwayland at runtime
+(`xorg-x11-server-Xwayland`).
+
+```sh
+cargo build --workspace                          # every crate; the compositor with its nested backend only
+cargo build -p nkdhr-compositor                  # the compositor, nested backend (default)
+cargo build -p nkdhr-compositor --features tty   # the compositor, nested and TTY backends
+```
+
+Run the compositor nested inside your current desktop, or with the TTY
+backend from a local virtual terminal:
+
+```sh
+cargo run -p nkdhr-compositor          # nested, inside an X11 or Wayland desktop
+target/debug/nkdhr-compositor --tty    # TTY, from a local virtual terminal (built with --features tty)
+```
+
+The compositor prints the `WAYLAND_DISPLAY` and `DISPLAY` values that
+applications connect to. The [compositor user guide](docs/compositor/USAGE.md)
+covers launching applications, arranging displays and leaving a TTY
+session. `nkdhrd` runs as a `systemd --user` service; its unit and polkit
+policy are in `crates/nkdhrd/resources/`, and there is no installer yet.
+The compositor also runs without `nkdhrd` and then arranges displays
+automatically.
+
+Before sending a change, run the checks every change has to pass:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
 
 ## Documentation
 
-- [Product completion and acceptance matrix](docs/product/FEATURE_MATRIX_zh_CN.md)
 - [Control plane user guide](docs/control-plane/USAGE.md) ·
   [中文](docs/control-plane/USAGE_zh_CN.md)
 - [Control plane internals](docs/control-plane/INTERNALS.md) ·
   [中文](docs/control-plane/INTERNALS_zh_CN.md)
-- [Canvas user guide](docs/canvas/USAGE.md) ·
-  [中文](docs/canvas/USAGE_zh_CN.md)
-- [Canvas internals](docs/canvas/INTERNALS.md) ·
-  [中文](docs/canvas/INTERNALS_zh_CN.md)
-- [Pinned-widget extension seam](docs/canvas/EXTENDING.md) ·
-  [中文](docs/canvas/EXTENDING_zh_CN.md)
-- [Theme extension tokens](docs/theme/EXTENDING.md) ·
-  [中文](docs/theme/EXTENDING_zh_CN.md)
-- [Shared UI user and application guide](docs/ui/USAGE.md) ·
-  [中文](docs/ui/USAGE_zh_CN.md)
-- [Shared UI internals](docs/ui/INTERNALS.md) ·
-  [中文](docs/ui/INTERNALS_zh_CN.md)
-- [Shared UI extension rules](docs/ui/EXTENDING.md) ·
-  [中文](docs/ui/EXTENDING_zh_CN.md)
+- [Compositor user guide](docs/compositor/USAGE.md) ·
+  [中文](docs/compositor/USAGE_zh_CN.md)
+- [Compositor internals](docs/compositor/INTERNALS.md) ·
+  [中文](docs/compositor/INTERNALS_zh_CN.md)
+- [Compositor extension seams](docs/compositor/EXTENDING.md) ·
+  [中文](docs/compositor/EXTENDING_zh_CN.md)
 
 ## License
 

@@ -22,6 +22,11 @@ journalctl --user -u nkdhrd
 
 完整安装的 nkdhr 会在会话启动流程中自动启用 `nkdhrd`,通常不需要手动管理。
 
+目前还没有安装程序:`crates/nkdhrd/resources/systemd/` 中的 unit 要求二进制位于
+`/usr/libexec/nkdhrd`。从源码检出运行时,请改为在它所服务的登录会话中直接运行
+守护进程:`cargo run -p nkdhrd`,或在构建后运行 `target/<profile>/nkdhrd`。这样
+运行时它把日志输出到所在的终端而不是 journal,按 `Ctrl+C` 即可停止。
+
 ## `nkdhrctl`
 
 `nkdhrctl` 是 `nkdhrd` 的命令行前端。每个子命令都通过 D-Bus 与正在运行的守护
@@ -87,27 +92,62 @@ nkdhrctl config set <key> <value>
 nkdhrctl config watch <prefix>
 ```
 
-key 是以点分隔的路径(例如 `theme.profile`、`canvas.grid_size` 和
-`canvas.outputs.<group>...`)。底层文件是 `~/.config/nkdhr/` 下的纯 TOML
-文件,可以直接用文本编辑器修改——`nkdhrd` 会检测到变化并重新校验,校验通过则
-生效,不通过则拒绝(保留上一个有效值)并在 journal 中记录诊断信息。
+key 是以点分隔的路径:先是 namespace,再按嵌套的表逐级向下,直到具体的值
+(例如 `outputs.eDP-1.scale`)。`get` 和 `set` 只针对单个值;`watch` 接受一个
+前缀——一个 namespace、更深一层的点分路径,或者省略以监听所有变化。底层文件是
+`~/.config/nkdhr/` 下的纯 TOML 文件,每个 namespace 一个;可以直接用文本编辑器
+修改——`nkdhrd` 会检测到变化并重新校验,校验通过则生效,不通过则拒绝(保留上一个
+有效值)并在 journal 中记录诊断信息。
 
-目前已注册的 namespace 是 `canvas` 和 `theme`。UI-4 把完整可移植主题保存为
-标量叶子 `theme.profile`:其中是一份带版本的 JSON 文档,由不可变内置/壁纸基础
-和稀疏显式覆盖组成。相邻标量叶子 `theme.library` 则是带版本且经过完整校验的
-用户已保存主题集合。UI-7 新增 `theme.motion_library`，保存有界、带版本且不可变的
-动画 preset `(id, revision)` 快照；活动 style 仍作为可选 `motion.style` 留在原子的
-`theme.profile` 文档中。每项操作都保持在一个叶子内,因此各自的导入、校验、发布和
-`Changed` 通知都是同一个原子事务。旧 `theme.toml` 会得到空动画资料库默认值，但不会
-改写活动 profile。壁纸主题始终携带冻结后的完整调色板,所以
-导出后即使没有原壁纸仍可使用;实时重新生成只替换基础,不会改写显式覆盖对象。
-可用 `nkdhrctl config get theme.profile`、`nkdhrctl config get theme.library`、
-`nkdhrctl config get theme.motion_library`
-查看,或用 `nkdhrctl config watch theme` 监听。设置应用提供即时预览、取消、保存、
-复制和有界 JSON 导入/导出;直接 `config set` 主要用于导入一份已经准备好且通过
-校验的 JSON 文档。壁纸解码仍由宿主负责;共享主题适配器以确定且有界的方式采样
-RGBA8 像素,只把生成后的完整调色板与来源身份写入可移植 profile,绝不会把图片
-像素存进 `theme.toml`。
+`nkdhrctl config set` 只会修改已经存在的值:未知的 key 会被拒绝而不是被创建,
+因此拼写错误永远不会凭空多出一项设置。
+
+#### 输出布局(`outputs`)
+
+目前唯一注册的 namespace 是 `outputs`,它告诉合成器每台显示器的位置和缩放比例。
+`~/.config/nkdhr/outputs.toml` 中每个输出对应一个表,表名是内核报告的接口
+(connector)名称(`eDP-1`、`DP-2`、`HDMI-A-1` 等):
+
+```toml
+[eDP-1]
+x = 0
+y = 0
+scale = 1.25
+
+[DP-1]
+x = 1536
+y = 0
+scale = 1.0
+```
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `x`、`y` | `0` | 输出左上角在合成器全局逻辑坐标空间中的位置,输出位置与指针共用这一坐标空间。取整数;负值同样有效,因为只有它与其他输出之间的相对布局才有意义。 |
+| `scale` | `1.0` | 逻辑缩放比例:每个逻辑像素对应的物理像素数。必须是大于 0 的有限数;`1.25` 这样的小数缩放会通过 fractional-scale 协议告知应用程序。 |
+
+位置使用逻辑坐标,因此一个输出占据的范围是其显示模式尺寸除以缩放比例:上例中
+1920×1200 的面板在 1.25 缩放下宽 1536 个逻辑像素,这就是 `DP-1` 从 `x = 1536`
+开始的原因。任何字段都可以省略并取默认值,因此单独一个 `[DP-1]` 表也是有效条目。
+未知字段、空的接口名称、包含 `.` 的名称或无效的缩放比例,都会让 `nkdhrd` 拒绝整个
+文件。接口名称不会与已连接的输出比对,因此拼错的表名(`[HDMI-A1]`)会被接受,只是
+匹配不到任何输出;请与输出接入时合成器打印的名称核对。
+
+没有对应表的输出不需要任何配置:合成器会自动排布它们——按接口名称顺序,在已配置
+的输出之后从左到右依次排开,缩放比例为 1.0。因此 `outputs.toml` 缺失或为空时,
+所有输出会并排摆放。合成器如何解析布局,见合成器用户指南
+([`../compositor/USAGE_zh_CN.md`](../compositor/USAGE_zh_CN.md))。
+
+由于 `config set` 从不创建 key,要为某个输出添加表,需要编辑文件;`nkdhrd` 会立即
+读取这一变化。此后,它的每个字段也都可以从命令行修改:
+
+```
+nkdhrctl config set outputs.eDP-1.scale 1.5
+nkdhrctl config set outputs.DP-1.x -1920   # 把 1920 宽的 DP-1 放到 eDP-1 左侧
+nkdhrctl config watch outputs
+```
+
+`~/.config/nkdhr/` 中不属于任何已注册 namespace 的 TOML 文件会被 `nkdhrd` 忽略,
+例如早期 nkdhr 版本写入的 `canvas.toml` 和 `theme.toml`;可以直接删除它们。
 
 ## 故障排查
 

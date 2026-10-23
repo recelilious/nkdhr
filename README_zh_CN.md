@@ -1,117 +1,142 @@
 # nkdhr
 
-*一个自成一体的 Linux 桌面环境，核心是自研 Wayland 合成器，
-窗口生活在一张可无限平移缩放的画布上。*
+*一个自成一体的 Linux 桌面环境，运行在自研的 Wayland 合成器之上。*
 
 > [English version / 英文版本](README.md)
 
-nkdhr 是一个自成一体的 Linux 桌面环境，核心是一个自研的 Wayland 合成器，
-其窗口管理模型是一张可无限平移、缩放的画布：窗口以世界坐标自由摆放，
-每个显示器是这个世界中的一个视口，组件（widget）可以直接钉在画布上。
+nkdhr 是一个自成一体的 Linux 桌面环境。它运行在自研的 Wayland 合成器之上，
+并由一个控制面在桌面与底层系统服务之间代理所有系统级操作（电源、网络、音频、
+亮度、会话以及 nkdhr 自身的配置）。
 
-所有系统级 UI——登录界面、状态栏、启动器、通知、设置、文件管理器、
-任务管理器、锁屏——全部在本项目中基于同一套自研 OpenGL ES UI 栈开发，
-目标运行环境是原版最小安装的 Fedora Linux。
+项目处于早期开发阶段。目前已有的是控制面和合成器的显示协议层；构建在它们之上的
+交互设计正在重新设计（见[状态](#状态)）。中英文文档保存在 `docs/` 目录。
 
-项目处于早期开发阶段。已验收组件的中英文文档保存在 `docs/` 目录。
+## 范围
+
+- **下边界**：原版最小安装的 Fedora Linux（Fedora 44 “Everything” 最小安装），
+  除可用的网络配置和 `git` 外不添加任何东西。nkdhr 的目标是把机器从这一状态
+  带到完整可用的桌面。
+- **上边界**：处于或高于“文本编辑器”生态位的应用不在本项目中开发。nkdhr 只对
+  它们做适配：由用户选择要使用的应用，nkdhr 为其生成一次配置（或在用户明确
+  要求时再次生成），绝不强行覆盖用户自己的定制。
+- **两者之间**的一切都在本项目中开发：登录界面、状态栏、启动器、通知、设置、
+  文件管理器、任务管理器和锁屏都是 nkdhr 自己的，而不是 waybar、greetd 之类的
+  第三方组件。
 
 ## 状态
 
-Phase 2 已于 2026-08-08 验收。Phase 3 共用渲染层和 UI 工具包现已启动：
-UI-1 已实现与渲染器解耦的图元显示列表、基于 Smithay GLES 的批处理后端、
-确定性的黄金图像测试基准和真实离屏 GLES 交叉验证。在参考 Iris Xe 上，
-其 2560×1600 原生分辨率、1,000 图元基准的 GPU p95 为 1.228 ms。
-UI-2 已实现高级 Unicode 塑形、CJK/emoji 字体回退、彩色 emoji、段落布局缓存，
-以及有界的遮罩/彩色字形图集；5,000 行、265,000 字形的裁剪滚动记录基准
-达到 CPU p95 0.262 ms。UI-3 无样式框架核心现已实现：保留式代际标识、
-keyed 重建、有限约束布局、排队式响应状态、统一绘制/命中顺序、焦点域、
-指针捕获与 hover、语义树及宿主时钟动画。经过共同确认的产品层现已
-转入生产代码：类型化密度、间距、圆角、排版、玻璃材质和运动配置，以及首批
-公共 `GlassSurface`、`Button`、`Toggle`、`Slider`、`List`、`Scroll`、
-`Text` 和 `TextInput` 实现已经存在。保留式组件树现已拥有统一的文字塑形/字形图集
-资源边界：公共文字、组件标签与 TextInput 字形命中均通过同一个纹理仓库绘制真实
-Unicode/CJK/emoji。`Scroll` 现已支持覆盖式滚动条拖拽与轨道翻页、Shift 滚轮和
-Vim 方向键、由宿主时钟驱动且可中断的惯性、有界弹性反馈、可选吸附、嵌套滚动
-精确余量传递、带版本的锚定/最小显露与条件式尾随；Reduced 模式会移除空间动效。
-`List` 现已支持基于稳定身份的多选、区间/离散输入、同步真实焦点的键盘与 typeahead
-导航、树形 disclosure、显式手柄鼠标/键盘重排、虚拟列表前后 extent、loading 行、
-对象双击与上下文操作。`TextInput` 现已支持多行/BiDi 视觉选区片段、IME 组合选区、
-多击/拖动与视觉/词/行导航、定向宿主剪贴板请求、非敏感内容撤销/重做、显式格式化
-选区映射，以及带 generation 顺序保护的 change/blur/submit 验证。UI-3 现在也已具备
-真正遵循绘制顺序的背景滤镜图元：标量 oracle 与 Smithay GLES 路径共享
-圆角遮罩、变换、裁剪和可分离模糊语义，prepared list 会向合成器公开扩张后的背景
-依赖 damage，避免递归采样上一帧的玻璃像素。`GlassSurface` 只在宿主确实具备能力时
-记录该 pass，并保留已确认的不支持时补偿填充。已确认的“外观与交互”组合现已进入
-`nkdhr-settings` 的宿主无关正式视图模型，不再只是测试 gallery：四档响应式框架、
-导航/内容独立滚动、共享分组表面、专业检查器抽屉、实时响应控件和撤销/状态反馈均已
-接入。只有最外层窗口会请求背景模糊；完整 CJK 的确定性软件 golden 与四档宽度 oracle
-守护结果。专业检查器现由宿主时钟驱动可中断的面板/抽屉进出，在整个窄屏退出过程中
-保持输入屏障；Reduced/Off 会移除空间位移。Button、Toggle、Slider 具备不改变布局的
-可见 pending 边缘，后两者同时保留请求值与实际生效值。Settings 通过按设置项独立的
-generation 排序 begin/complete token 支持并发等待，并阻止同一项的旧后端结果覆盖新请求；
-全局速度会缩放控件、面板和流体运动的全部时长而不改变曲线。项目所有者已经接受静态
-与转场帧，UI-3 因此收口。UI-4 框架现已在不改变这些视觉的前提下完成：
-`nkdhr-theme` 定义带版本、可移植的 Tokyo Night/Nord 和壁纸基础 profile，支持稀疏
-显式覆盖并始终携带冻结回退调色板；`nkdhrd` 把完整 profile 作为一个 CTRL-5 叶子
-校验和发布；`nkdhr-ui` 提供不可变 generation 快照、类型化语义 token 读取和精确的
-paint/layout 差异。live root 会在 retained tree 的安全边界同步，所以有效的颜色/尺寸
-变更无需重启即可生效，无效候选则保留上一个已知有效 generation。外观设置现已持有
-宿主无关的 profile 编辑事务：完整主题会立即通过同一 runtime 预览，取消时恢复已保存
-基线，generation 排序的宿主请求则通过 CTRL-5 异步提交，不会阻塞 UI 线程。另一个原子
-叶子 `theme.library` 保存经过完整校验的用户主题，并支持保存、复制和有界 JSON 导入/
-导出；写入失败会保留本地工作，外部变更则会被采用或显式标为冲突，不会静默覆盖预览。
-确定性且资源有界的壁纸适配器现可把宿主解码后的 RGBA8 像素转换为完整、可读的语义
-调色板，并提供自动/深色/浅色外观以及色彩强度、对比度输入。实时链接的生成任务按
-generation 排序，因此较慢的旧壁纸结果不能覆盖新结果；更新只替换冻结基础和来源，全部
-显式覆盖都会保留。干净状态会产生原子持久化请求，已有本地修改则继续明确保持未保存。
-一个有资源上限的声明式扩展 token 注册表完成了该框架：反向域名组声明类型化默认值和
-精确 paint/layout 影响，稀疏 profile 值不能替换内置项或携带代码，无效组会保留上一份
-有效快照。设置/资料库事务与 retained 组件使用同一份不可变值。多 root 测试证明共享
-runtime 的显示器仍只在各自本地活动边界同步，也覆盖直接跨过中间 generation 的情况。
-UI-5 现已让同一个 retained Settings 表面分别通过合成器直接 display list 与独立
-Wayland/EGL 窗口运行。UI-6 完成类型化交互基础：有界且可热重载的键盘/按钮/手势
-文档、经过验证的命名 action、最后有效快照、冲突诊断以及唯一的 instant/continuous
-dispatcher 共同接管已有画布输入词汇；Settings 直接消费同一份有效快照而不自行重建。
-Phase 3 现已进入 UI-7，其产品与交互规范已经与项目所有者共同确认；UI-7A 加入可移植
-的 2–64 锚点分段曲线数据、确定性 f64 编译/求值、解析式超调/反向校验、形状不变的
-精确新增点，以及从现有 cubic 无损迁移。UI-7B 进一步加入固定版本的预设快照、配置/
-语义族/稳定组件/具体过渡四层原子继承与逐字段来源、编译后最后有效主题快照，以及事务式
-预设资料库持久化。Balanced revision 1 精确保留已验收输出；其余已确认风格身份会等到
-与所有者共同校准后再获得参数。UI-7C 进一步加入最终
-Expressive/Standard/Reduced/Off 策略运行时、保留状态与速度且只追踪最新目标的中断、
-多节点选中质量守恒，以及确定且不改变端点的语义流体/常动水面信号。这些仍只是执行基础；
-UI-7D 现已加入无样式的专业曲线编辑文档、consumer 能力交集、精确插点、切线/数值
-编辑、有界事务历史、安全关键帧剪贴板、规范化/真实时间视口、宿主时钟预览，以及统一的
-定向鼠标/笔/触摸/触控板/键盘输入语义。UI-7E 已把经过所有者验收的专业工作区、
-持久化转场编辑器、不可变预设浏览器和安全草稿替换流程组合进真实共享 Settings；左侧
-导航也已成为首个策略运行时视觉采用者，以守恒选中质量穿越节点、折射其绘制内容，并从
-当前可见质量和切线连续重定向。Reduced/Off 会直接收敛而不保留空间拓扑。
-合成器也已有首个 Phase-4 shell 基础：全局编号工作区可在各输出组独立本地活动，保留
-各自画布、视口和焦点；请求另一组正在显示的编号时安全交换，并在嵌套与 TTY 后端对窗口
-堆栈做淡入淡出。统一类型化绑定把 Super+1…9/0 留给该模型，并将持久位置标记迁到
-Super+Alt+数字。
+### 控制面
+
+`nkdhr-ipc`、`nkdhrd` 和 `nkdhrctl` 组成控制面（Phase 1，已完成）。`nkdhrd`
+是运行在会话 D-Bus（`org.nkdhr.*`）上的无特权 `systemd --user` 守护进程。它从
+UPower、NetworkManager、PipeWire、sysfs 背光和 logind 读取电池、网络、音频、
+亮度和会话状态；在 polkit 授权下执行变更操作（亮度、音量与静音、连接 Wi-Fi、
+关机、重启、挂起）；只在真实变化时发出信号，从不轮询；并持有 nkdhr 的配置：
+`~/.config/nkdhr/` 下经 schema 校验的 TOML 存储，通过 D-Bus 提供 get、set 和
+watch，手动编辑的文件会被重新校验，有效时立即生效。`nkdhrctl` 是它的命令行
+前端。目前注册的唯一配置命名空间是 `outputs`，即合成器的显示器排布。
+
+### 合成器
+
+`nkdhr-compositor` 是 nkdhr 的 Wayland 合成器，现已精简为显示协议层：
+
+- **后端**：用于开发的嵌套后端，在已有的 X11 或 Wayland 桌面中以窗口形式运行；
+  以及 TTY 后端，从本地虚拟终端通过 DRM/KMS 驱动所有已连接的显示器，支持
+  libseat 会话管理、udev 输出热插拔、多 GPU 配置（在一块 GPU 上渲染，由另一块
+  GPU 扫描输出）以及 Ctrl+Alt+F1…F12 虚拟终端切换。
+- **客户端**：原生 Wayland 客户端，以及通过集成 XWayland 服务器运行的 X11 应用。
+- **协议**：剪贴板和主选区（在 Wayland 与 X11 之间双向共享）、拖放、客户端
+  装饰协商、会话锁定（`ext-session-lock-v1`；锁屏程序崩溃时会话仍保持受保护）、
+  屏幕捕获（`wlr-screencopy-unstable-v1`）、分数缩放、指针约束、相对指针运动、
+  触控板手势、触摸输入和空闲抑制请求。
+- **显示器**：多个显示器通过 `nkdhrd` 的 `outputs` 命名空间排布在同一个共享
+  逻辑空间中（按 connector 设置位置和缩放，实时生效）；没有条目的显示器会自动
+  并排放置。
+- **窗口行为**：刻意保持最小的永久默认行为。新窗口在指针所在的显示器上居中
+  打开并获得键盘焦点；点击窗口会使其获得焦点并置顶；应用通过自己的标题栏移动
+  和调整大小，由合成器执行这些请求；装饰始终由客户端绘制。没有启动器、面板或
+  工作区，除虚拟终端切换外也没有任何合成器快捷键。
+
+后端与协议部分已在 2026-08-08 合成器各里程碑验收时完成验证，包括真实 TTY 运行、
+物理输出热插拔和八小时稳定性测试；验证记录见
+[合成器内部实现](docs/compositor/INTERNALS_zh_CN.md#历史)。
+
+### 交互设计
+
+第一版交互设计已于 2026-10-23 撤回，正在重新设计。它包括无限画布窗口模型
+（可平移、缩放的世界坐标、总览、输出组、固定组件、编号工作区和位置标记）、
+共享渲染与 UI 工具包、主题、动效系统、集成 shell 以及设置应用。其代码、文档和
+产品验收矩阵已从主线移除，完整保存在 git 标签 `archive/interaction-v1` 中：
+
+```sh
+git checkout archive/interaction-v1      # 完整的先前状态
+git show archive/interaction-v1:<path>   # 查看其中的单个文件
+```
+
+在新设计确定之前，合成器只提供上文所述的最小窗口行为。
+
+### Crate
+
+| Crate | 作用 |
+|---|---|
+| `nkdhr-ipc` | 所有与 `nkdhrd` 通信的 crate 共用的 D-Bus 接口定义和配置类型 |
+| `nkdhrd` | 控制面守护进程 |
+| `nkdhrctl` | `nkdhrd` 的命令行前端 |
+| `nkdhr-compositor` | Wayland 合成器：显示协议层，带嵌套与 DRM/KMS 后端 |
+| `nkdhr-sessiond`、`nkdhr-greet`、`nkdhr-files`、`nkdhr-tasks` | 为登录守护进程、登录界面、文件管理器和任务管理器预留，尚未实现 |
+
+## 构建
+
+nkdhr 在 Fedora Linux 上开发，使用稳定版 Rust 工具链（例如通过
+[rustup](https://rustup.rs) 安装）。工作区会链接以下系统库，请先安装它们的
+开发包：
+
+```sh
+sudo dnf install pipewire-devel clang-devel libinput-devel systemd-devel \
+    libseat-devel mesa-libgbm-devel libdrm-devel libxkbcommon-devel
+```
+
+运行 X11 应用还需要在运行时安装 Xwayland（`xorg-x11-server-Xwayland`）。
+
+```sh
+cargo build --workspace                          # 所有 crate；合成器只带嵌套后端
+cargo build -p nkdhr-compositor                  # 合成器，嵌套后端（默认）
+cargo build -p nkdhr-compositor --features tty   # 合成器，嵌套与 TTY 后端
+```
+
+在当前桌面中以嵌套方式运行合成器，或在本地虚拟终端上使用 TTY 后端运行：
+
+```sh
+cargo run -p nkdhr-compositor          # 嵌套：在已有的 X11 或 Wayland 桌面中
+target/debug/nkdhr-compositor --tty    # TTY：在本地虚拟终端上（需以 --features tty 构建）
+```
+
+合成器会打印应用连接所需的 `WAYLAND_DISPLAY` 和 `DISPLAY` 值。启动应用、排布
+显示器和退出 TTY 会话的方法见[合成器用户指南](docs/compositor/USAGE_zh_CN.md)。
+`nkdhrd` 以 `systemd --user` 服务运行，其 unit 和 polkit 策略位于
+`crates/nkdhrd/resources/`；目前还没有安装程序。没有 `nkdhrd` 时合成器同样可以
+运行，并会自动排布显示器。
+
+提交改动前，请运行每个改动都必须通过的检查：
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
 
 ## 文档
 
-- [产品功能与验收证据矩阵](docs/product/FEATURE_MATRIX_zh_CN.md)
 - [控制面用户指南](docs/control-plane/USAGE_zh_CN.md) ·
   [English](docs/control-plane/USAGE.md)
 - [控制面内部实现](docs/control-plane/INTERNALS_zh_CN.md) ·
   [English](docs/control-plane/INTERNALS.md)
-- [画布用户指南](docs/canvas/USAGE_zh_CN.md) ·
-  [English](docs/canvas/USAGE.md)
-- [画布内部实现](docs/canvas/INTERNALS_zh_CN.md) ·
-  [English](docs/canvas/INTERNALS.md)
-- [固定组件扩展接口](docs/canvas/EXTENDING_zh_CN.md) ·
-  [English](docs/canvas/EXTENDING.md)
-- [主题扩展令牌](docs/theme/EXTENDING_zh_CN.md) ·
-  [English](docs/theme/EXTENDING.md)
-- [共享 UI 用户与应用开发指南](docs/ui/USAGE_zh_CN.md) ·
-  [English](docs/ui/USAGE.md)
-- [共享 UI 内部实现](docs/ui/INTERNALS_zh_CN.md) ·
-  [English](docs/ui/INTERNALS.md)
-- [共享 UI 扩展规则](docs/ui/EXTENDING_zh_CN.md) ·
-  [English](docs/ui/EXTENDING.md)
+- [合成器用户指南](docs/compositor/USAGE_zh_CN.md) ·
+  [English](docs/compositor/USAGE.md)
+- [合成器内部实现](docs/compositor/INTERNALS_zh_CN.md) ·
+  [English](docs/compositor/INTERNALS.md)
+- [合成器扩展接缝](docs/compositor/EXTENDING_zh_CN.md) ·
+  [English](docs/compositor/EXTENDING.md)
 
 ## 协议
 

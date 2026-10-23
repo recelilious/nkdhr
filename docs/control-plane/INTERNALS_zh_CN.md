@@ -193,34 +193,47 @@ Power、Network、Session 的监听器已确认能无错误地完成订阅,并�
 ## 配置存储(CTRL-5)
 
 CTRL-5 最初没有注册 namespace,因为 CTRL-1 … CTRL-4 没有真正需要持久化的
-设置,提前定义后续 schema 只会变成臆测。COMP-3 随后注册了 `canvas`,UI-4
-现在注册了 `theme`。后者包含标量 `profile` 与 `library` 叶子;其中的 JSON
-payload 必须先由共享的纯数据 crate `nkdhr-theme` 完成完整校验,活动 profile
-还要完成全部继承解析和跨字段校验,namespace 才能提交。每项操作使用一个叶子是
-有意为之:稀疏覆盖和已保存集合都包含数组与嵌套结构,而一次活动主题或资料库编辑
-必须作为一个原子整体切换。原本的通用引擎仍由
-`nkdhrd/src/backends/config_store.rs` 中仅供测试的 namespace 覆盖,每个真实
-namespace 还会补充自己的校验和 last-known-good 测试。后续阶段要注册新的
-namespace,做法是在一个 `serde` 派生的结构体
-上实现 `Namespace` trait(`backends::config_store::Namespace`——**位于
-`nkdhrd`,而非 `nkdhr-ipc`**:客户端仍使用下面这套通用的点分 key `Config1`
-IPC;UI-4 可移植 profile 的类型则放在守护进程校验和 UI 解析共同使用、与后端
-无关的 `nkdhr-theme` crate 中;其中的壁纸适配器只借用宿主已解码的 RGBA8 视图,
-最终仅保存生成调色板,不保存图片字节),然后在 `nkdhrd/src/main.rs`
-的 `static NAMESPACES: &[NamespaceSchema]` 列表里加一条
-`NamespaceSchema::of::<T>()`。
+设置,提前定义后续 schema 只会变成臆测。namespace 由需要它的组件注册。目前唯一
+注册的是 `outputs`(`nkdhrd/src/namespaces/outputs.rs`),即合成器的多输出布局。
+早先注册的 `canvas` 和 `theme` 两个 namespace 已于 2026-10-23 随读取它们的交互层
+和主题栈一并移除(保存在 `archive/interaction-v1` 标签中);它们的文件如今与其他
+未注册的文件一样被忽略。
+
+通用引擎仍由 `nkdhrd/src/backends/config_store.rs` 中仅供测试的 namespace 覆盖,
+每个真实 namespace 还会补充自己的校验和存储测试。后续阶段要注册新的 namespace,
+做法是在一个 `serde` 派生的类型上实现 `Namespace` trait
+(`backends::config_store::Namespace`——**位于 `nkdhrd`,而非 `nkdhr-ipc`**:
+客户端使用通用的点分 key IPC,校验是守护进程的职责),然后在
+`nkdhrd/src/main.rs` 的 `static NAMESPACES: &[NamespaceSchema]` 列表里加一条
+`NamespaceSchema::of::<T>()`。如果客户端也需要解码某个 namespace 的值,这些值的
+类型放在 `nkdhr-ipc` 中,由 `nkdhrd` 里的 namespace 包装:`outputs` 是包装
+`nkdhr_ipc::OutputPlacements` 的 `#[serde(transparent)]` newtype,合成器从
+`GetAll("outputs")` 解码的也正是这个类型。
 
 - 磁盘存储:`~/.config/nkdhr/` 下的 TOML 文件,每个逻辑 namespace 一个文件
-  (例如 `theme.toml`、`canvas.toml`);除用户自己用编辑器修改外,`nkdhrd`
-  是唯一的写入方。一个 namespace 的文件始终保存其完整的*物化*状态(每个
-  字段都存在,缺省值已经填好)——绝不是稀疏的差异——因为无论是来自
-  `Config1.Set` 还是一次重新校验过的外部编辑,每次写入都会先完整反序列化为
-  具体的 Rust 结构体,再重新序列化回磁盘。
-- schema:每个 namespace 都有一个带版本的 schema(一个带
-  `#[serde(deny_unknown_fields, default)]` 的 `serde` 派生结构体,外加一个
-  `Namespace::validate` 方法处理 `deny_unknown_fields` 表达不了的跨字段
-  校验);未知的 key 会被拒绝而不是被静默丢弃,因此无论是来自 `Config1.Set`
-  还是手动编辑的文件,拼写错误都会立刻暴露出来。
+  (例如 `outputs.toml`);除用户自己用编辑器修改外,`nkdhrd` 是唯一的写入方。
+  一个 namespace 的文件始终保存其完整的*物化*状态(每个字段都存在,缺省值已经
+  填好)——绝不是稀疏的差异——因为无论是来自 `Config1.Set` 还是一次重新校验过的
+  外部编辑,每次写入都会先完整反序列化为具体的 Rust 结构体,再重新序列化回磁盘。
+  文件名主干不是已注册 namespace 的文件,永远不会被读取、改写或删除,监听器也会
+  忽略对它的编辑。
+- schema:每个 namespace 都有一个带版本的 schema,其根有两种形态。常见的一种是
+  带 `#[serde(deny_unknown_fields, default)]` 的 `serde` 派生结构体,外加一个
+  `Namespace::validate` 方法处理 `deny_unknown_fields` 表达不了的跨字段校验。
+  条目名称在运行时才确定的 namespace 则以 map 为根——一个包装
+  `BTreeMap<String, T>` 的 `#[serde(transparent)]` newtype,上述两个属性加在
+  `T` 上——因此它的文件是每个条目一个 `[<条目>]` 表(`outputs.toml` 中的
+  `[eDP-1]`),每个值都可以用 `<namespace>.<条目>.<字段>` 寻址;它的 `validate`
+  会拒绝为空或包含 `.` 的条目名,因为点分 key 无法寻址这样的名称。无论哪种形态,
+  未知字段都会被拒绝而不是被静默丢弃,因此无论是来自 `Config1.Set` 还是手动
+  编辑的文件,字段名的拼写错误都会立刻暴露出来。不过,以 map 为根的 namespace
+  中的条目名是自由的 map key,不与任何实际存在的事物比对(`outputs` 的
+  connector 名称不会与已连接的输出比对),因此手动编辑的文件中拼错的条目名会被
+  接受,只是匹配不到任何东西。
+- 写入从不创建 key:`Config1.Set` 只会覆盖物化后的 namespace 中已经存在的值,
+  "拒绝未知 key"正是这样同样适用于写入(而不只是文件本身)的。对以 map 为根的
+  namespace 而言,这意味着新条目(例如新配置的 connector)要通过编辑文件添加;
+  条目一旦存在,它的值就可以像其他值一样通过 D-Bus 设置。
 - 监听:`nkdhrd` 用单个 `inotify` watch 监听整个配置目录
   (`IN_CLOSE_WRITE | IN_MOVED_TO`,同时覆盖原地保存和大多数编辑器及
   `nkdhrd` 自身写入所用的"写临时文件再改名"模式),根据发生变化的文件名
@@ -230,18 +243,25 @@ IPC;UI-4 可移植 profile 的类型则放在守护进程校验和 UI 解析共�
   上方"从被调度的方法之外发出信号"),因此监听器随后重新加载自己刚写入的
   文件只是一次同值空操作,不会产生重复信号。
 - IPC:`Config1.Get(key) -> Variant`、`Config1.Set(key, Variant)`、
-  用于批量读取的 `Config1.GetAll(prefix) -> {key: Variant}`(供第四阶段的
-  设置 UI 使用),以及一个 `Changed(key, Variant)` 信号。
+  用于批量读取的 `Config1.GetAll(prefix) -> {key: Variant}`(合成器就是这样
+  读取整个输出布局的),以及一个 `Changed(key, Variant)` 信号。每个发生变化或
+  新出现的值各触发一次 `Changed`。只删除了值的重新加载——只可能出现在以 map 为根
+  的 namespace 中,即删除某个条目的表——没有新值可携带,因此不会发出 `Changed`。
 - IPC 上支持的值类型:布尔值、整数、浮点数、字符串。数组和嵌套表在磁盘上的
   TOML 结构中是支持的(schema 可以自由嵌套),但暂不作为 `Get`/`Set` 的叶子
   值或 `GetAll` 的条目——目前还没有 namespace 需要这个能力,扩展
   `config_store::json_to_variant`/`variant_to_json` 中的转换逻辑只需要加一个
   match 分支,不需要重新设计。
-- 验证情况:`config_store.rs` 中有四个单元测试(文件缺失时使用默认值、
+- 验证情况:`config_store.rs` 中有五个单元测试(文件缺失时使用默认值、
   set 成功持久化并拒绝非法值、外部编辑触发带前后差异对比的重新加载、
-  `get_all` 的展平逻辑),都针对一个仅供测试使用的 namespace;此外还针对
-  真实守护进程用一个临时的 scratch namespace 做了一遍完整的 D-Bus 端到端
-  验证(`nkdhrctl config get/set/watch`)——详见 PROGRESS.md 的 CTRL-5 记录。
+  `get_all` 的展平逻辑、未注册 namespace 的文件保持原样),都针对一个仅供测试
+  使用的 namespace。`outputs` namespace 自己的测试则让一个以 map 为根的
+  namespace 走同一个引擎:`[<connector>]` 文件形态、`get_all` 展平为
+  `outputs.<connector>.<字段>`、`set` 覆盖已有值并拒绝未知 connector 或字段、
+  外部编辑添加 connector,以及非法输入时上一个有效值保持生效。此外还针对真实
+  守护进程用一个临时的 scratch namespace 对引擎的各条路径做了一遍完整的 D-Bus
+  端到端验证(`nkdhrctl config get/set/watch`)——详见 PROGRESS.md 的 CTRL-5
+  记录。
 
 ## 单实例保证
 

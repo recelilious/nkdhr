@@ -223,37 +223,58 @@ from real console input this session has no way to generate remotely
 
 CTRL-5 originally shipped with no namespace because CTRL-1 … CTRL-4 had no
 real persisted setting and defining later schemas early would have been
-speculative. COMP-3 subsequently registered `canvas`; UI-4 now registers
-`theme`. The latter contains scalar `profile` and `library` leaves whose JSON
-payloads are fully validated by the shared `nkdhr-theme` data crate before the
-namespace can commit; the active profile is additionally resolved through all
-inheritance and cross-field rules. One leaf per operation is intentional:
-sparse overrides and saved collections contain arrays and nested structures,
-while an active-theme or library edit must change as one atomic unit.
-The original generic engine remains covered by the test-only namespace in
+speculative. Namespaces are registered by the components that need them.
+The one registered today is `outputs` (`nkdhrd/src/namespaces/outputs.rs`),
+the compositor's multi-output arrangement. The `canvas` and `theme`
+namespaces registered earlier were removed on 2026-10-23 together with the
+interaction layer and theme stack that read them (preserved at the
+`archive/interaction-v1` tag); their files are now ignored like any other
+unregistered file.
+
+The generic engine remains covered by the test-only namespace in
 `nkdhrd/src/backends/config_store.rs`, and each real namespace adds its own
-validation/last-known-good tests. A later phase registers another namespace by
-implementing the `Namespace` trait (`backends::config_store::Namespace` — **in
-`nkdhrd`, not `nkdhr-ipc`**: clients use the generic dotted-key IPC; UI-4's
-portable profile types instead live in the backend-neutral `nkdhr-theme` crate
-shared by daemon validation and UI resolution; its wallpaper adapter consumes
-only a borrowed host-decoded RGBA8 view and stores the resulting palette, never
-image bytes) on a `serde`-derived struct and
-adding a `NamespaceSchema::of::<T>()` entry to
-the `static NAMESPACES: &[NamespaceSchema]` list in `nkdhrd/src/main.rs`.
+validation and store tests. A later phase registers another namespace by
+implementing the `Namespace` trait (`backends::config_store::Namespace` —
+**in `nkdhrd`, not `nkdhr-ipc`**: clients use the generic dotted-key IPC,
+and validation is the daemon's job) on a `serde`-derived type and adding a
+`NamespaceSchema::of::<T>()` entry to the
+`static NAMESPACES: &[NamespaceSchema]` list in `nkdhrd/src/main.rs`. When a
+client also has to decode a namespace's values, their types live in
+`nkdhr-ipc` and the namespace in `nkdhrd` wraps them: `outputs` is a
+`#[serde(transparent)]` newtype over `nkdhr_ipc::OutputPlacements`, the
+type the compositor decodes from `GetAll("outputs")`.
 
 - On disk: TOML files under `~/.config/nkdhr/`, one logical namespace per
-  file (e.g. `theme.toml`, `canvas.toml`); `nkdhrd` is the only writer other
-  than the user's own editor. A namespace's file always holds its full
+  file (e.g. `outputs.toml`); `nkdhrd` is the only writer other than the
+  user's own editor. A namespace's file always holds its full
   *materialized* state (every field present, defaults filled in) — never a
   sparse diff — because every write, whether from `Config1.Set` or a
   re-validated external edit, goes back through a full deserialize of the
-  concrete Rust struct before being re-serialized to disk.
-- Schema: each namespace has a versioned schema (a `serde`-derived struct
-  with `#[serde(deny_unknown_fields, default)]` plus a `Namespace::validate`
-  method for cross-field checks `deny_unknown_fields` can't express);
-  unknown keys are rejected, not silently dropped, so typos surface
-  immediately, both from `Config1.Set` and from a hand-edited file.
+  concrete Rust struct before being re-serialized to disk. A file whose stem
+  is not a registered namespace is never read, rewritten or deleted, and the
+  watcher ignores edits to it.
+- Schema: each namespace has a versioned schema with one of two root
+  shapes. The usual one is a `serde`-derived struct with
+  `#[serde(deny_unknown_fields, default)]` plus a `Namespace::validate`
+  method for cross-field checks `deny_unknown_fields` can't express. A
+  namespace whose entries are named at runtime instead has a map at its
+  root — a `#[serde(transparent)]` newtype over `BTreeMap<String, T>`, with
+  those two attributes on `T` — so its file is one `[<entry>]` table per
+  entry (`[eDP-1]` in `outputs.toml`) and every value is addressable as
+  `<namespace>.<entry>.<field>`; its `validate` rejects entry names that
+  are empty or contain `.`, which a dotted key could not address. Either
+  way, unknown fields are rejected, not silently dropped, so a misspelt
+  field surfaces immediately, both from `Config1.Set` and from a
+  hand-edited file. Entry names in a map-rooted namespace are free-form map
+  keys, though, checked against nothing that exists (an `outputs` connector
+  name is not compared with the connected outputs), so a misspelt entry
+  name in a hand-edited file is accepted and simply matches nothing.
+- Writes never create keys: `Config1.Set` only overwrites a value that
+  already exists in the materialized namespace, which is how "unknown keys
+  are rejected" applies to writes as well as to files. In a map-rooted
+  namespace this means a new entry (a newly configured connector, say) is
+  added by editing the file; once present, its values are settable over
+  D-Bus like any other.
 - Watching: `nkdhrd` watches the whole config directory via a single
   `inotify` watch (`IN_CLOSE_WRITE | IN_MOVED_TO`, catching both in-place
   saves and the atomic write-then-rename pattern most editors and
@@ -265,20 +286,30 @@ the `static NAMESPACES: &[NamespaceSchema]` list in `nkdhrd/src/main.rs`.
   above), so the watcher reloading its own write afterwards is a
   same-value no-op, not a duplicate signal.
 - IPC: `Config1.Get(key) -> Variant`, `Config1.Set(key, Variant)`,
-  `Config1.GetAll(prefix) -> {key: Variant}` for bulk reads (used by the
-  settings UI in Phase 4), and a `Changed(key, Variant)` signal.
+  `Config1.GetAll(prefix) -> {key: Variant}` for bulk reads (the compositor
+  reads its whole output arrangement this way), and a
+  `Changed(key, Variant)` signal. `Changed` fires once per value that
+  changed or newly appeared. A reload that only removes values — possible
+  only in a map-rooted namespace, by deleting an entry's table — has no new
+  value to carry and emits no `Changed`.
 - Value types over IPC: booleans, integers, floats and strings. Arrays and
   nested tables are supported as on-disk TOML structure (a schema can
   nest freely) but not yet as a `Get`/`Set` leaf value or `GetAll` entry —
   no namespace has needed one yet, and extending the conversion in
   `config_store::json_to_variant`/`variant_to_json` is a matter of adding a
   match arm, not a redesign.
-- Verification: four unit tests in `config_store.rs` (missing-file
+- Verification: five unit tests in `config_store.rs` (missing-file
   defaults, set-persists-and-rejects-invalid, external-edit reload with
-  before/after diffing, `get_all` flattening) against a test-only
-  namespace, plus a live run against the real daemon with a temporary
-  scratch namespace exercising the same paths end to end over D-Bus
-  (`nkdhrctl config get/set/watch`) — see PROGRESS.md's CTRL-5 entry.
+  before/after diffing, `get_all` flattening, files of unregistered
+  namespaces left untouched) against a test-only namespace. The `outputs`
+  namespace's own tests drive a map-rooted namespace through the same
+  engine: the `[<connector>]` file shape, `get_all` flattening to
+  `outputs.<connector>.<field>`, `set` overwriting an existing value and
+  rejecting an unknown connector or field, an external edit adding a
+  connector, and the last-known-good value surviving invalid input. A live
+  run against the real daemon with a temporary scratch namespace exercised
+  the engine's paths end to end over D-Bus (`nkdhrctl config get/set/watch`)
+  — see PROGRESS.md's CTRL-5 entry.
 
 ## Single-instance enforcement
 
